@@ -98,6 +98,15 @@ describe('API Client', () => {
       expect(hasApiKey()).toBe(true)
     })
 
+    it('does NOT clear token on 401 for proxied approval pending endpoints', async () => {
+      setApiKey('secret-key')
+      mockFetch.mockResolvedValue({ ok: false, status: 401, text: () => Promise.resolve('') })
+
+      await expect(request('/api/hermes/approval/pending?session_id=sess-1')).rejects.toThrow('API Error 401')
+      expect(hasApiKey()).toBe(true)
+    })
+
+
     it('throws error on non-401 failure', async () => {
       mockFetch.mockResolvedValue({
         ok: false,

@@ -10,7 +10,7 @@ proxyRoutes.all('/v1/{*any}', proxy)
 
 // Also register as middleware so it works reliably with nested .use()
 export async function proxyMiddleware(ctx: Context, next: Next) {
-  if (ctx.path.startsWith('/api/hermes/') || ctx.path.startsWith('/v1/')) {
+  if ((ctx.path.startsWith('/api/hermes/') && !ctx.path.startsWith('/api/hermes/approval/')) || ctx.path.startsWith('/v1/')) {
     return proxy(ctx)
   }
   await next()

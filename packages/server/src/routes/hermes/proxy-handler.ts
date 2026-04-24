@@ -2,22 +2,17 @@ import type { Context } from 'koa'
 import { config } from '../../config'
 import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { updateUsage } from '../../db/hermes/usage-store'
+import { tuiBridge } from '../../services/hermes/tui-bridge'
+import {
+  clearLivePendingApprovalForRun,
+  getSessionForRun,
+  setLivePendingApprovalForRun,
+  setRunSession,
+} from '../../services/hermes/run-state'
+
+export { setRunSession } from '../../services/hermes/run-state'
 
 function getGatewayManager() { return getGatewayManagerInstance() }
-
-// --- run_id → session_id mapping (in-memory, ephemeral) ---
-
-const runSessionMap = new Map<string, string>()
-
-export function setRunSession(runId: string, sessionId: string): void {
-  runSessionMap.set(runId, sessionId)
-  // Auto-cleanup after 30 minutes
-  setTimeout(() => runSessionMap.delete(runId), 30 * 60 * 1000)
-}
-
-function getSessionForRun(runId: string): string | undefined {
-  return runSessionMap.get(runId)
-}
 
 // --- Helpers ---
 
@@ -96,32 +91,56 @@ function buildProxyHeaders(ctx: Context, upstream: string): Record<string, strin
 const SSE_EVENTS_PATH = /^\/v1\/runs\/([^/]+)\/events$/
 
 /**
- * Parse SSE text chunks and extract run.completed events.
- * Returns the run_id if a run.completed was found.
+ * Parse SSE text chunks and extract approval / completion lifecycle events.
  */
-function extractRunCompletedFromChunk(chunk: string): string | null {
-  // SSE format: each line is "data: {...}\n\n"
+function processRunEventChunk(chunk: string, streamRunId?: string): void {
   const lines = chunk.split('\n')
   for (const line of lines) {
     if (!line.startsWith('data: ')) continue
     try {
       const data = JSON.parse(line.slice(6))
-      if (data.event === 'run.completed' && data.usage && data.run_id) {
-        const sessionId = getSessionForRun(data.run_id)
+      const eventRunId = typeof data?.run_id === 'string' && data.run_id
+        ? data.run_id
+        : streamRunId
+      if (!eventRunId) continue
+
+      if (streamRunId && eventRunId !== streamRunId && !getSessionForRun(eventRunId)) {
+        const streamSessionId = getSessionForRun(streamRunId)
+        if (streamSessionId) setRunSession(eventRunId, streamSessionId)
+      }
+
+      if (data.event === 'approval') {
+        setLivePendingApprovalForRun(eventRunId, {
+          approval_id: typeof data.approval_id === 'string' ? data.approval_id : undefined,
+          description: typeof data.description === 'string' ? data.description : undefined,
+          command: typeof data.command === 'string' ? data.command : undefined,
+          pattern_key: typeof data.pattern_key === 'string' ? data.pattern_key : undefined,
+          pattern_keys: Array.isArray(data.pattern_keys) ? data.pattern_keys.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+          pending_count: typeof data.pending_count === 'number' ? data.pending_count : undefined,
+        })
+        continue
+      }
+
+      if (data.event === 'run.completed' && data.usage) {
+        const sessionId = getSessionForRun(eventRunId)
         if (sessionId) {
           updateUsage(sessionId, data.usage.input_tokens, data.usage.output_tokens)
-          return data.run_id
         }
+        clearLivePendingApprovalForRun(eventRunId)
+        continue
+      }
+
+      if (data.event === 'run.failed') {
+        clearLivePendingApprovalForRun(eventRunId)
       }
     } catch { /* not JSON, skip */ }
   }
-  return null
 }
 
 /**
  * Stream an SSE response while intercepting run.completed events.
  */
-async function streamSSE(ctx: Context, res: Response): Promise<void> {
+async function streamSSE(ctx: Context, res: Response, streamRunId?: string): Promise<void> {
   if (!res.body) {
     ctx.res.end()
     return
@@ -147,13 +166,13 @@ async function streamSSE(ctx: Context, res: Response): Promise<void> {
       while ((newlineIdx = buffer.indexOf('\n\n')) !== -1) {
         const eventBlock = buffer.slice(0, newlineIdx)
         buffer = buffer.slice(newlineIdx + 2)
-        extractRunCompletedFromChunk(eventBlock)
+        processRunEventChunk(eventBlock, streamRunId)
       }
     }
 
     // Process remaining buffer
     if (buffer.trim()) {
-      extractRunCompletedFromChunk(buffer)
+      processRunEventChunk(buffer, streamRunId)
     }
   } finally {
     ctx.res.end()
@@ -183,6 +202,46 @@ export async function proxy(ctx: Context) {
         body = parsed
       } else if (parsed && typeof parsed === 'object') {
         body = JSON.stringify(parsed)
+      }
+    }
+
+    if (tuiBridge.isEnabled() && ctx.req.method === 'POST' && /\/v1\/runs$/.test(upstreamPath) && body) {
+      try {
+        const parsed = JSON.parse(body)
+        const sessionId = typeof parsed.session_id === 'string' ? parsed.session_id : ''
+        const input = typeof parsed.input === 'string'
+          ? parsed.input
+          : Array.isArray(parsed.input)
+            ? String(parsed.input.at(-1)?.content || '')
+            : ''
+        if (sessionId && input) {
+          const run = await tuiBridge.startRun(input, sessionId, Array.isArray(parsed.conversation_history) ? parsed.conversation_history : [])
+          ctx.status = 200
+          ctx.set('Content-Type', 'application/json')
+          ctx.body = run
+          return
+        }
+      } catch (err) {
+        ctx.status = 502
+        ctx.body = { error: { message: `Bridge error: ${err instanceof Error ? err.message : String(err)}` } }
+        return
+      }
+    }
+
+    const bridgeSseMatch = upstreamPath.match(SSE_EVENTS_PATH)
+    if (tuiBridge.isEnabled() && ctx.req.method === 'GET' && bridgeSseMatch) {
+      try {
+        ctx.status = 200
+        ctx.set('Content-Type', 'text/event-stream')
+        ctx.set('Cache-Control', 'no-cache')
+        ctx.set('X-Accel-Buffering', 'no')
+        for await (const event of tuiBridge.stream(bridgeSseMatch[1])) {
+          ctx.res.write(`data: ${JSON.stringify(event)}\n\n`)
+        }
+        ctx.res.end()
+        return
+      } catch {
+        // Non-bridge run id; use the upstream SSE stream below.
       }
     }
 
@@ -219,8 +278,13 @@ export async function proxy(ctx: Context) {
 
           try {
             const result = JSON.parse(resBody)
-            if (result.run_id) {
-              setRunSession(result.run_id, parsed.session_id)
+            const runId = typeof result.run_id === 'string' && result.run_id
+              ? result.run_id
+              : typeof result.id === 'string' && result.id
+                ? result.id
+                : undefined
+            if (runId) {
+              setRunSession(runId, parsed.session_id)
             }
           } catch { /* response not JSON, ignore */ }
           return
@@ -232,7 +296,7 @@ export async function proxy(ctx: Context) {
     // Intercept SSE streams for /v1/runs/{id}/events
     const sseMatch = upstreamPath.match(SSE_EVENTS_PATH)
     if (sseMatch) {
-      await streamSSE(ctx, res)
+      await streamSSE(ctx, res, sseMatch[1])
       return
     }
 

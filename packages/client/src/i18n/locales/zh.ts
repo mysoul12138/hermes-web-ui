@@ -152,6 +152,14 @@ export default {
     arguments: '参数',
     result: '结果',
     truncated: '... (已截断)',
+    approvalTitle: '需要审批',
+    approvalAllowOnce: '仅本次允许',
+    approvalAllowSession: '本会话允许',
+    approvalAllowAlways: '始终允许',
+    approvalDeny: '拒绝',
+    approvalPendingCount: '当前第 {current} 个，共 {total} 个待审批',
+    approvalDangerousCommand: 'Hermes 想执行一个可能有风险的命令：',
+    approvalResponding: '正在提交审批结果...',
   },
 
   // 定时任务

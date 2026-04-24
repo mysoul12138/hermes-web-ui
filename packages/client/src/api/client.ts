@@ -51,7 +51,8 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   // Proxied gateway requests should not trigger logout
   const isLocalBff = !path.startsWith('/api/hermes/v1/') &&
     !path.startsWith('/api/hermes/jobs') &&
-    !path.startsWith('/api/hermes/skills')
+    !path.startsWith('/api/hermes/skills') &&
+    !path.startsWith('/api/hermes/approval')
 
   if (res.status === 401 && isLocalBff) {
     clearApiKey()

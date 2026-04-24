@@ -28,11 +28,37 @@ export interface RunEvent {
   preview?: string
   timestamp?: number
   error?: string
+  approval_id?: string
+  description?: string
+  command?: string
+  pattern_key?: string
+  pattern_keys?: string[]
+  pending_count?: number
   usage?: {
     input_tokens: number
     output_tokens: number
     total_tokens: number
   }
+}
+
+function emitParsedEvent(eventName: string, raw: string, onEvent: (event: RunEvent) => void) {
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') {
+      const normalized = parsed as RunEvent
+      if (!normalized.event) normalized.event = eventName
+      onEvent(normalized)
+      return normalized
+    }
+  } catch {
+    const fallback = { event: eventName, delta: raw }
+    onEvent(fallback)
+    return fallback
+  }
+
+  const fallback = { event: eventName, delta: raw }
+  onEvent(fallback)
+  return fallback
 }
 
 export async function startRun(body: StartRunRequest): Promise<StartRunResponse> {
@@ -62,19 +88,18 @@ export function streamRunEvents(
 
   source.onmessage = (e) => {
     if (closed) return
-    try {
-      const parsed = JSON.parse(e.data)
-      onEvent(parsed)
-
-      if (parsed.event === 'run.completed' || parsed.event === 'run.failed') {
-        closed = true
-        source.close()
-        onDone()
-      }
-    } catch {
-      onEvent({ event: 'message', delta: e.data })
+    const parsed = emitParsedEvent('message', e.data, onEvent)
+    if (parsed?.event === 'run.completed' || parsed?.event === 'run.failed') {
+      closed = true
+      source.close()
+      onDone()
     }
   }
+
+  source.addEventListener('approval', (e: MessageEvent) => {
+    if (closed) return
+    emitParsedEvent('approval', e.data, onEvent)
+  })
 
   source.onerror = () => {
     if (closed) return

@@ -152,6 +152,14 @@ export default {
     arguments: 'Arguments',
     result: 'Result',
     truncated: '... (truncated)',
+    approvalTitle: 'Approval required',
+    approvalAllowOnce: 'Allow once',
+    approvalAllowSession: 'Allow for session',
+    approvalAllowAlways: 'Always allow',
+    approvalDeny: 'Deny',
+    approvalPendingCount: 'Showing {current} of {total} pending approvals',
+    approvalDangerousCommand: 'Hermes wants to run a potentially risky command:',
+    approvalResponding: 'Submitting approval response...',
   },
 
   // Jobs

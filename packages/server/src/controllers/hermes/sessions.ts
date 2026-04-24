@@ -9,6 +9,36 @@ import { deleteUsage, getUsage, getUsageBatch } from '../../db/hermes/usage-stor
 import { getModelContextLength } from '../../services/hermes/model-context'
 import { logger } from '../../services/logger'
 
+function bridgeSessionFallbackEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.HERMES_WEBUI_BRIDGE || '')
+}
+
+function createBridgeSessionFallback(id: string) {
+  const now = Date.now() / 1000
+  return {
+    id,
+    source: 'webui-bridge',
+    model: '',
+    title: null,
+    preview: '',
+    started_at: now,
+    ended_at: null,
+    last_active: now,
+    message_count: 0,
+    tool_call_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    billing_provider: null,
+    estimated_cost_usd: 0,
+    actual_cost_usd: null,
+    cost_status: 'unknown',
+    messages: [],
+  }
+}
+
 function parseHumanOnly(value: unknown): boolean {
   if (typeof value !== 'string') return true
   return value !== 'false' && value !== '0'
@@ -99,6 +129,10 @@ export async function search(ctx: any) {
 export async function get(ctx: any) {
   const session = await hermesCli.getSession(ctx.params.id)
   if (!session) {
+    if (bridgeSessionFallbackEnabled()) {
+      ctx.body = { session: createBridgeSessionFallback(ctx.params.id) }
+      return
+    }
     ctx.status = 404
     ctx.body = { error: 'Session not found' }
     return

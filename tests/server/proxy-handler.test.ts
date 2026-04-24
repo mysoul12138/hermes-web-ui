@@ -218,6 +218,34 @@ describe('POST /v1/runs — session_id capture', () => {
     expect(ctx.res.end).toHaveBeenCalled()
   })
 
+  it('captures id as the run id from POST /v1/runs when run_id is absent', async () => {
+    const runId = 'run-id-only-123'
+    const sessionId = 'session-id-only'
+    const responseBody = JSON.stringify({ id: runId, status: 'queued' })
+
+    mockFetch.mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: () => Promise.resolve(responseBody),
+      body: null,
+    })
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/runs',
+      req: { method: 'POST' },
+      request: {
+        body: { session_id: sessionId, input: 'hello', model: 'gpt-4' },
+      },
+    })
+
+    await proxy(ctx)
+
+    const { getSessionForRun } = await import('../../packages/server/src/services/hermes/run-state')
+    expect(getSessionForRun(runId)).toBe(sessionId)
+    expect(ctx.res.write).toHaveBeenCalledWith(responseBody)
+    expect(ctx.res.end).toHaveBeenCalled()
+  })
+
   it('falls through to normal stream when POST body has no session_id', async () => {
     const responseBody = JSON.stringify({ run_id: 'r1', status: 'queued' })
     mockFetch.mockResolvedValue({
@@ -333,6 +361,74 @@ describe('SSE stream interception — run.completed', () => {
     await proxy(ctx)
 
     expect(mockUpdateUsage).not.toHaveBeenCalled()
+  })
+
+  it('uses the events URL run id when an approval event omits run_id', async () => {
+    const runId = 'run-url-approval'
+    const sessionId = 'session-url-approval'
+    setRunSession(runId, sessionId)
+
+    const sseData = [
+      `data: ${JSON.stringify({ event: 'approval', approval_id: 'appr-url', command: 'bash -lc "printf approval_map_variant"' })}\n\n`,
+    ]
+
+    mockFetch.mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSSEBody(sseData),
+    })
+
+    const ctx = createMockCtx({
+      path: `/api/hermes/v1/runs/${runId}/events`,
+      search: '',
+    })
+
+    await proxy(ctx)
+
+    const { getLivePendingApproval } = await import('../../packages/server/src/services/hermes/run-state')
+    expect(getLivePendingApproval(sessionId)).toEqual({
+      approval_id: 'appr-url',
+      command: 'bash -lc "printf approval_map_variant"',
+      description: undefined,
+      pattern_key: undefined,
+      pattern_keys: undefined,
+      pending_count: undefined,
+    })
+  })
+
+  it('maps approval events whose run_id differs from the events URL run id', async () => {
+    const streamRunId = 'run-stream'
+    const eventRunId = 'run-stream:approval'
+    const sessionId = 'session-stream'
+    setRunSession(streamRunId, sessionId)
+
+    const sseData = [
+      `data: ${JSON.stringify({ event: 'approval', run_id: eventRunId, approval_id: 'appr-variant', command: 'bash -lc "printf approval_map_variant"' })}\n\n`,
+    ]
+
+    mockFetch.mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/event-stream' }),
+      body: createSSEBody(sseData),
+    })
+
+    const ctx = createMockCtx({
+      path: `/api/hermes/v1/runs/${streamRunId}/events`,
+      search: '',
+    })
+
+    await proxy(ctx)
+
+    const { getLivePendingApproval, getSessionForRun } = await import('../../packages/server/src/services/hermes/run-state')
+    expect(getSessionForRun(eventRunId)).toBe(sessionId)
+    expect(getLivePendingApproval(sessionId)).toEqual({
+      approval_id: 'appr-variant',
+      command: 'bash -lc "printf approval_map_variant"',
+      description: undefined,
+      pattern_key: undefined,
+      pattern_keys: undefined,
+      pending_count: undefined,
+    })
   })
 
   it('does not call updateUsage for non-run.completed events', async () => {

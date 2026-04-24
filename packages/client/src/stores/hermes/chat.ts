@@ -1,4 +1,10 @@
 import { startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import {
+  getPendingApproval,
+  respondApproval as respondApprovalApi,
+  type ApprovalChoice,
+  type PendingApproval,
+} from '@/api/hermes/approval'
 import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionSummary } from '@/api/hermes/sessions'
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
@@ -63,6 +69,76 @@ async function uploadFiles(attachments: Attachment[]): Promise<{ name: string; p
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
   const data = await res.json() as { files: { name: string; path: string }[] }
   return data.files
+}
+
+function tryParseJson(value?: string | null): Record<string, any> | null {
+  if (!value?.trim()) return null
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null
+  } catch {
+    return null
+  }
+}
+
+function extractApprovalCommandFromArgs(toolArgs?: string): string | undefined {
+  const parsed = tryParseJson(toolArgs)
+  return typeof parsed?.command === 'string' && parsed.command.trim()
+    ? parsed.command.trim()
+    : undefined
+}
+
+function extractCommandFromToolPreview(preview?: string): string | undefined {
+  const value = preview?.trim()
+  if (!value) return undefined
+  return value.replace(/^terminal\s+/i, '').trim() || value
+}
+
+function extractPendingApprovalFromMessages(messages: Message[]): PendingApproval | null {
+  const lastUserIdx = [...messages].map(m => m.role).lastIndexOf('user')
+  const relevantMessages = lastUserIdx >= 0 ? messages.slice(lastUserIdx + 1) : messages
+
+  for (let i = relevantMessages.length - 1; i >= 0; i -= 1) {
+    const msg = relevantMessages[i]
+
+    if (msg.role === 'assistant') {
+      const text = msg.content.trim()
+      if (!text) continue
+      if (/approval_required|need approval|需要审批|blocked/i.test(text)) continue
+      return null
+    }
+
+    if (msg.role === 'tool') {
+      if (!msg.toolResult) {
+        if (msg.toolStatus === 'running') return null
+        continue
+      }
+      const parsed = tryParseJson(msg.toolResult)
+      if (parsed?.status !== 'approval_required') {
+        return null
+      }
+
+      const command = typeof parsed.command === 'string' && parsed.command.trim()
+        ? parsed.command.trim()
+        : extractApprovalCommandFromArgs(msg.toolArgs)
+
+      return {
+        approval_id: typeof parsed.approval_id === 'string' && parsed.approval_id.trim() ? parsed.approval_id.trim() : undefined,
+        description: typeof parsed.description === 'string' && parsed.description.trim()
+          ? parsed.description.trim()
+          : undefined,
+        command,
+        pattern_key: typeof parsed.pattern_key === 'string' && parsed.pattern_key.trim()
+          ? parsed.pattern_key.trim()
+          : undefined,
+        pattern_keys: Array.isArray(parsed.pattern_keys)
+          ? parsed.pattern_keys.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          : undefined,
+      }
+    }
+  }
+
+  return null
 }
 
 function mapHermesMessages(msgs: HermesMessage[]): Message[] {
@@ -172,6 +248,9 @@ const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
 const POLL_INTERVAL_MS = 2000
+function isBridgeFallbackSession(detail: { source?: string; messages?: unknown[] } | null | undefined): boolean {
+  return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
+}
 const POLL_STABLE_EXITS = 3 // 3 × 2s = 6s of no change → assume run finished
 const LIVE_BADGE_WINDOW_MS = 5 * 60 * 1000
 
@@ -198,6 +277,14 @@ function legacyInFlightKey(sid: string): string | null { return getProfileName()
 interface InFlightRun {
   runId: string
   startedAt: number
+}
+
+interface ApprovalState {
+  pending: PendingApproval | null
+  pendingCount: number
+  visibleSince: number
+  signature: string
+  submitting: boolean
 }
 
 function loadJson<T>(key: string): T | null {
@@ -324,9 +411,17 @@ export const useChatStore = defineStore('chat', () => {
   )
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
+  const approvalsBySession = ref<Record<string, ApprovalState>>({})
+  const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
+  const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
 
   const activeSession = ref<Session | null>(null)
   const messages = computed<Message[]>(() => activeSession.value?.messages || [])
+  const activeApproval = computed<ApprovalState | null>(() => {
+    const sid = activeSessionId.value
+    if (!sid) return null
+    return approvalsBySession.value[sid] || null
+  })
 
   function isSessionLive(sessionId: string): boolean {
     if (streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)) return true
@@ -334,6 +429,188 @@ export const useChatStore = defineStore('chat', () => {
     const session = sessions.value.find(candidate => candidate.id === sessionId)
     if (!session?.lastActiveAt || session.endedAt != null) return false
     return Date.now() - session.lastActiveAt <= LIVE_BADGE_WINDOW_MS
+  }
+
+  function buildApprovalSignature(sessionId: string, pending: PendingApproval | null) {
+    if (!pending) return ''
+    return JSON.stringify({
+      sid: sessionId,
+      id: pending.approval_id || '',
+      desc: pending.description || '',
+      cmd: pending.command || '',
+    })
+  }
+
+  function markApprovalDismissed(sessionId: string, pending: PendingApproval | null, ttlMs = 15000) {
+    const signature = buildApprovalSignature(sessionId, pending)
+    if (!signature) return
+    dismissedApprovalSignatures.set(sessionId, {
+      signature,
+      expiresAt: Date.now() + ttlMs,
+    })
+  }
+
+  function isDismissedApproval(sessionId: string, pending: PendingApproval | null) {
+    const rec = dismissedApprovalSignatures.get(sessionId)
+    if (!rec) return false
+    if (rec.expiresAt <= Date.now()) {
+      dismissedApprovalSignatures.delete(sessionId)
+      return false
+    }
+    return rec.signature === buildApprovalSignature(sessionId, pending)
+  }
+
+  function clearDismissedApproval(sessionId: string) {
+    dismissedApprovalSignatures.delete(sessionId)
+  }
+
+  function setApprovalPending(sessionId: string, pending: PendingApproval | null, pendingCount = 1) {
+    if (!pending) {
+      clearApproval(sessionId)
+      clearDismissedApproval(sessionId)
+      return
+    }
+
+    if (isDismissedApproval(sessionId, pending)) {
+      return
+    }
+
+    clearDismissedApproval(sessionId)
+
+    const prev = approvalsBySession.value[sessionId]
+    const signature = buildApprovalSignature(sessionId, pending)
+    approvalsBySession.value = {
+      ...approvalsBySession.value,
+      [sessionId]: {
+        pending: { ...pending, _session_id: pending._session_id || sessionId },
+        pendingCount,
+        visibleSince: prev?.signature === signature ? prev.visibleSince : Date.now(),
+        signature,
+        submitting: false,
+      },
+    }
+  }
+
+  function clearApproval(sessionId: string) {
+    const next = { ...approvalsBySession.value }
+    delete next[sessionId]
+    approvalsBySession.value = next
+  }
+
+  function maybeShowTerminalApprovalFallback(sessionId: string, toolMsg: Message) {
+    const toolName = (toolMsg.toolName || '').toLowerCase()
+    const preview = toolMsg.toolPreview || ''
+    const looksLikeTerminal = toolName === 'terminal' || /^terminal\b/i.test(preview)
+    if (!looksLikeTerminal) return
+
+    window.setTimeout(() => {
+      const msgs = getSessionMsgs(sessionId)
+      const current = msgs.find(m => m.id === toolMsg.id)
+      if (!current || current.toolStatus !== 'running') return
+      if (approvalsBySession.value[sessionId]?.pending) return
+
+      setApprovalPending(sessionId, {
+        description: 'Terminal command is waiting for approval',
+        command: extractApprovalCommandFromArgs(current.toolArgs) || extractCommandFromToolPreview(current.toolPreview),
+        _session_id: sessionId,
+        _optimistic: true,
+      })
+    }, 1200)
+  }
+
+  function syncApprovalFromMessages(sessionId: string, messages: Message[]): boolean {
+    const pending = extractPendingApprovalFromMessages(messages)
+    if (!pending) {
+      clearApproval(sessionId)
+      return false
+    }
+
+    setApprovalPending(sessionId, {
+      ...pending,
+      _session_id: sessionId,
+    })
+    return true
+  }
+
+  async function pollApprovalOnce(sessionId: string) {
+    try {
+      const data = await getPendingApproval(sessionId)
+      if (data.pending) {
+        setApprovalPending(sessionId, data.pending, data.pending_count || 1)
+      } else {
+        if (approvalsBySession.value[sessionId]?.pending?._optimistic) return
+        clearApproval(sessionId)
+      }
+    } catch {
+      // ignore transient polling errors
+    }
+  }
+
+  function stopApprovalPolling(sessionId: string) {
+    const timer = approvalPollers.get(sessionId)
+    if (timer) {
+      clearInterval(timer)
+      approvalPollers.delete(sessionId)
+    }
+  }
+
+  function startApprovalPolling(sessionId: string) {
+    if (approvalPollers.has(sessionId)) return
+    const timer = setInterval(() => {
+      if (!isSessionLive(sessionId) && !readInFlight(sessionId)) {
+        stopApprovalPolling(sessionId)
+        return
+      }
+      void pollApprovalOnce(sessionId)
+    }, 1500)
+    approvalPollers.set(sessionId, timer)
+  }
+
+  async function respondApproval(choice: ApprovalChoice) {
+    const sid = activeSessionId.value
+    if (!sid) return
+    const state = approvalsBySession.value[sid]
+    if (!state?.pending) return
+
+    if (state.pending._optimistic) {
+      markApprovalDismissed(sid, state.pending)
+      clearApproval(sid)
+      return
+    }
+
+    approvalsBySession.value = {
+      ...approvalsBySession.value,
+      [sid]: {
+        ...state,
+        submitting: true,
+      },
+    }
+
+    try {
+      markApprovalDismissed(sid, state.pending)
+      const result = await respondApprovalApi({
+        session_id: sid,
+        choice,
+        approval_id: state.pending.approval_id,
+      })
+      clearApproval(sid)
+      const resumedRunId = (result as any)?.run_id || (result as any)?.id
+      if (resumedRunId) {
+        attachRunStream(sid, resumedRunId)
+      } else {
+        await pollApprovalOnce(sid)
+      }
+    } catch (error) {
+      clearDismissedApproval(sid)
+      approvalsBySession.value = {
+        ...approvalsBySession.value,
+        [sid]: {
+          ...state,
+          submitting: false,
+        },
+      }
+      throw error
+    }
   }
 
   function persistSessionsList() {
@@ -400,9 +677,10 @@ export const useChatStore = defineStore('chat', () => {
       try {
         const detail = await fetchSession(sid)
         if (!detail) return
-        const mapped = mapHermesMessages(detail.messages || [])
         const target = sessions.value.find(s => s.id === sid)
         if (!target) return
+        if (isBridgeFallbackSession(detail) && target.messages.length > 0) return
+        const mapped = mapHermesMessages(detail.messages || [])
         // Use the same "content-aware" comparison as switchSession: server
         // is ahead iff it knows about at least as many user turns and its
         // last assistant text is at least as long as ours.
@@ -425,6 +703,7 @@ export const useChatStore = defineStore('chat', () => {
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         }
+        syncApprovalFromMessages(sid, target.messages)
         // Stability detection ONLY matters when the server has at least as
         // many user turns as we do. Otherwise the server is still catching
         // up (e.g. the new turn we just sent hasn't been flushed server-side
@@ -523,8 +802,22 @@ export const useChatStore = defineStore('chat', () => {
       if (!detail) return false
       const target = sessions.value.find(s => s.id === sid)
       if (!target) return false
+      if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
       target.messages = mapped
+      if (isSessionLive(sid) || readInFlight(sid)) {
+        syncApprovalFromMessages(sid, mapped)
+      } else {
+        const pendingState = await getPendingApproval(sid)
+        if (pendingState.pending) {
+          setApprovalPending(sid, {
+            ...pendingState.pending,
+            _session_id: sid,
+          }, pendingState.pending_count || 1)
+        } else {
+          clearApproval(sid)
+        }
+      }
       if (detail.title) target.title = detail.title
       persistActiveMessages()
       return true
@@ -532,6 +825,209 @@ export const useChatStore = defineStore('chat', () => {
       console.error('Failed to refresh active session:', err)
       return false
     }
+  }
+
+
+  function attachRunStream(sid: string, runId: string) {
+    markInFlight(sid, runId)
+    stopPolling(sid)
+    stopApprovalPolling(sid)
+    clearApproval(sid)
+
+    // Proactively poll approval state even during the live SSE run. This covers
+    // gateways/upstreams that delay or omit a named `approval` SSE event; the UI
+    // should surface the approval card as soon as the session enters that state,
+    // not only after the round finishes and we later rehydrate from history.
+    void pollApprovalOnce(sid)
+    startApprovalPolling(sid)
+
+    const cleanup = () => {
+      streamStates.value.delete(sid)
+      if (persistTimer) {
+        clearTimeout(persistTimer)
+        persistTimer = null
+      }
+    }
+
+    let persistTimer: ReturnType<typeof setTimeout> | null = null
+    const schedulePersist = () => {
+      if (sid !== activeSessionId.value || persistTimer) return
+      persistTimer = setTimeout(() => {
+        persistTimer = null
+        persistActiveMessages()
+      }, 800)
+    }
+
+    const ctrl = streamRunEvents(
+      runId,
+      (evt: RunEvent) => {
+        switch (evt.event) {
+          case 'run.started':
+            break
+
+          case 'approval': {
+            setApprovalPending(sid, {
+              approval_id: evt.approval_id,
+              description: evt.description,
+              command: evt.command,
+              pattern_key: evt.pattern_key,
+              pattern_keys: evt.pattern_keys,
+              _session_id: sid,
+            }, evt.pending_count || 1)
+            startApprovalPolling(sid)
+            break
+          }
+
+          case 'message.delta': {
+            const msgs = getSessionMsgs(sid)
+            const last = msgs[msgs.length - 1]
+            if (last?.role === 'assistant' && last.isStreaming) {
+              last.content += evt.delta || ''
+            } else {
+              addMessage(sid, {
+                id: uid(),
+                role: 'assistant',
+                content: evt.delta || '',
+                timestamp: Date.now(),
+                isStreaming: true,
+              })
+            }
+            schedulePersist()
+            break
+          }
+
+          case 'tool.started': {
+            const msgs = getSessionMsgs(sid)
+            const last = msgs[msgs.length - 1]
+            if (last?.isStreaming) {
+              updateMessage(sid, last.id, { isStreaming: false })
+            }
+            const toolMessage: Message = {
+              id: uid(),
+              role: 'tool',
+              content: '',
+              timestamp: Date.now(),
+              toolName: evt.tool || evt.name,
+              toolPreview: evt.preview,
+              toolStatus: 'running',
+            }
+            addMessage(sid, toolMessage)
+            maybeShowTerminalApprovalFallback(sid, toolMessage)
+            schedulePersist()
+            break
+          }
+
+          case 'tool.completed': {
+            const msgs = getSessionMsgs(sid)
+            const toolMsgs = msgs.filter(
+              m => m.role === 'tool' && m.toolStatus === 'running',
+            )
+            if (toolMsgs.length > 0) {
+              const last = toolMsgs[toolMsgs.length - 1]
+              updateMessage(sid, last.id, { toolStatus: 'done' })
+            }
+            if (approvalsBySession.value[sid]?.pending?._optimistic) {
+              clearApproval(sid)
+            }
+            schedulePersist()
+            break
+          }
+
+          case 'run.completed': {
+            const msgs = getSessionMsgs(sid)
+            const lastMsg = msgs[msgs.length - 1]
+            if (lastMsg?.isStreaming) {
+              updateMessage(sid, lastMsg.id, { isStreaming: false })
+            }
+            if (evt.usage) {
+              const target = sessions.value.find(s => s.id === sid)
+              if (target) {
+                target.inputTokens = evt.usage.input_tokens
+                target.outputTokens = evt.usage.output_tokens
+              }
+            }
+            cleanup()
+            updateSessionTitle(sid)
+            if (sid === activeSessionId.value) persistActiveMessages()
+            clearInFlight(sid)
+            stopPolling(sid)
+            stopApprovalPolling(sid)
+            clearApproval(sid)
+            if (sid === activeSessionId.value) {
+              void refreshActiveSession()
+            }
+            break
+          }
+
+          case 'run.failed': {
+            const msgs = getSessionMsgs(sid)
+            const lastErr = msgs[msgs.length - 1]
+            if (lastErr?.isStreaming) {
+              updateMessage(sid, lastErr.id, {
+                isStreaming: false,
+                content: evt.error ? `Error: ${evt.error}` : 'Run failed',
+                role: 'system',
+              })
+            } else {
+              addMessage(sid, {
+                id: uid(),
+                role: 'system',
+                content: evt.error ? `Error: ${evt.error}` : 'Run failed',
+                timestamp: Date.now(),
+              })
+            }
+            msgs.forEach((m, i) => {
+              if (m.role === 'tool' && m.toolStatus === 'running') {
+                msgs[i] = { ...m, toolStatus: 'error' }
+              }
+            })
+            if (approvalsBySession.value[sid]?.pending?._optimistic) {
+              clearApproval(sid)
+            }
+            cleanup()
+            if (sid === activeSessionId.value) persistActiveMessages()
+            clearInFlight(sid)
+            stopPolling(sid)
+            stopApprovalPolling(sid)
+            clearApproval(sid)
+            break
+          }
+        }
+      },
+      () => {
+        const msgs = getSessionMsgs(sid)
+        const last = msgs[msgs.length - 1]
+        if (last?.isStreaming) {
+          updateMessage(sid, last.id, { isStreaming: false })
+        }
+        cleanup()
+        updateSessionTitle(sid)
+      },
+      (err) => {
+        console.warn('SSE connection dropped, resyncing from server:', err.message)
+        const msgs = getSessionMsgs(sid)
+        const last = msgs[msgs.length - 1]
+        if (last?.isStreaming) {
+          updateMessage(sid, last.id, { isStreaming: false })
+        }
+        msgs.forEach((m, i) => {
+          if (m.role === 'tool' && m.toolStatus === 'running') {
+            msgs[i] = { ...m, toolStatus: 'done' }
+          }
+        })
+        cleanup()
+        if (sid === activeSessionId.value) {
+          void refreshActiveSession()
+        }
+        if (readInFlight(sid)) {
+          startPolling(sid)
+          void pollApprovalOnce(sid)
+          startApprovalPolling(sid)
+        }
+      },
+    )
+
+    streamStates.value.set(sid, ctrl)
   }
 
 
@@ -578,6 +1074,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const detail = await fetchSession(sessionId)
       if (detail && detail.messages) {
+        if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)
         // Pick whichever view has more information. Simple length comparison
         // is wrong because mapHermesMessages folds tool_call-only assistant
@@ -609,6 +1106,19 @@ export const useChatStore = defineStore('chat', () => {
         if (serverIsAhead) {
           activeSession.value.messages = mapped
         }
+        if (isSessionLive(sessionId) || readInFlight(sessionId)) {
+          syncApprovalFromMessages(sessionId, activeSession.value.messages)
+        } else {
+          const pendingState = await getPendingApproval(sessionId)
+          if (pendingState.pending) {
+            setApprovalPending(sessionId, {
+              ...pendingState.pending,
+              _session_id: sessionId,
+            }, pendingState.pending_count || 1)
+          } else {
+            clearApproval(sessionId)
+          }
+        }
         // Update title: use Hermes title, or fallback to first user message
         if (detail.title) {
           activeSession.value.title = detail.title
@@ -632,6 +1142,8 @@ export const useChatStore = defineStore('chat', () => {
     // that happened while we were gone. Exits automatically on stability.
     if (readInFlight(sessionId) && !streamStates.value.has(sessionId)) {
       startPolling(sessionId)
+      void pollApprovalOnce(sessionId)
+      startApprovalPolling(sessionId)
     }
 
     // Fetch token usage for this session from web-ui DB
@@ -668,6 +1180,10 @@ export const useChatStore = defineStore('chat', () => {
     await deleteSessionApi(sessionId)
     sessions.value = sessions.value.filter(s => s.id !== sessionId)
     removeItemWithLegacy(msgsCacheKey(sessionId), legacyMsgsCacheKey(sessionId))
+    clearInFlight(sessionId)
+    stopPolling(sessionId)
+    stopApprovalPolling(sessionId)
+    clearApproval(sessionId)
     persistSessionsList()
     if (activeSessionId.value === sessionId) {
       if (sessions.value.length > 0) {
@@ -776,195 +1292,7 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
 
-      // tmux-like resume: persist run_id so refresh/reopen can pick up the
-      // working indicator and poll for progress.
-      markInFlight(sid, runId)
-      // If we were already polling (e.g. user re-sent while resume was still
-      // polling an earlier run), cancel that polling — the new SSE stream is
-      // the authoritative live source.
-      stopPolling(sid)
-
-      // Helper to clean up this session's stream state
-      const cleanup = () => {
-        streamStates.value.delete(sid)
-        if (persistTimer) {
-          clearTimeout(persistTimer)
-          persistTimer = null
-        }
-      }
-
-      // Throttle in-flight cache writes so a refresh mid-stream still shows
-      // the partial reply. 800ms keeps quota pressure low while guaranteeing
-      // at most ~1s of unsaved delta on reload.
-      let persistTimer: ReturnType<typeof setTimeout> | null = null
-      const schedulePersist = () => {
-        if (sid !== activeSessionId.value || persistTimer) return
-        persistTimer = setTimeout(() => {
-          persistTimer = null
-          persistActiveMessages()
-        }, 800)
-      }
-
-      // Listen to SSE events — all closures capture `sid`
-      const ctrl = streamRunEvents(
-        runId,
-        // onEvent
-        (evt: RunEvent) => {
-          switch (evt.event) {
-            case 'run.started':
-              break
-
-            case 'message.delta': {
-              const msgs = getSessionMsgs(sid)
-              const last = msgs[msgs.length - 1]
-              if (last?.role === 'assistant' && last.isStreaming) {
-                last.content += evt.delta || ''
-              } else {
-                addMessage(sid, {
-                  id: uid(),
-                  role: 'assistant',
-                  content: evt.delta || '',
-                  timestamp: Date.now(),
-                  isStreaming: true,
-                })
-              }
-              schedulePersist()
-              break
-            }
-
-            case 'tool.started': {
-              const msgs = getSessionMsgs(sid)
-              const last = msgs[msgs.length - 1]
-              if (last?.isStreaming) {
-                updateMessage(sid, last.id, { isStreaming: false })
-              }
-              addMessage(sid, {
-                id: uid(),
-                role: 'tool',
-                content: '',
-                timestamp: Date.now(),
-                toolName: evt.tool || evt.name,
-                toolPreview: evt.preview,
-                toolStatus: 'running',
-              })
-              schedulePersist()
-              break
-            }
-
-            case 'tool.completed': {
-              const msgs = getSessionMsgs(sid)
-              const toolMsgs = msgs.filter(
-                m => m.role === 'tool' && m.toolStatus === 'running',
-              )
-              if (toolMsgs.length > 0) {
-                const last = toolMsgs[toolMsgs.length - 1]
-                updateMessage(sid, last.id, { toolStatus: 'done' })
-              }
-              schedulePersist()
-              break
-            }
-
-            case 'run.completed': {
-              const msgs = getSessionMsgs(sid)
-              const lastMsg = msgs[msgs.length - 1]
-              if (lastMsg?.isStreaming) {
-                updateMessage(sid, lastMsg.id, { isStreaming: false })
-              }
-              if (evt.usage) {
-                const target = sessions.value.find(s => s.id === sid)
-                if (target) {
-                  target.inputTokens = evt.usage.input_tokens
-                  target.outputTokens = evt.usage.output_tokens
-                }
-              }
-              cleanup()
-              updateSessionTitle(sid)
-              // the in-flight marker. If the browser is reloading right now
-              // and kills us between the two localStorage writes, we want
-              // the next page load to still see in-flight === true (so
-              // polling kicks in and recovers) rather than the other way
-              // around (cleared in-flight + stale streaming cache = UI stuck).
-              if (sid === activeSessionId.value) persistActiveMessages()
-              clearInFlight(sid)
-              stopPolling(sid)
-              break
-            }
-
-            case 'run.failed': {
-              const msgs = getSessionMsgs(sid)
-              const lastErr = msgs[msgs.length - 1]
-              if (lastErr?.isStreaming) {
-                updateMessage(sid, lastErr.id, {
-                  isStreaming: false,
-                  content: evt.error ? `Error: ${evt.error}` : 'Run failed',
-                  role: 'system',
-                })
-              } else {
-                addMessage(sid, {
-                  id: uid(),
-                  role: 'system',
-                  content: evt.error ? `Error: ${evt.error}` : 'Run failed',
-                  timestamp: Date.now(),
-                })
-              }
-              msgs.forEach((m, i) => {
-                if (m.role === 'tool' && m.toolStatus === 'running') {
-                  msgs[i] = { ...m, toolStatus: 'error' }
-                }
-              })
-              cleanup()
-              if (sid === activeSessionId.value) persistActiveMessages()
-              clearInFlight(sid)
-              stopPolling(sid)
-              break
-            }
-          }
-        },
-        // onDone
-        () => {
-          const msgs = getSessionMsgs(sid)
-          const last = msgs[msgs.length - 1]
-          if (last?.isStreaming) {
-            updateMessage(sid, last.id, { isStreaming: false })
-          }
-          cleanup()
-          updateSessionTitle(sid)
-        },
-        // onError
-        // Mobile browsers drop EventSource when the tab backgrounds / screen
-        // locks / network flips. The backend run usually completes anyway, so
-        // rather than injecting a stale "SSE connection error" bubble we mark
-        // streaming as done and silently re-sync from the server, which has
-        // the real final answer. If the server fetch itself fails, we leave
-        // whatever text we already streamed in place — no visible error.
-        (err) => {
-          console.warn('SSE connection dropped, resyncing from server:', err.message)
-          const msgs = getSessionMsgs(sid)
-          const last = msgs[msgs.length - 1]
-          if (last?.isStreaming) {
-            updateMessage(sid, last.id, { isStreaming: false })
-          }
-          // Any tool messages still marked 'running' will be replaced by the
-          // server's view after refresh; clear their spinner state now.
-          msgs.forEach((m, i) => {
-            if (m.role === 'tool' && m.toolStatus === 'running') {
-              msgs[i] = { ...m, toolStatus: 'done' }
-            }
-          })
-          cleanup()
-          if (sid === activeSessionId.value) {
-            void refreshActiveSession()
-          }
-          // The run might still be going on the server side (SSE drop doesn't
-          // abort it). If we still have an in-flight record, fall back to
-          // polling fetchSession to keep the user updated.
-          if (readInFlight(sid)) {
-            startPolling(sid)
-          }
-        },
-      )
-
-      streamStates.value.set(sid, ctrl)
+      attachRunStream(sid, runId)
     } catch (err: any) {
       addMessage(sid, {
         id: uid(),
@@ -989,6 +1317,8 @@ export const useChatStore = defineStore('chat', () => {
       streamStates.value.delete(sid)
       clearInFlight(sid)
       stopPolling(sid)
+      stopApprovalPolling(sid)
+      clearApproval(sid)
     }
   }
 
@@ -999,6 +1329,8 @@ export const useChatStore = defineStore('chat', () => {
         void refreshActiveSession()
         if (readInFlight(activeSessionId.value)) {
           startPolling(activeSessionId.value)
+          void pollApprovalOnce(activeSessionId.value)
+          startApprovalPolling(activeSessionId.value)
         }
       }
     })
@@ -1008,6 +1340,7 @@ export const useChatStore = defineStore('chat', () => {
     sessions,
     activeSessionId,
     activeSession,
+    activeApproval,
     focusMessageId,
     messages,
     isStreaming,
@@ -1022,6 +1355,7 @@ export const useChatStore = defineStore('chat', () => {
     switchSessionModel,
     deleteSession,
     sendMessage,
+    respondApproval,
     stopStreaming,
     loadSessions,
     refreshActiveSession,

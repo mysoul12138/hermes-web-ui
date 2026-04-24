@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Attachment } from '@/stores/hermes/chat'
+import ApprovalPrompt from './ApprovalPrompt.vue'
 import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
@@ -195,6 +196,15 @@ function isImage(type: string): boolean {
 
 <template>
   <div class="chat-input-area">
+    <ApprovalPrompt
+      v-if="chatStore.activeApproval?.pending"
+      class="approval-slot"
+      :pending="chatStore.activeApproval.pending"
+      :pending-count="chatStore.activeApproval.pendingCount"
+      :submitting="chatStore.activeApproval.submitting"
+      @approve="chatStore.respondApproval"
+    />
+
     <!-- Top bar: attach + context info -->
     <div class="input-top-bar">
       <NTooltip trigger="hover">
@@ -305,6 +315,10 @@ function isImage(type: string): boolean {
   padding: 12px 20px 16px;
   border-top: 1px solid $border-color;
   flex-shrink: 0;
+}
+
+.approval-slot {
+  margin-bottom: 10px;
 }
 
 .input-top-bar {
