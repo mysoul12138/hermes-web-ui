@@ -4,7 +4,7 @@ import {
   getConversationDetailFromDb,
   listConversationSummariesFromDb,
 } from '../../db/hermes/conversations-db'
-import { getSessionThreadDetail, listSessionSummaries, searchSessionSummaries } from '../../db/hermes/sessions-db'
+import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries } from '../../db/hermes/sessions-db'
 import { deleteUsage, getUsage, getUsageBatch } from '../../db/hermes/usage-store'
 import { getModelContextLength } from '../../services/hermes/model-context'
 import type { ConversationDetail, ConversationSummary } from '../../services/hermes/conversations'
@@ -104,6 +104,16 @@ function hasPendingDeletedConversation(detail: ConversationDetail): boolean {
   return hasPendingBranch || detail.messages.some(message => pendingIds.has(message.session_id))
 }
 
+function hasPendingDeletedSessionDetail(session: { id: string; messages?: Array<{ session_id?: string | null }> }): boolean {
+  const pendingIds = getPendingDeletedSessionIds()
+  if (pendingIds.size === 0) return false
+  if (pendingIds.has(session.id)) return true
+  return (session.messages || []).some(message => {
+    const messageSessionId = message.session_id || session.id
+    return pendingIds.has(messageSessionId)
+  })
+}
+
 function getGroupChatStorage() {
   return getGroupChatServer()?.getStorage() || null
 }
@@ -192,13 +202,18 @@ export async function get(ctx: any) {
   }
 
   try {
-    const threaded = await getSessionThreadDetail(ctx.params.id)
-    if (threaded) {
-      ctx.body = { session: threaded }
+    const session = await getSessionDetailFromDb(ctx.params.id)
+    if (session) {
+      if (hasPendingDeletedSessionDetail(session)) {
+        ctx.status = 404
+        ctx.body = { error: 'Session not found' }
+        return
+      }
+      ctx.body = { session }
       return
     }
   } catch (err) {
-    logger.warn(err, 'Hermes Session DB: thread detail query failed, falling back to CLI')
+    logger.warn(err, 'Hermes Session DB: detail query failed, falling back to CLI')
   }
 
   const session = await hermesCli.getSession(ctx.params.id)

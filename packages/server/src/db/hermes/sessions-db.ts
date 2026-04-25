@@ -5,6 +5,8 @@ const SQLITE_AVAILABLE = (() => {
   return major > 22 || (major === 22 && minor >= 5)
 })()
 
+const LINEAGE_TOLERANCE_SECONDS = 3
+
 export interface HermesSessionRow {
   id: string
   source: string
@@ -29,14 +31,36 @@ export interface HermesSessionRow {
   last_active: number
 }
 
-interface HermesThreadSessionRow extends HermesSessionRow {
-  parent_session_id: string | null
-}
-
 export interface HermesSessionSearchRow extends HermesSessionRow {
   matched_message_id: number | null
   snippet: string
   rank: number
+}
+
+export interface HermesMessageRow {
+  id: number | string
+  session_id: string
+  role: string
+  content: string
+  tool_call_id: string | null
+  tool_calls: any[] | null
+  tool_name: string | null
+  timestamp: number
+  token_count: number | null
+  finish_reason: string | null
+  reasoning: string | null
+  reasoning_details?: string | null
+  codex_reasoning_items?: string | null
+  reasoning_content?: string | null
+}
+
+export interface HermesSessionDetailRow extends HermesSessionRow {
+  messages: HermesMessageRow[]
+  thread_session_count: number
+}
+
+interface HermesSessionInternalRow extends HermesSessionRow {
+  parent_session_id: string | null
 }
 
 function sessionDbPath(): string {
@@ -128,11 +152,6 @@ const SESSION_FROM = `
   FROM sessions s
   WHERE s.parent_session_id IS NULL
     AND s.source != 'tool'
-`
-
-const THREAD_SESSION_FROM = `
-  FROM sessions s
-  WHERE s.source != 'tool'
 `
 
 function buildBaseSessionSql(source?: string): { sql: string, params: any[] } {
@@ -301,23 +320,67 @@ function mapSearchRow(row: Record<string, unknown>): HermesSessionSearchRow {
   }
 }
 
-function mapThreadRow(row: Record<string, unknown>): HermesThreadSessionRow {
+function mapInternalSessionRow(row: Record<string, unknown>): HermesSessionInternalRow {
   return {
     ...mapRow(row),
     parent_session_id: normalizeNullableString(row.parent_session_id),
   }
 }
 
-function timingMatchesParent(parent: HermesThreadSessionRow | undefined, child: HermesThreadSessionRow | undefined): boolean {
-  if (!parent || !child || parent.ended_at == null) return false
-  return Math.abs(Number(child.started_at || 0) - Number(parent.ended_at || 0)) <= 3
+function parseToolCalls(value: unknown): any[] | null {
+  if (value == null || value === '') return null
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return null
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
 }
 
-function nextCompressionChild(parent: HermesThreadSessionRow, byId: Map<string, HermesThreadSessionRow>, childrenByParent: Map<string | null, string[]>): HermesThreadSessionRow | null {
-  if (parent.end_reason !== 'compression') return null
-  const candidates = (childrenByParent.get(parent.id) || [])
+function normalizeMessageId(value: unknown): number | string {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'bigint') return Number(value)
+  const asNumber = Number(value)
+  if (Number.isInteger(asNumber)) return asNumber
+  return String(value || '')
+}
+
+function mapMessageRow(row: Record<string, unknown>): HermesMessageRow {
+  const reasoning = normalizeNullableString(row.reasoning) || normalizeNullableString(row.reasoning_content)
+  return {
+    id: normalizeMessageId(row.id),
+    session_id: String(row.session_id || ''),
+    role: String(row.role || ''),
+    content: row.content == null ? '' : String(row.content),
+    tool_call_id: normalizeNullableString(row.tool_call_id),
+    tool_calls: parseToolCalls(row.tool_calls),
+    tool_name: normalizeNullableString(row.tool_name),
+    timestamp: normalizeNumber(row.timestamp),
+    token_count: normalizeNullableNumber(row.token_count),
+    finish_reason: normalizeNullableString(row.finish_reason),
+    reasoning,
+    reasoning_details: normalizeNullableString(row.reasoning_details),
+    codex_reasoning_items: normalizeNullableString(row.codex_reasoning_items),
+    reasoning_content: normalizeNullableString(row.reasoning_content),
+  }
+}
+
+function timingMatchesParent(parent: HermesSessionInternalRow | undefined, child: HermesSessionInternalRow | undefined): boolean {
+  if (!parent || !child || parent.ended_at == null) return false
+  return Math.abs(Number(child.started_at || 0) - Number(parent.ended_at || 0)) <= LINEAGE_TOLERANCE_SECONDS
+}
+
+function continuationCandidates(
+  parent: HermesSessionInternalRow,
+  byId: Map<string, HermesSessionInternalRow>,
+  childrenByParent: Map<string | null, string[]>,
+): HermesSessionInternalRow[] {
+  return (childrenByParent.get(parent.id) || [])
     .map(childId => byId.get(childId))
-    .filter((child): child is HermesThreadSessionRow => !!child)
+    .filter((child): child is HermesSessionInternalRow => !!child)
+    .filter(child => child.source !== 'tool')
     .filter(child => child.source === parent.source)
     .filter(child => timingMatchesParent(parent, child))
     .sort((a, b) => {
@@ -326,10 +389,33 @@ function nextCompressionChild(parent: HermesThreadSessionRow, byId: Map<string, 
       if (aDelta !== bDelta) return aDelta - bDelta
       return a.id.localeCompare(b.id)
     })
-  return candidates.length === 1 ? candidates[0] : null
 }
 
-function rootForCompressionThread(session: HermesThreadSessionRow, byId: Map<string, HermesThreadSessionRow>): HermesThreadSessionRow {
+function normalizeComparableText(value: unknown): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function nextContinuationChild(
+  parent: HermesSessionInternalRow,
+  byId: Map<string, HermesSessionInternalRow>,
+  childrenByParent: Map<string | null, string[]>,
+): HermesSessionInternalRow | null {
+  if (parent.end_reason !== 'compression') return null
+  const candidates = continuationCandidates(parent, byId, childrenByParent)
+  if (candidates.length === 1) return candidates[0]
+
+  const exactPreviewMatches = candidates.filter(child => {
+    const childPreview = normalizeComparableText(child.preview)
+    const parentPreview = normalizeComparableText(parent.preview)
+    return !!childPreview && childPreview === parentPreview
+  })
+  return exactPreviewMatches.length === 1 ? exactPreviewMatches[0] : null
+}
+
+function rootForCompressionThread(
+  session: HermesSessionInternalRow,
+  byId: Map<string, HermesSessionInternalRow>,
+): HermesSessionInternalRow {
   let current = session
   const seen = new Set<string>()
   while (current.parent_session_id && !seen.has(current.id)) {
@@ -341,27 +427,20 @@ function rootForCompressionThread(session: HermesThreadSessionRow, byId: Map<str
   return current
 }
 
-function collectCompressionThread(root: HermesThreadSessionRow, byId: Map<string, HermesThreadSessionRow>, childrenByParent: Map<string | null, string[]>): HermesThreadSessionRow[] {
-  const chain: HermesThreadSessionRow[] = []
+function collectSessionChain(
+  rootId: string,
+  byId: Map<string, HermesSessionInternalRow>,
+  childrenByParent: Map<string | null, string[]>,
+): HermesSessionInternalRow[] {
+  const chain: HermesSessionInternalRow[] = []
   const seen = new Set<string>()
-  let current: HermesThreadSessionRow | null = root
+  let current = byId.get(rootId) || null
   while (current && !seen.has(current.id)) {
     chain.push(current)
     seen.add(current.id)
-    current = nextCompressionChild(current, byId, childrenByParent)
+    current = nextContinuationChild(current, byId, childrenByParent)
   }
   return chain
-}
-
-function parseJsonColumn(value: unknown): unknown {
-  if (typeof value !== 'string') return value
-  const trimmed = value.trim()
-  if (!trimmed || (trimmed[0] !== '[' && trimmed[0] !== '{')) return value
-  try {
-    return JSON.parse(trimmed)
-  } catch {
-    return value
-  }
 }
 
 function messageSelect(columns: Set<string>): string {
@@ -378,7 +457,105 @@ function messageSelect(columns: Set<string>): string {
     expr('token_count'),
     expr('finish_reason'),
     expr('reasoning'),
+    expr('reasoning_details'),
+    expr('codex_reasoning_items'),
+    expr('reasoning_content'),
   ].join(', ')
+}
+
+function aggregateSessionDetail(
+  chain: HermesSessionInternalRow[],
+  messages: HermesMessageRow[],
+  requestedSession = chain[0],
+): HermesSessionDetailRow {
+  const root = chain[0]
+  const last = chain[chain.length - 1] || root
+  const costStatuses = Array.from(new Set(chain.map(session => String(session.cost_status || '')).filter(Boolean)))
+  const actualCosts = chain
+    .map(session => session.actual_cost_usd)
+    .filter((value): value is number => value != null)
+  const firstPreview = chain.map(session => session.preview).find(Boolean) || root.preview
+
+  return {
+    ...requestedSession,
+    title: root.title || requestedSession.title || (firstPreview ? (firstPreview.length > 40 ? `${firstPreview.slice(0, 40)}...` : firstPreview) : null),
+    preview: root.preview || firstPreview || requestedSession.preview || '',
+    model: last.model || requestedSession.model || root.model,
+    started_at: root.started_at,
+    ended_at: last.ended_at,
+    end_reason: last.end_reason,
+    last_active: Math.max(...chain.map(session => session.last_active || session.started_at || 0)),
+    message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
+    tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
+    input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
+    output_tokens: chain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
+    cache_read_tokens: chain.reduce((sum, session) => sum + Number(session.cache_read_tokens || 0), 0),
+    cache_write_tokens: chain.reduce((sum, session) => sum + Number(session.cache_write_tokens || 0), 0),
+    reasoning_tokens: chain.reduce((sum, session) => sum + Number(session.reasoning_tokens || 0), 0),
+    billing_provider: last.billing_provider ?? requestedSession.billing_provider ?? root.billing_provider,
+    estimated_cost_usd: chain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
+    actual_cost_usd: actualCosts.length ? actualCosts.reduce((sum, value) => sum + Number(value || 0), 0) : null,
+    cost_status: costStatuses.length === 1 ? costStatuses[0] : (costStatuses.length > 1 ? 'mixed' : ''),
+    messages,
+    thread_session_count: chain.length,
+  }
+}
+
+async function openSessionDb() {
+  if (!SQLITE_AVAILABLE) {
+    throw new Error(`node:sqlite requires Node >= 22.5, current: ${process.versions.node}`)
+  }
+  const { DatabaseSync } = await import('node:sqlite')
+  return new DatabaseSync(sessionDbPath(), { open: true, readOnly: true })
+}
+
+export async function getSessionDetailFromDb(sessionId: string): Promise<HermesSessionDetailRow | null> {
+  const db = await openSessionDb()
+  try {
+    const rows = db.prepare(`
+      SELECT
+        ${SESSION_SELECT},
+        s.parent_session_id AS parent_session_id
+      FROM sessions s
+      WHERE s.source != 'tool'
+    `).all() as Record<string, unknown>[]
+
+    const sessions = rows.map(mapInternalSessionRow)
+    const byId = new Map(sessions.map(session => [session.id, session]))
+    const requested = byId.get(sessionId)
+    if (!requested) return null
+
+    const childrenByParent = new Map<string | null, string[]>()
+    for (const session of sessions) {
+      const key = session.parent_session_id ?? null
+      const siblings = childrenByParent.get(key) || []
+      siblings.push(session.id)
+      childrenByParent.set(key, siblings)
+    }
+
+    const root = rootForCompressionThread(requested, byId)
+    const chain = collectSessionChain(root.id, byId, childrenByParent)
+    if (!chain.length) return null
+
+    const ids = chain.map(session => session.id)
+    const placeholders = ids.map(() => '?').join(', ')
+    const messageColumns = new Set(
+      (db.prepare('PRAGMA table_info(messages)').all() as Array<Record<string, unknown>>)
+        .map(row => String(row.name || ''))
+        .filter(Boolean),
+    )
+    const messageRows = db.prepare(`
+      SELECT ${messageSelect(messageColumns)}
+      FROM messages m
+      WHERE m.session_id IN (${placeholders})
+      ORDER BY m.timestamp, m.id
+    `).all(...ids) as Record<string, unknown>[]
+
+    const messages = messageRows.map(mapMessageRow)
+    return aggregateSessionDetail(chain, messages, requested)
+  } finally {
+    db.close()
+  }
 }
 
 export async function listSessionSummaries(source?: string, limit = 2000): Promise<HermesSessionRow[]> {
@@ -395,82 +572,6 @@ export async function listSessionSummaries(source?: string, limit = 2000): Promi
     const rows = statement.all(...params) as Record<string, unknown>[]
 
     return rows.map(mapRow)
-  } finally {
-    db.close()
-  }
-}
-
-export async function getSessionThreadDetail(sessionId: string): Promise<(HermesSessionRow & { messages: any[] }) | null> {
-  if (!SQLITE_AVAILABLE) {
-    throw new Error(`node:sqlite requires Node >= 22.5, current: ${process.versions.node}`)
-  }
-
-  const { DatabaseSync } = await import('node:sqlite')
-  const db = new DatabaseSync(sessionDbPath(), { open: true, readOnly: true })
-
-  try {
-    const sessionRows = db.prepare(`
-      SELECT
-        ${SESSION_SELECT},
-        s.parent_session_id AS parent_session_id
-      ${THREAD_SESSION_FROM}
-      ORDER BY s.started_at DESC
-    `).all() as Record<string, unknown>[]
-    const sessions = sessionRows.map(mapThreadRow)
-    const byId = new Map(sessions.map(session => [session.id, session]))
-    const requested = byId.get(sessionId)
-    if (!requested) return null
-
-    const childrenByParent = new Map<string | null, string[]>()
-    for (const session of sessions) {
-      const key = session.parent_session_id ?? null
-      const siblings = childrenByParent.get(key) || []
-      siblings.push(session.id)
-      childrenByParent.set(key, siblings)
-    }
-
-    const root = rootForCompressionThread(requested, byId)
-    const chain = collectCompressionThread(root, byId, childrenByParent)
-    const ids = chain.map(session => session.id)
-    const placeholders = ids.map(() => '?').join(', ')
-    const messageColumns = new Set(
-      (db.prepare('PRAGMA table_info(messages)').all() as Array<Record<string, unknown>>)
-        .map(row => String(row.name || ''))
-        .filter(Boolean),
-    )
-    const messages = db.prepare(`
-      SELECT ${messageSelect(messageColumns)}
-      FROM messages m
-      WHERE m.session_id IN (${placeholders})
-      ORDER BY m.timestamp, m.id
-    `).all(...ids).map(row => ({
-      ...row,
-      tool_calls: parseJsonColumn(row.tool_calls),
-    }))
-
-    const first = chain[0] || requested
-    const last = chain[chain.length - 1] || requested
-    return {
-      ...requested,
-      title: first.title || requested.title,
-      started_at: first.started_at,
-      ended_at: last.ended_at,
-      end_reason: last.end_reason,
-      last_active: chain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(requested.last_active || requested.started_at || 0)),
-      message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
-      tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
-      input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
-      output_tokens: chain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
-      cache_read_tokens: chain.reduce((sum, session) => sum + Number(session.cache_read_tokens || 0), 0),
-      cache_write_tokens: chain.reduce((sum, session) => sum + Number(session.cache_write_tokens || 0), 0),
-      reasoning_tokens: chain.reduce((sum, session) => sum + Number(session.reasoning_tokens || 0), 0),
-      estimated_cost_usd: chain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
-      actual_cost_usd: chain.reduce<number | null>((sum, session) => {
-        if (session.actual_cost_usd == null) return sum
-        return (sum || 0) + Number(session.actual_cost_usd)
-      }, null),
-      messages,
-    }
   } finally {
     db.close()
   }
