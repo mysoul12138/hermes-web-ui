@@ -1,4 +1,4 @@
-import { startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import { cancelRun, startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
 import {
   getPendingApproval,
   respondApproval as respondApprovalApi,
@@ -244,6 +244,7 @@ function mapHermesSession(s: SessionSummary): Session {
 // every time they open the page (esp. noticeable on mobile).
 const STORAGE_KEY_PREFIX = 'hermes_active_session_'
 const SESSIONS_CACHE_KEY_PREFIX = 'hermes_sessions_cache_v1_'
+const BRIDGE_LOCAL_SESSION_KEY_PREFIX = 'hermes_bridge_local_session_v1_'
 const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
@@ -252,7 +253,6 @@ function isBridgeFallbackSession(detail: { source?: string; messages?: unknown[]
   return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
 }
 const POLL_STABLE_EXITS = 3 // 3 × 2s = 6s of no change → assume run finished
-const LIVE_BADGE_WINDOW_MS = 5 * 60 * 1000
 
 // 获取当前 profile 名称，用于隔离缓存。
 // 从 profiles store 的 activeProfileName（同步 localStorage）读取，
@@ -267,6 +267,7 @@ function getProfileName(): string {
 
 function storageKey(): string { return STORAGE_KEY_PREFIX + getProfileName() }
 function sessionsCacheKey(): string { return SESSIONS_CACHE_KEY_PREFIX + getProfileName() }
+function bridgeLocalSessionKey(sid: string): string { return `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
 function msgsCacheKey(sid: string): string { return `hermes_session_msgs_v1_${getProfileName()}_${sid}_` }
 function inFlightKey(sid: string): string { return `hermes_in_flight_v1_${getProfileName()}_${sid}` }
 function legacyStorageKey(): string | null { return getProfileName() === 'default' ? LEGACY_STORAGE_KEY : null }
@@ -424,11 +425,7 @@ export const useChatStore = defineStore('chat', () => {
   })
 
   function isSessionLive(sessionId: string): boolean {
-    if (streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)) return true
-
-    const session = sessions.value.find(candidate => candidate.id === sessionId)
-    if (!session?.lastActiveAt || session.endedAt != null) return false
-    return Date.now() - session.lastActiveAt <= LIVE_BADGE_WINDOW_MS
+    return streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)
   }
 
   function buildApprovalSignature(sessionId: string, pending: PendingApproval | null) {
@@ -633,6 +630,18 @@ export const useChatStore = defineStore('chat', () => {
     saveJsonWithLegacy(inFlightKey(sid), { runId, startedAt: Date.now() } as InFlightRun, legacyInFlightKey(sid))
   }
 
+  function markBridgeLocalSession(sid: string) {
+    setItemBestEffort(bridgeLocalSessionKey(sid), '1')
+  }
+
+  function clearBridgeLocalSession(sid: string) {
+    removeItem(bridgeLocalSessionKey(sid))
+  }
+
+  function isBridgeLocalSession(sid: string) {
+    return localStorage.getItem(bridgeLocalSessionKey(sid)) === '1'
+  }
+
   function clearInFlight(sid: string) {
     removeItemWithLegacy(inFlightKey(sid), legacyInFlightKey(sid))
   }
@@ -776,9 +785,11 @@ export const useChatStore = defineStore('chat', () => {
       const localOnly = sessions.value.filter(s => {
         if (freshIds.has(s.id)) return false
         if (readInFlight(s.id)) return true
+        if (isBridgeLocalSession(s.id)) return true
         // Session no longer exists on server and no active run — clean up cache
         removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
         removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
+        clearBridgeLocalSession(s.id)
         return false
       })
       sessions.value = [...localOnly, ...fresh]
@@ -1011,6 +1022,11 @@ export const useChatStore = defineStore('chat', () => {
         }
         cleanup()
         updateSessionTitle(sid)
+        clearInFlight(sid)
+        stopPolling(sid)
+        stopApprovalPolling(sid)
+        clearApproval(sid)
+        if (sid === activeSessionId.value) persistActiveMessages()
       },
       (err) => {
         console.warn('SSE connection dropped, resyncing from server:', err.message)
@@ -1190,6 +1206,7 @@ export const useChatStore = defineStore('chat', () => {
     sessions.value = sessions.value.filter(s => s.id !== sessionId)
     removeItemWithLegacy(msgsCacheKey(sessionId), legacyMsgsCacheKey(sessionId))
     clearInFlight(sessionId)
+    clearBridgeLocalSession(sessionId)
     stopPolling(sessionId)
     stopApprovalPolling(sessionId)
     clearApproval(sessionId)
@@ -1301,6 +1318,7 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
 
+      if ((run as any).bridge) markBridgeLocalSession(sid)
       attachRunStream(sid, runId)
     } catch (err: any) {
       addMessage(sid, {
@@ -1312,9 +1330,10 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  function stopStreaming() {
+  async function stopStreaming() {
     const sid = activeSessionId.value
     if (!sid) return
+    const inFlight = readInFlight(sid)
     const ctrl = streamStates.value.get(sid)
     if (ctrl) {
       ctrl.abort()
@@ -1324,10 +1343,29 @@ export const useChatStore = defineStore('chat', () => {
         updateMessage(sid, lastMsg.id, { isStreaming: false })
       }
       streamStates.value.delete(sid)
-      clearInFlight(sid)
       stopPolling(sid)
       stopApprovalPolling(sid)
       clearApproval(sid)
+      if (sid === activeSessionId.value) persistActiveMessages()
+      persistSessionsList()
+    } else {
+      stopPolling(sid)
+      stopApprovalPolling(sid)
+      clearApproval(sid)
+      if (sid === activeSessionId.value) persistActiveMessages()
+      persistSessionsList()
+    }
+
+    if (!inFlight?.runId || !inFlight.runId.startsWith('bridge_run_')) {
+      clearInFlight(sid)
+      return
+    }
+
+    try {
+      await cancelRun(inFlight.runId)
+      clearInFlight(sid)
+    } catch (err) {
+      console.warn('Failed to cancel run:', err)
     }
   }
 

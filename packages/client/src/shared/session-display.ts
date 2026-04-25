@@ -1,6 +1,7 @@
 const SOURCE_LABELS: Record<string, string> = {
   telegram: 'Telegram',
   api_server: 'API Server',
+  tui: 'TUI',
   cli: 'CLI',
   discord: 'Discord',
   slack: 'Slack',

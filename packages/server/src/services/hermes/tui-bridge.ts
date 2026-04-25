@@ -46,6 +46,8 @@ interface RunState {
   events: BridgeRunEvent[]
   waiters: Array<(event: BridgeRunEvent | null) => void>
   closed: boolean
+  idleTimer?: ReturnType<typeof setTimeout>
+  pendingApproval?: boolean
 }
 
 interface BridgeSessionRef {
@@ -55,6 +57,8 @@ interface BridgeSessionRef {
 
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
+const IDLE_COMPLETE_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_COMPLETE_MS || 20000))
+const DENY_COMPLETE_MS = Math.max(1000, Number(process.env.HERMES_TUI_DENY_COMPLETE_MS || 3000))
 
 function resolvePython(root: string): string {
   const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
@@ -266,7 +270,39 @@ class TuiBridgeService {
       all: false,
     })
     clearLivePendingApproval(webSessionId)
+    const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
+    if (runId) {
+      const state = this.runs.get(runId)
+      if (state) state.pendingApproval = false
+      if (choice === 'deny') {
+        this.scheduleIdleCompletion(runId, DENY_COMPLETE_MS)
+      }
+    }
     return { ok: true, choice, bridge: true, result }
+  }
+
+  async cancelRun(runId: string) {
+    const state = this.runs.get(runId)
+    if (!state) return null
+
+    this.clearIdleTimer(state)
+    state.pendingApproval = false
+    clearLivePendingApproval(state.webSessionId)
+    clearLivePendingApprovalForRun(runId)
+
+    const result = await this.client.request('session.interrupt', {
+      session_id: state.bridgeSessionId,
+    })
+
+    this.push(runId, {
+      event: 'run.completed',
+      run_id: runId,
+      timestamp: Date.now() / 1000,
+      output: '',
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    })
+    this.closeRun(runId)
+    return { ok: true, cancelled: true, bridge: true, result }
   }
 
   async *stream(runId: string): AsyncGenerator<BridgeRunEvent> {
@@ -320,6 +356,13 @@ class TuiBridgeService {
 
     switch (event.type) {
       case 'approval.request':
+        {
+          const state = this.runs.get(runId)
+          if (state) {
+            state.pendingApproval = true
+            this.clearIdleTimer(state)
+          }
+        }
         setLivePendingApprovalForRun(runId, {
           approval_id: typeof payload.approval_id === 'string' ? payload.approval_id : undefined,
           description: typeof payload.description === 'string' ? payload.description : undefined,
@@ -342,6 +385,7 @@ class TuiBridgeService {
         break
       case 'message.delta':
         this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payload.text || '' })
+        this.scheduleIdleCompletion(runId)
         break
       case 'message.complete':
         this.push(runId, {
@@ -359,6 +403,10 @@ class TuiBridgeService {
         this.closeRun(runId)
         break
       case 'tool.start':
+        {
+          const state = this.runs.get(runId)
+          if (state) this.clearIdleTimer(state)
+        }
         this.push(runId, {
           event: 'tool.started',
           run_id: runId,
@@ -377,8 +425,33 @@ class TuiBridgeService {
           tool: payload.name,
           duration: typeof payload.duration_s === 'number' ? payload.duration_s : undefined,
         })
+        this.scheduleIdleCompletion(runId)
         break
     }
+  }
+
+  private clearIdleTimer(state: RunState) {
+    if (!state.idleTimer) return
+    clearTimeout(state.idleTimer)
+    state.idleTimer = undefined
+  }
+
+  private scheduleIdleCompletion(runId: string, delayMs = IDLE_COMPLETE_MS) {
+    const state = this.runs.get(runId)
+    if (!state || state.closed || state.pendingApproval) return
+    this.clearIdleTimer(state)
+    state.idleTimer = setTimeout(() => {
+      const current = this.runs.get(runId)
+      if (!current || current.closed || current.pendingApproval) return
+      this.push(runId, {
+        event: 'run.completed',
+        run_id: runId,
+        timestamp: Date.now() / 1000,
+        output: '',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      })
+      this.closeRun(runId)
+    }, delayMs)
   }
 
   private push(runId: string, event: BridgeRunEvent) {
@@ -392,6 +465,7 @@ class TuiBridgeService {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
     state.closed = true
+    this.clearIdleTimer(state)
     clearLivePendingApprovalForRun(runId)
     this.activeRunsByBridgeSession.delete(state.bridgeSessionId)
     for (const waiter of state.waiters.splice(0)) waiter(null)

@@ -5,6 +5,7 @@ import type {
   ConversationMessage,
   ConversationSummary,
 } from '../../services/hermes/conversations'
+import { listLiveTuiSessionKeys } from '../../services/hermes/tui-live'
 
 const SQLITE_AVAILABLE = (() => {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -59,6 +60,7 @@ interface ConversationSessionRow {
   last_active: number
   has_visible_messages: boolean
   is_active: boolean
+  is_live_tui_process?: boolean
 }
 
 function conversationDbPath(): string {
@@ -156,17 +158,20 @@ function isSyntheticUserText(content: unknown): boolean {
   return SYNTHETIC_USER_PREFIXES.some(prefix => text.startsWith(prefix))
 }
 
-function mapSessionRow(row: Record<string, unknown>, nowSeconds: number): ConversationSessionRow {
+function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTuiSessionKeys: Set<string>): ConversationSessionRow {
+  const id = String(row.id || '')
+  const source = String(row.source || '')
   const startedAt = normalizeNumber(row.started_at)
   const endedAt = normalizeNullableNumber(row.ended_at)
   const preview = excerpt(row.preview || '')
   const rawTitle = normalizeNullableString(row.title)
   const title = rawTitle || (preview ? (preview.length > 40 ? `${preview.slice(0, 40)}...` : preview) : null)
   const lastActive = normalizeNumber(row.last_active, startedAt)
+  const isLiveTuiProcess = source === 'tui' && liveTuiSessionKeys.has(id)
 
   return {
-    id: String(row.id || ''),
-    source: String(row.source || ''),
+    id,
+    source,
     user_id: normalizeNullableString(row.user_id),
     model: String(row.model || ''),
     title,
@@ -185,10 +190,41 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number): Conver
     estimated_cost_usd: normalizeNumber(row.estimated_cost_usd),
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
-    preview,
+    preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
-    has_visible_messages: !!normalizeNumber(row.has_visible_messages),
-    is_active: endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS,
+    has_visible_messages: !!normalizeNumber(row.has_visible_messages) || isLiveTuiProcess,
+    is_active: isLiveTuiProcess || (endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS),
+    is_live_tui_process: isLiveTuiProcess,
+  }
+}
+
+function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): ConversationSessionRow {
+  return {
+    id,
+    source: 'tui',
+    user_id: null,
+    model: '',
+    title: null,
+    parent_session_id: null,
+    started_at: nowSeconds,
+    ended_at: null,
+    end_reason: null,
+    message_count: 0,
+    tool_call_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    billing_provider: null,
+    estimated_cost_usd: 0,
+    actual_cost_usd: null,
+    cost_status: '',
+    preview: 'Running TUI session',
+    last_active: nowSeconds,
+    has_visible_messages: true,
+    is_active: true,
+    is_live_tui_process: true,
   }
 }
 
@@ -398,12 +434,22 @@ function buildConversationSessionSql(source?: string): { sql: string, params: an
 }
 
 async function loadConversationSessions(source?: string): Promise<ConversationSessionRow[]> {
+  const liveTuiSessionKeys = await listLiveTuiSessionKeys()
   const db = await openConversationDb()
   try {
     const { sql, params } = buildConversationSessionSql(source)
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
     const nowSeconds = Date.now() / 1000
-    return rows.map(row => mapSessionRow(row, nowSeconds))
+    const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
+    if (source && source !== 'tui') return sessions
+
+    const knownIds = new Set(sessions.map(session => session.id))
+    for (const sessionKey of liveTuiSessionKeys) {
+      if (!knownIds.has(sessionKey)) {
+        sessions.push(createLiveTuiPlaceholderSession(sessionKey, nowSeconds))
+      }
+    }
+    return sessions
   } finally {
     db.close()
   }
@@ -492,14 +538,13 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       })
 
     if (!messages.length) {
-      return humanOnly
-        ? null
-        : {
-            session_id: sessionId,
-            messages: [],
-            visible_count: 0,
-            thread_session_count: chain.length,
-          }
+      if (humanOnly && !chain.some(session => session.is_live_tui_process)) return null
+      return {
+        session_id: sessionId,
+        messages: [],
+        visible_count: 0,
+        thread_session_count: chain.length,
+      }
     }
     return {
       session_id: sessionId,

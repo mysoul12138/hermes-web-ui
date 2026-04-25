@@ -89,6 +89,7 @@ function buildProxyHeaders(ctx: Context, upstream: string): Record<string, strin
 // --- SSE stream interception ---
 
 const SSE_EVENTS_PATH = /^\/v1\/runs\/([^/]+)\/events$/
+const RUN_CANCEL_PATH = /^\/v1\/runs\/([^/]+)\/cancel$/
 
 /**
  * Parse SSE text chunks and extract approval / completion lifecycle events.
@@ -224,6 +225,23 @@ export async function proxy(ctx: Context) {
       } catch (err) {
         ctx.status = 502
         ctx.body = { error: { message: `Bridge error: ${err instanceof Error ? err.message : String(err)}` } }
+        return
+      }
+    }
+
+    const bridgeCancelMatch = upstreamPath.match(RUN_CANCEL_PATH)
+    if (tuiBridge.isEnabled() && ctx.req.method === 'POST' && bridgeCancelMatch) {
+      try {
+        const result = await tuiBridge.cancelRun(bridgeCancelMatch[1])
+        if (result) {
+          ctx.status = 200
+          ctx.set('Content-Type', 'application/json')
+          ctx.body = result
+          return
+        }
+      } catch (err) {
+        ctx.status = 502
+        ctx.body = { error: { message: `Bridge cancel error: ${err instanceof Error ? err.message : String(err)}` } }
         return
       }
     }

@@ -16,6 +16,7 @@ export interface StartRunRequest {
 export interface StartRunResponse {
   run_id: string
   status: string
+  bridge?: boolean
 }
 
 // SSE event types from /v1/runs/{id}/events
@@ -65,6 +66,12 @@ export async function startRun(body: StartRunRequest): Promise<StartRunResponse>
   return request<StartRunResponse>('/api/hermes/v1/runs', {
     method: 'POST',
     body: JSON.stringify(body),
+  })
+}
+
+export async function cancelRun(runId: string): Promise<void> {
+  await request(`/api/hermes/v1/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
   })
 }
 

@@ -1,4 +1,5 @@
 import { exportSessionsRaw, type HermesSessionFull } from './hermes-cli'
+import { listLiveTuiSessionKeys } from './tui-live'
 
 const LINEAGE_TOLERANCE_SECONDS = 3
 const LIVE_WINDOW_SECONDS = 300
@@ -23,6 +24,7 @@ type ConversationSession = HermesSessionFull & {
   preview: string
   last_active: number
   is_active: boolean
+  is_live_tui_process?: boolean
 }
 
 type CachedExport = {
@@ -166,18 +168,51 @@ function maxMessageTimestamp(messages: HermesMessageLike[]): number {
   }, 0)
 }
 
-function enrichSession(session: HermesSessionFull, nowSeconds: number): ConversationSession {
+function enrichSession(session: HermesSessionFull, nowSeconds: number, liveTuiSessionKeys: Set<string>): ConversationSession {
   const messages = Array.isArray(session.messages) ? session.messages : []
+  const source = safeText(session.source)
+  const isLiveTuiProcess = source === 'tui' && liveTuiSessionKeys.has(safeText(session.id))
   const preview = excerpt(firstVisibleHumanText(messages))
   const lastActive = maxMessageTimestamp(messages) || Number(session.ended_at || session.started_at || 0)
   const endedAt = session.ended_at ?? null
   return {
     ...session,
     parent_session_id: (session.parent_session_id as string | null | undefined) ?? null,
-    preview,
+    preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
-    is_active: endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS,
+    is_active: isLiveTuiProcess || (endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS),
+    is_live_tui_process: isLiveTuiProcess,
   }
+}
+
+function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): ConversationSession {
+  return {
+    id,
+    source: 'tui',
+    user_id: null,
+    model: '',
+    title: null,
+    started_at: nowSeconds,
+    ended_at: null,
+    end_reason: null,
+    message_count: 0,
+    tool_call_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    billing_provider: null,
+    estimated_cost_usd: 0,
+    actual_cost_usd: null,
+    cost_status: '',
+    messages: [],
+    parent_session_id: null,
+    preview: 'Running TUI session',
+    last_active: nowSeconds,
+    is_active: true,
+    is_live_tui_process: true,
+  } as ConversationSession
 }
 
 function sortByRecency<T extends { last_active: number; started_at: number; id: string }>(items: T[]): T[] {
@@ -285,6 +320,7 @@ function visibleMessagesForSessions(sessions: HermesSessionFull[]): Conversation
 
 function hasVisibleHumanMessages(sessions: HermesSessionFull[]): boolean {
   return visibleMessagesForSessions(sessions).length > 0
+    || sessions.some(session => (session as ConversationSession).is_live_tui_process)
 }
 
 function toSummary(session: ConversationSession): ConversationSummary {
@@ -365,7 +401,17 @@ async function loadSessions(source?: string): Promise<ConversationSession[]> {
   }
 
   const nowSeconds = nowMs / 1000
-  return raws.map(raw => enrichSession(raw, nowSeconds))
+  const liveTuiSessionKeys = await listLiveTuiSessionKeys()
+  const sessions = raws.map(raw => enrichSession(raw, nowSeconds, liveTuiSessionKeys))
+  if (source && source !== 'tui') return sessions
+
+  const knownIds = new Set(sessions.map(session => session.id))
+  for (const sessionKey of liveTuiSessionKeys) {
+    if (!knownIds.has(sessionKey)) {
+      sessions.push(createLiveTuiPlaceholderSession(sessionKey, nowSeconds))
+    }
+  }
+  return sessions
 }
 
 export async function listConversationSummaries(options: ConversationListOptions = {}): Promise<ConversationSummary[]> {
@@ -425,7 +471,7 @@ export async function getConversationDetail(sessionId: string, options: Conversa
   if (!isVisibleRoot(root, byId)) return null
   const chain = collectConversationChain(sessionId, byId, childrenByParent)
   const messages = visibleMessagesForSessions(chain)
-  if (!messages.length) return null
+  if (!messages.length && !chain.some(session => session.is_live_tui_process)) return null
   return {
     session_id: sessionId,
     messages,
