@@ -62,7 +62,10 @@ export async function getAvailable(ctx: any) {
       if (!envMapping.api_key_env && !isOAuthAuthorized(providerKey)) continue
       const preset = PROVIDER_PRESETS.find((p: any) => p.value === providerKey)
       const label = preset?.label || providerKey.replace(/^custom:/, '')
-      const baseUrl = preset?.base_url || ''
+      let baseUrl = preset?.base_url || ''
+      if (envMapping.base_url_env && envHasValue(envMapping.base_url_env)) {
+        baseUrl = envGetValue(envMapping.base_url_env) || baseUrl
+      }
       const catalogModels = PROVIDER_MODEL_CATALOG[providerKey]
       if (catalogModels && catalogModels.length > 0) {
         const apiKey = envMapping.api_key_env ? envGetValue(envMapping.api_key_env) : ''
@@ -136,6 +139,8 @@ export async function setConfigModel(ctx: any) {
     const config = await readConfigYaml()
     if (typeof config.model !== 'object' || config.model === null) { config.model = {} }
     config.model.default = defaultModel
+    delete config.model.base_url
+    delete config.model.api_key
     if (reqProvider) { config.model.provider = reqProvider }
     await writeConfigYaml(config)
     ctx.body = { success: true }

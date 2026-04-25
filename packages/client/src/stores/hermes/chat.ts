@@ -958,6 +958,8 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     let persistTimer: ReturnType<typeof setTimeout> | null = null
+    let runProducedAssistantText = false
+    let runHadToolActivity = false
     const schedulePersist = () => {
       if (sid !== activeSessionId.value || persistTimer) return
       persistTimer = setTimeout(() => {
@@ -990,6 +992,7 @@ export const useChatStore = defineStore('chat', () => {
           case 'thinking.delta': {
             const text = evt.text || evt.delta || ''
             if (!text) break
+            runProducedAssistantText = true
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
@@ -1022,6 +1025,7 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           case 'message.delta': {
+            if (evt.delta) runProducedAssistantText = true
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
@@ -1047,6 +1051,7 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           case 'tool.started': {
+            runHadToolActivity = true
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.isStreaming) {
@@ -1068,6 +1073,7 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           case 'tool.completed': {
+            runHadToolActivity = true
             const msgs = getSessionMsgs(sid)
             const toolMsgs = msgs.filter(
               m => m.role === 'tool' && m.toolStatus === 'running',
@@ -1095,6 +1101,26 @@ export const useChatStore = defineStore('chat', () => {
                 target.inputTokens = evt.usage.input_tokens
                 target.outputTokens = evt.usage.output_tokens
               }
+            }
+            const finalOutput = typeof evt.output === 'string' ? evt.output : ''
+            const finalOutputTrimmed = finalOutput.trim()
+            if (!runProducedAssistantText && finalOutputTrimmed !== '') {
+              addMessage(sid, {
+                id: uid(),
+                role: 'assistant',
+                content: finalOutput,
+                timestamp: Date.now(),
+              })
+              runProducedAssistantText = true
+            }
+            const swallowedError = !runProducedAssistantText && !runHadToolActivity && finalOutputTrimmed === ''
+            if (swallowedError) {
+              addMessage(sid, {
+                id: uid(),
+                role: 'system',
+                content: 'Error: Agent returned no output. The model call may have failed (e.g. invalid API key, model not supported by provider, or context exceeded). Check the hermes-agent logs for details.',
+                timestamp: Date.now(),
+              })
             }
             cleanup()
             updateSessionTitle(sid)
