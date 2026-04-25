@@ -1,4 +1,4 @@
-import { cancelRun, startRun, steerSession, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import { cancelRun, startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
 import {
   getPendingApproval,
   respondApproval as respondApprovalApi,
@@ -35,7 +35,6 @@ export interface Message {
   toolStatus?: 'running' | 'done' | 'error'
   isStreaming?: boolean
   queued?: boolean
-  steered?: boolean
   subagentId?: string
   subagentDepth?: number
   attachments?: Attachment[]
@@ -115,13 +114,6 @@ function textFromRunEvent(evt: RunEvent): string {
     if (typeof value === 'string' && value) return value
   }
   return ''
-}
-
-function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
-  const r = reasoningText.trim()
-  const c = assistantContent.trim()
-  if (!r || !c) return false
-  return c === r || c.startsWith(r)
 }
 
 function extractPendingApprovalFromMessages(messages: Message[]): PendingApproval | null {
@@ -324,6 +316,12 @@ interface ApprovalState {
   submitting: boolean
 }
 
+interface QueuedInput {
+  content: string
+  attachments?: Attachment[]
+  messageId: string
+}
+
 function loadJson<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key)
@@ -471,6 +469,7 @@ export const useChatStore = defineStore('chat', () => {
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
   const approvalsBySession = ref<Record<string, ApprovalState>>({})
+  const queuedInputs = ref<Record<string, QueuedInput[]>>({})
   const dbBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const liveBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
@@ -485,6 +484,10 @@ export const useChatStore = defineStore('chat', () => {
     return persisted.length ? persisted : (liveBranchesBySession.value[sid] || [])
   })
   const displayMessages = computed<Message[]>(() => messages.value)
+  const activeQueuedInputCount = computed(() => {
+    const sid = activeSessionId.value
+    return sid ? queuedInputs.value[sid]?.length || 0 : 0
+  })
   const activeApproval = computed<ApprovalState | null>(() => {
     const sid = activeSessionId.value
     if (!sid) return null
@@ -783,64 +786,44 @@ export const useChatStore = defineStore('chat', () => {
     if (s) saveJsonWithLegacy(msgsCacheKey(sid), sanitizeForCache(s.messages), legacyMsgsCacheKey(sid))
   }
 
-  function busyInputSteerEnabled() {
+  function busyInputQueueEnabled() {
     return useSettingsStore().display.busy_input_mode === 'interrupt'
   }
 
-  function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
-    const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
-    const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
-    return localSteered.length ? [...mapped, ...localSteered] : mapped
+  function queuedMessagesFor(sid: string, messages: Message[]): Message[] {
+    const queuedIds = new Set((queuedInputs.value[sid] || []).map(item => item.messageId))
+    if (queuedIds.size === 0) return []
+    return messages.filter(message => queuedIds.has(message.id))
   }
 
-  function countConversationUsers(messages: Message[]): number {
-    return messages.filter(message => message.role === 'user' && !message.queued && !message.steered).length
+  function withQueuedMessages(sid: string, mapped: Message[], current: Message[]): Message[] {
+    const queued = queuedMessagesFor(sid, current)
+    return queued.length ? [...mapped, ...queued] : mapped
   }
 
-  async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
+  function setQueuedInputsForSession(sid: string, queue: QueuedInput[]) {
+    queuedInputs.value = {
+      ...queuedInputs.value,
+      [sid]: queue,
+    }
+  }
+
+  function queueBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const messageId = uid()
-    let steerText = content.trim()
     const userMsg: Message = {
       id: messageId,
       role: 'user',
-      content: steerText,
+      content: content.trim(),
       timestamp: Date.now(),
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
-      steered: true,
+      queued: true,
     }
     addMessage(sid, userMsg)
     updateSessionTitle(sid)
+    setQueuedInputsForSession(sid, [...(queuedInputs.value[sid] || []), { content, attachments, messageId }])
     if (sid === activeSessionId.value) {
       persistActiveMessages()
       persistSessionsList()
-    }
-
-    try {
-      if (attachments && attachments.length > 0) {
-        const uploaded = await uploadFiles(attachments)
-        const pathParts = uploaded.map(f => `[File: ${f.name}](${f.path})`)
-        steerText = steerText ? steerText + '\n\n' + pathParts.join('\n') : pathParts.join('\n')
-      }
-      const result = await steerSession(sid, steerText)
-      if (!result.ok) {
-        updateMessage(sid, messageId, { steered: false })
-        addMessage(sid, {
-          id: uid(),
-          role: 'system',
-          content: `Error: /steer was not accepted (${result.status || 'unknown'}).`,
-          timestamp: Date.now(),
-        })
-      }
-    } catch (err: any) {
-      updateMessage(sid, messageId, { steered: false })
-      addMessage(sid, {
-        id: uid(),
-        role: 'system',
-        content: `Error: ${err.message}`,
-        timestamp: Date.now(),
-      })
-    } finally {
-      if (sid === activeSessionId.value) persistActiveMessages()
     }
   }
 
@@ -948,8 +931,8 @@ export const useChatStore = defineStore('chat', () => {
         const serverLastAssistant = [...mapped].reverse().find(m => m.role === 'assistant')
         const localAssistantLen = localLastAssistant?.content?.length ?? 0
         const serverAssistantLen = serverLastAssistant?.content?.length ?? 0
-        const localUsers = countConversationUsers(local)
-        const serverUsers = countConversationUsers(mapped)
+        const localUsers = local.filter(m => m.role === 'user').length
+        const serverUsers = mapped.filter(m => m.role === 'user').length
         const serverIsCaughtUp = serverUsers >= localUsers
         // Same rationale as switchSession: strictly more user turns means
         // server is ahead (new turn complete). Equal user turns + longer
@@ -958,7 +941,7 @@ export const useChatStore = defineStore('chat', () => {
           serverUsers > localUsers
           || (serverUsers === localUsers && serverAssistantLen >= localAssistantLen)
         if (serverIsAhead) {
-          target.messages = withLocalSteeredMessages(mapped, target.messages)
+          target.messages = withQueuedMessages(sid, mapped, target.messages)
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         }
@@ -981,11 +964,12 @@ export const useChatStore = defineStore('chat', () => {
               // Run is done on the server. Force-apply server view even if
               // our "don't retreat" guard above skipped it — the server is
               // now the authoritative source of truth.
-              target.messages = withLocalSteeredMessages(mapped, target.messages)
+              target.messages = withQueuedMessages(sid, mapped, target.messages)
               if (detail.title) target.title = detail.title
               if (sid === activeSessionId.value) persistActiveMessages()
               clearInFlight(sid)
               stopPolling(sid)
+              drainQueuedInput(sid)
             }
           } else {
             pollSignatures.set(sid, { sig, stableTicks: 0 })
@@ -1112,7 +1096,7 @@ export const useChatStore = defineStore('chat', () => {
       if (!target) return false
       if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
-      target.messages = withLocalSteeredMessages(mapped, target.messages)
+      target.messages = withQueuedMessages(sid, mapped, target.messages)
       void refreshSessionBranches(sid)
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, mapped)
@@ -1250,10 +1234,7 @@ export const useChatStore = defineStore('chat', () => {
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
-              const shouldAppendReasoning = text
-                && (!last.reasoning || !last.reasoning.includes(text))
-                && !isBuggyReasoningPreview(text, last.content || '')
-              if (shouldAppendReasoning) {
+              if (text && (!last.reasoning || !last.reasoning.includes(text))) {
                 updateMessage(sid, last.id, {
                   reasoning: last.reasoning ? `${last.reasoning}\n\n${text}` : text,
                 })
@@ -1384,9 +1365,11 @@ export const useChatStore = defineStore('chat', () => {
             if (sid === activeSessionId.value) {
               void refreshActiveSession().finally(() => {
                 void refreshSessionBranches(sid)
+                drainQueuedInput(sid)
               })
             } else {
               void refreshSessionBranches(sid)
+              drainQueuedInput(sid)
             }
             break
           }
@@ -1422,6 +1405,7 @@ export const useChatStore = defineStore('chat', () => {
             stopPolling(sid)
             stopApprovalPolling(sid)
             clearApproval(sid)
+            drainQueuedInput(sid)
             break
           }
         }
@@ -1439,6 +1423,7 @@ export const useChatStore = defineStore('chat', () => {
         stopApprovalPolling(sid)
         clearApproval(sid)
         if (sid === activeSessionId.value) persistActiveMessages()
+        drainQueuedInput(sid)
       },
       (err) => {
         console.warn('SSE connection dropped, resyncing from server:', err.message)
@@ -1527,8 +1512,8 @@ export const useChatStore = defineStore('chat', () => {
         const serverLastAssistant = [...mapped].reverse().find(m => m.role === 'assistant')
         const localAssistantLen = localLastAssistant?.content?.length ?? 0
         const serverAssistantLen = serverLastAssistant?.content?.length ?? 0
-        const localUsers = countConversationUsers(local)
-        const serverUsers = countConversationUsers(mapped)
+        const localUsers = local.filter(m => m.role === 'user').length
+        const serverUsers = mapped.filter(m => m.role === 'user').length
         // Trust server when:
         //   - it has STRICTLY MORE user turns than we do (new turn landed),
         //     OR
@@ -1542,7 +1527,7 @@ export const useChatStore = defineStore('chat', () => {
           serverUsers > localUsers
           || (serverUsers === localUsers && serverAssistantLen >= localAssistantLen)
         if (serverIsAhead) {
-          activeSession.value.messages = withLocalSteeredMessages(mapped, activeSession.value.messages)
+          activeSession.value.messages = withQueuedMessages(sessionId, mapped, activeSession.value.messages)
         }
         void refreshSessionBranches(sessionId)
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {
@@ -1562,7 +1547,7 @@ export const useChatStore = defineStore('chat', () => {
         if (detail.title) {
           activeSession.value.title = detail.title
         } else if (!activeSession.value.title) {
-          const firstUser = (activeSession.value.messages).find(m => m.role === 'user' && !m.steered)
+          const firstUser = (activeSession.value.messages).find(m => m.role === 'user')
           if (firstUser) {
             const t = firstUser.content.slice(0, 40)
             activeSession.value.title = t + (firstUser.content.length > 40 ? '...' : '')
@@ -1658,7 +1643,7 @@ export const useChatStore = defineStore('chat', () => {
     const target = sessions.value.find(s => s.id === sessionId)
     if (!target) return
     if (!target.title) {
-      const firstUser = target.messages.find(m => m.role === 'user' && !m.steered)
+      const firstUser = target.messages.find(m => m.role === 'user')
       if (firstUser) {
         const title = firstUser.attachments?.length
           ? firstUser.attachments.map(a => a.name).join(', ')
@@ -1786,7 +1771,7 @@ export const useChatStore = defineStore('chat', () => {
       // Build conversation history from past messages
       const sessionMsgs = getSessionMsgs(sid)
       const history: ChatMessage[] = sessionMsgs
-        .filter(m => !m.queued && !m.steered && (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+        .filter(m => !m.queued && (m.role === 'user' || m.role === 'assistant') && m.content.trim())
         .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
 
       // Upload attachments and build input with file paths
@@ -1846,11 +1831,20 @@ export const useChatStore = defineStore('chat', () => {
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
     if (isStreaming.value) {
-      if (busyInputSteerEnabled()) void steerBusyInput(sid, content, attachments)
+      if (busyInputQueueEnabled()) queueBusyInput(sid, content, attachments)
       return
     }
 
     await submitMessage(sid, content, attachments)
+  }
+
+  function drainQueuedInput(sid: string) {
+    if (streamStates.value.has(sid) || readInFlight(sid)) return
+    const queue = queuedInputs.value[sid] || []
+    const next = queue[0]
+    if (!next) return
+    setQueuedInputsForSession(sid, queue.slice(1))
+    void submitMessage(sid, next.content, next.attachments, next.messageId)
   }
 
   async function stopStreaming() {
@@ -1881,12 +1875,14 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!inFlight?.runId || !inFlight.runId.startsWith('bridge_run_')) {
       clearInFlight(sid)
+      drainQueuedInput(sid)
       return
     }
 
     try {
       await cancelRun(inFlight.runId)
       clearInFlight(sid)
+      drainQueuedInput(sid)
     } catch (err) {
       console.warn('Failed to cancel run:', err)
     }
@@ -1957,6 +1953,7 @@ export const useChatStore = defineStore('chat', () => {
     activeSessionId,
     activeSession,
     activeApproval,
+    activeQueuedInputCount,
     focusMessageId,
     messages,
     displayMessages,

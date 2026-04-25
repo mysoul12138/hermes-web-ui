@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { NModal, NForm, NFormItem, NInput, NButton, NSelect, NInputNumber, useMessage } from 'naive-ui'
-import type { UpdateJobRequest } from '@/api/hermes/jobs'
 import { useJobsStore } from '@/stores/hermes/jobs'
 import { useI18n } from 'vue-i18n'
 
@@ -50,7 +49,6 @@ const targetOptions = computed(() => [
 ])
 
 const originalSchedule = ref<{ kind: string; expr: string; display: string } | null>(null)
-const originalHiddenFields = ref<Pick<UpdateJobRequest, 'skills' | 'skill' | 'model' | 'provider' | 'base_url' | 'script' | 'enabled'>>({})
 
 onMounted(async () => {
   if (props.jobId) {
@@ -66,15 +64,6 @@ onMounted(async () => {
       }
       if (typeof job.schedule === 'object' && job.schedule) {
         originalSchedule.value = job.schedule
-      }
-      originalHiddenFields.value = {
-        skills: job.skills,
-        skill: job.skill,
-        model: job.model,
-        provider: job.provider,
-        base_url: job.base_url,
-        script: job.script,
-        enabled: job.enabled,
       }
     } catch (e: any) {
       message.error(t('jobs.loadFailed') + ': ' + e.message)
@@ -94,7 +83,7 @@ async function handleSave() {
 
   loading.value = true
   try {
-    const payload: UpdateJobRequest = {
+    const payload = {
       name: formData.value.name,
       schedule: formData.value.schedule,
       prompt: formData.value.prompt,
@@ -108,7 +97,6 @@ async function handleSave() {
         expr: formData.value.schedule,
         display: formData.value.schedule,
       }
-      Object.assign(payload, originalHiddenFields.value)
     }
 
     if (isEdit.value) {

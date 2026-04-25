@@ -8,7 +8,9 @@ const chatStore = useChatStore();
 const { t } = useI18n();
 const listRef = ref<HTMLElement>();
 
-const displayMessages = computed(() => chatStore.displayMessages);
+const displayMessages = computed(() =>
+  chatStore.displayMessages.filter((m) => m.role !== "tool"),
+);
 
 const showRunCursor = computed(() => {
   if (!chatStore.isRunActive) return false;

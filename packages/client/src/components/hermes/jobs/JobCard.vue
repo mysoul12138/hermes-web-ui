@@ -107,10 +107,6 @@ async function handleDelete() {
         <span class="info-label">{{ t('jobs.info.deliver') }}</span>
         <span class="info-value">{{ job.deliver }}<template v-if="job.origin"> ({{ job.origin.platform }})</template></span>
       </div>
-      <div v-if="job.last_error" class="info-row info-row-error">
-        <span class="info-label">{{ t('jobs.info.lastError') }}</span>
-        <span class="info-value info-value-error" :title="job.last_error">{{ job.last_error }}</span>
-      </div>
       <div v-if="job.repeat" class="info-row">
         <span class="info-label">{{ t('jobs.info.repeat') }}</span>
         <span class="info-value">
@@ -215,7 +211,6 @@ async function handleDelete() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
 }
 
 .info-label {
@@ -226,18 +221,6 @@ async function handleDelete() {
 .info-value {
   font-size: 12px;
   color: $text-secondary;
-  text-align: right;
-}
-
-.info-row-error {
-  align-items: flex-start;
-}
-
-.info-value-error {
-  max-width: 60%;
-  color: $error;
-  white-space: normal;
-  word-break: break-word;
 }
 
 .run-status {
