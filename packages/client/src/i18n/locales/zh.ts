@@ -162,6 +162,12 @@ export default {
     approvalPendingCount: '当前第 {current} 个，共 {total} 个待审批',
     approvalDangerousCommand: 'Hermes 想执行一个可能有风险的命令：',
     approvalResponding: '正在提交审批结果...',
+    thinkingLabel: '思考过程',
+    thinkingInProgress: '思考中…',
+    thinkingShow: '展开思考过程',
+    thinkingHide: '收起思考过程',
+    thinkingDuration: '已观察 {duration}',
+    thinkingChars: '{count} 字',
   },
 
   // 定时任务

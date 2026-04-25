@@ -162,6 +162,12 @@ export default {
     approvalPendingCount: 'Showing {current} of {total} pending approvals',
     approvalDangerousCommand: 'Hermes wants to run a potentially risky command:',
     approvalResponding: 'Submitting approval response...',
+    thinkingLabel: 'Thinking',
+    thinkingInProgress: 'Thinking…',
+    thinkingShow: 'Show thinking',
+    thinkingHide: 'Hide thinking',
+    thinkingDuration: 'Observed {duration}',
+    thinkingChars: '{count} chars',
   },
 
   // Jobs
