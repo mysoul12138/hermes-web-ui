@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const mockChatApi = vi.hoisted(() => ({
   startRun: vi.fn(),
+  steerSession: vi.fn(),
   streamRunEvents: vi.fn(),
 }))
 
@@ -14,10 +15,17 @@ const mockSessionsApi = vi.hoisted(() => ({
   renameSession: vi.fn(),
 }))
 
+const mockApprovalApi = vi.hoisted(() => ({
+  getPendingApproval: vi.fn(),
+  respondApproval: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
+vi.mock('@/api/hermes/approval', () => mockApprovalApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
+import { useSettingsStore } from '@/stores/hermes/settings'
 
 function makeSummary(id: string, title = 'Session') {
   return {
@@ -72,7 +80,10 @@ describe('Chat Store', () => {
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.deleteSession.mockResolvedValue(true)
     mockSessionsApi.renameSession.mockResolvedValue(true)
+    mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
+    mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
+    mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
     mockChatApi.streamRunEvents.mockImplementation(() => ({
       abort: vi.fn(),
     }))
@@ -136,6 +147,35 @@ describe('Chat Store', () => {
     )
   })
 
+  it('sends busy input through steer instead of queueing a new run', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'interrupt'
+    const store = useChatStore()
+
+    await flushPromises()
+    await store.sendMessage('start task')
+    await flushPromises()
+
+    const sid = store.activeSessionId
+    expect(sid).toBeTruthy()
+    expect(store.isStreaming).toBe(true)
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockChatApi.startRun).toHaveBeenCalledTimes(1)
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+        }),
+      ]),
+    )
+  })
+
   it('hydrates from default-profile legacy cache and migrates bulky storage to new keys only', async () => {
     const cachedSession = {
       id: 'legacy-1',
@@ -171,7 +211,7 @@ describe('Chat Store', () => {
     expect(window.localStorage.getItem(legacySessionMessagesKey('legacy-1'))).toBeNull()
   })
 
-  it('marks recently active server sessions as live even when this tab did not start the run', async () => {
+  it('does not mark server sessions live from last_active alone', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-22T19:00:00.000Z'))
 
@@ -191,7 +231,7 @@ describe('Chat Store', () => {
     const store = useChatStore()
     await store.loadSessions()
 
-    expect(store.isSessionLive('remote-live')).toBe(true)
+    expect(store.isSessionLive('remote-live')).toBe(false)
     expect(store.isSessionLive('remote-idle')).toBe(false)
   })
 

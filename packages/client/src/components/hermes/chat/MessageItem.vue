@@ -425,7 +425,8 @@ const renderedToolResult = computed(() => {
             <span v-if="message.isStreaming" class="streaming-cursor"></span>
           </div>
           <div class="message-time">
-            <span v-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
+            <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
+            <span v-else-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
             {{ timeStr }}
           </div>
         </div>

@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const mockChatApi = vi.hoisted(() => ({
   startRun: vi.fn(),
+  steerSession: vi.fn(),
   streamRunEvents: vi.fn(),
 }))
 
@@ -51,6 +52,7 @@ describe('chat store — reasoning.available should not clobber content', () => 
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.fetchSessionUsageSingle?.mockResolvedValue?.(null)
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
+    mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued' })
   })
 
   it('keeps streamed reasoning.delta when a later reasoning.available carries the assistant content (upstream bug)', async () => {

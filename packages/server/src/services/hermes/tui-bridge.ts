@@ -347,6 +347,26 @@ class TuiBridgeService {
     return { ok: true, choice, bridge: true, result }
   }
 
+  async steer(webSessionId: string, text: string) {
+    if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
+    const bridgeSessionId = this.bridgeSessionsByWebSession.get(webSessionId)
+    if (!bridgeSessionId) throw new Error('bridge session not found')
+    const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
+    if (!runId) throw new Error('session is not running')
+    const result = await this.client.request<{ status?: string, text?: string }>('session.steer', {
+      session_id: bridgeSessionId,
+      text,
+    })
+    this.scheduleIdleHeartbeat(runId)
+    return {
+      ok: result.status === 'queued',
+      status: result.status || 'unknown',
+      text: result.text || text,
+      run_id: runId,
+      bridge: true,
+    }
+  }
+
   async cancelRun(runId: string) {
     const state = this.runs.get(runId)
     if (!state) return null
