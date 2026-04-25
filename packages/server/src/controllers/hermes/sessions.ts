@@ -4,16 +4,37 @@ import {
   getConversationDetailFromDb,
   listConversationSummariesFromDb,
 } from '../../db/hermes/conversations-db'
-import { listSessionSummaries, searchSessionSummaries } from '../../db/hermes/sessions-db'
+import { getSessionThreadDetail, listSessionSummaries, searchSessionSummaries } from '../../db/hermes/sessions-db'
 import { deleteUsage, getUsage, getUsageBatch } from '../../db/hermes/usage-store'
 import { getModelContextLength } from '../../services/hermes/model-context'
 import type { ConversationDetail, ConversationSummary } from '../../services/hermes/conversations'
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { getGroupChatServer } from '../../routes/hermes/group-chat'
 import { logger } from '../../services/logger'
+import { existsSync, readFileSync } from 'fs'
+import YAML from 'js-yaml'
+import { getActiveConfigPath } from '../../services/hermes/hermes-profile'
+
+function parseBridgeFlag(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return null
+}
 
 function bridgeSessionFallbackEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(process.env.HERMES_WEBUI_BRIDGE || '')
+  try {
+    const configPath = getActiveConfigPath()
+    if (existsSync(configPath)) {
+      const config = YAML.load(readFileSync(configPath, 'utf-8')) as Record<string, any> | null
+      const configured = parseBridgeFlag(config?.webui?.bridge_enabled)
+      if (configured !== null) return configured
+    }
+  } catch {}
+  return parseBridgeFlag(process.env.HERMES_WEBUI_BRIDGE) === true
 }
 
 function createBridgeSessionFallback(id: string) {
@@ -75,7 +96,12 @@ function hasPendingDeletedConversation(detail: ConversationDetail): boolean {
   const pendingIds = getPendingDeletedSessionIds()
   if (pendingIds.size === 0) return false
   if (pendingIds.has(detail.session_id)) return true
-  return detail.messages.some(message => pendingIds.has(message.session_id))
+  const hasPendingBranch = (detail.branches || []).some(function visit(branch): boolean {
+    if (pendingIds.has(branch.session_id)) return true
+    if (branch.messages.some(message => pendingIds.has(message.session_id))) return true
+    return (branch.branches || []).some(visit)
+  })
+  return hasPendingBranch || detail.messages.some(message => pendingIds.has(message.session_id))
 }
 
 function getGroupChatStorage() {
@@ -163,6 +189,16 @@ export async function get(ctx: any) {
     ctx.status = 404
     ctx.body = { error: 'Session not found' }
     return
+  }
+
+  try {
+    const threaded = await getSessionThreadDetail(ctx.params.id)
+    if (threaded) {
+      ctx.body = { session: threaded }
+      return
+    }
+  } catch (err) {
+    logger.warn(err, 'Hermes Session DB: thread detail query failed, falling back to CLI')
   }
 
   const session = await hermesCli.getSession(ctx.params.id)

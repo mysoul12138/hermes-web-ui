@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { renameSession } from '@/api/hermes/sessions'
+import type { ConversationBranch } from '@/api/hermes/conversations'
 import { useChatStore, type Session } from '@/stores/hermes/chat'
 import { useSessionBrowserPrefsStore } from '@/stores/hermes/session-browser-prefs'
 import { NButton, NDropdown, NInput, NModal, NTooltip, useMessage } from 'naive-ui'
@@ -18,6 +19,7 @@ const message = useMessage()
 const { t } = useI18n()
 
 const currentMode = ref<'chat' | 'live'>('chat')
+const BRANCH_TREE_VISIBLE_LIMIT = 2
 
 // Initialize synchronously from the media query so first paint is correct.
 // On narrow viewports the session list is an absolute-positioned overlay
@@ -34,6 +36,102 @@ const isMobile = ref(false)
 
 function handleSessionClick(sessionId: string) {
   chatStore.switchSession(sessionId)
+  if (mobileQuery?.matches) showSessions.value = false
+}
+
+type BranchRow = ConversationBranch & { depth: number }
+
+function flattenBranches(branches: ConversationBranch[], depth = 0): BranchRow[] {
+  return branches.flatMap(branch => [
+    { ...branch, depth },
+    ...flattenBranches(branch.branches || [], depth + 1),
+  ])
+}
+
+function branchRows(sessionId: string): BranchRow[] {
+  return flattenBranches(chatStore.sessionBranches(sessionId))
+    .sort((a, b) => {
+      const aLive = isBranchLive(a)
+      const bLive = isBranchLive(b)
+      if (aLive !== bLive) return aLive ? -1 : 1
+      const aLastActive = branchLastActive(a)
+      const bLastActive = branchLastActive(b)
+      if (aLastActive !== bLastActive) return bLastActive - aLastActive
+      return b.started_at - a.started_at
+    })
+}
+
+function visibleBranchRows(sessionId: string): BranchRow[] {
+  const rows = branchRows(sessionId)
+  if (rows.length <= BRANCH_TREE_VISIBLE_LIMIT || isFullBranchTreeExpanded(sessionId)) return rows
+  return rows.slice(0, BRANCH_TREE_VISIBLE_LIMIT)
+}
+
+function hiddenBranchCount(sessionId: string): number {
+  return Math.max(0, branchRows(sessionId).length - BRANCH_TREE_VISIBLE_LIMIT)
+}
+
+function branchTitle(branch: ConversationBranch): string {
+  return branch.title || branch.messages.find(message => message.content.trim())?.content.slice(0, 72) || branch.session_id
+}
+
+function branchSession(branch: ConversationBranch): Session | undefined {
+  return chatStore.sessions.find(session => session.id === branch.session_id)
+}
+
+function branchLastActive(branch: ConversationBranch): number {
+  const session = branchSession(branch)
+  return Math.max(branch.last_active || 0, session?.updatedAt ? session.updatedAt / 1000 : 0)
+}
+
+function isBranchLive(branch: ConversationBranch): boolean {
+  return chatStore.isSessionLive(branch.session_id)
+}
+
+function hasLiveBranch(sessionId: string): boolean {
+  return flattenBranches(chatStore.sessionBranches(sessionId)).some(isBranchLive)
+}
+
+function isSessionTreeLive(sessionId: string): boolean {
+  return chatStore.isSessionLive(sessionId) || hasLiveBranch(sessionId)
+}
+
+function isBranchExpanded(sessionId: string): boolean {
+  return expandedBranchSessions.value.has(sessionId)
+}
+
+function toggleSessionBranches(sessionId: string) {
+  const next = new Set(expandedBranchSessions.value)
+  if (next.has(sessionId)) {
+    next.delete(sessionId)
+  } else {
+    next.add(sessionId)
+    void chatStore.refreshSessionBranches(sessionId)
+  }
+  expandedBranchSessions.value = next
+}
+
+function isFullBranchTreeExpanded(sessionId: string): boolean {
+  return expandedFullBranchTrees.value.has(sessionId)
+}
+
+function toggleBranchTreeLimit(sessionId: string) {
+  const next = new Set(expandedFullBranchTrees.value)
+  if (next.has(sessionId)) next.delete(sessionId)
+  else next.add(sessionId)
+  expandedFullBranchTrees.value = next
+}
+
+function isBranchSelected(parentSessionId: string, branchId: string): boolean {
+  return chatStore.activeSessionId === branchId && chatStore.activeSession?.rootSessionId === parentSessionId
+}
+
+function isSessionTreeActive(sessionId: string): boolean {
+  return chatStore.activeSessionId === sessionId || chatStore.activeSession?.rootSessionId === sessionId
+}
+
+function handleBranchClick(parentSessionId: string, branchId: string) {
+  void chatStore.switchBranchSession(parentSessionId, branchId)
   if (mobileQuery?.matches) showSessions.value = false
 }
 
@@ -69,6 +167,8 @@ const renameValue = ref('')
 const renameSessionId = ref<string | null>(null)
 const renameInputRef = ref<InstanceType<typeof NInput> | null>(null)
 const collapsedGroups = ref<Set<string>>(new Set(JSON.parse(localStorage.getItem('hermes_collapsed_groups') || '[]')))
+const expandedBranchSessions = ref<Set<string>>(new Set())
+const expandedFullBranchTrees = ref<Set<string>>(new Set())
 
 // Source sort order: api_server first, cron last, others alphabetical
 function sourceSortKey(source: string): number {
@@ -79,8 +179,8 @@ function sourceSortKey(source: string): number {
 
 function sortSessionsWithActiveFirst(items: Session[]): Session[] {
   return [...items].sort((a, b) => {
-    const aLive = chatStore.isSessionLive(a.id)
-    const bLive = chatStore.isSessionLive(b.id)
+    const aLive = isSessionTreeLive(a.id)
+    const bLive = isSessionTreeLive(b.id)
     if (aLive !== bLive) return aLive ? -1 : 1
     return (b.updatedAt || 0) - (a.updatedAt || 0)
   })
@@ -94,12 +194,13 @@ interface SessionGroup {
 }
 
 const pinnedSessions = computed(() =>
-  sortSessionsWithActiveFirst(chatStore.sessions.filter(session => sessionBrowserPrefsStore.isPinned(session.id))),
+  sortSessionsWithActiveFirst(chatStore.sessions.filter(session => !session.isBranchSession && sessionBrowserPrefsStore.isPinned(session.id))),
 )
 
 const groupedSessions = computed<SessionGroup[]>(() => {
   const map = new Map<string, Session[]>()
   for (const s of chatStore.sessions) {
+    if (s.isBranchSession) continue
     if (sessionBrowserPrefsStore.isPinned(s.id)) continue
     const key = s.source || ''
     if (!map.has(key)) map.set(key, [])
@@ -107,8 +208,8 @@ const groupedSessions = computed<SessionGroup[]>(() => {
   }
 
   const keys = [...map.keys()].sort((a, b) => {
-    const aHasLive = map.get(a)?.some(s => chatStore.isSessionLive(s.id)) || false
-    const bHasLive = map.get(b)?.some(s => chatStore.isSessionLive(s.id)) || false
+    const aHasLive = map.get(a)?.some(s => isSessionTreeLive(s.id)) || false
+    const bHasLive = map.get(b)?.some(s => isSessionTreeLive(s.id)) || false
     if (aHasLive !== bHasLive) return aHasLive ? -1 : 1
     const ka = sourceSortKey(a)
     const kb = sourceSortKey(b)
@@ -283,18 +384,52 @@ async function handleRenameConfirm() {
             <span class="session-group-label">{{ t('chat.pinned') }}</span>
             <span class="session-group-count">{{ pinnedSessions.length }}</span>
           </div>
-          <SessionListItem
-            v-for="s in pinnedSessions"
-            :key="`pinned-${s.id}`"
-            :session="s"
-            :active="s.id === chatStore.activeSessionId"
-            :live="chatStore.isSessionLive(s.id)"
-            :pinned="true"
-            :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
-            @select="handleSessionClick(s.id)"
-            @contextmenu="handleContextMenu($event, s.id)"
-            @delete="handleDeleteSession(s.id)"
-          />
+          <template v-for="s in pinnedSessions" :key="`pinned-${s.id}`">
+            <SessionListItem
+              :session="s"
+              :active="isSessionTreeActive(s.id)"
+              :live="isSessionTreeLive(s.id)"
+              :pinned="true"
+              :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
+              :branch-count="chatStore.sessionBranchCount(s.id)"
+              :branches-expanded="isBranchExpanded(s.id)"
+              @select="handleSessionClick(s.id)"
+              @toggle-branches="toggleSessionBranches(s.id)"
+              @contextmenu="handleContextMenu($event, s.id)"
+              @delete="handleDeleteSession(s.id)"
+            />
+            <div v-if="isBranchExpanded(s.id)" class="session-branch-items">
+              <button
+                v-for="branch in visibleBranchRows(s.id)"
+                :key="branch.session_id"
+                class="session-branch-item"
+                :class="{ active: isBranchSelected(s.id, branch.session_id), live: isBranchLive(branch) }"
+                :style="{ paddingLeft: `${18 + Math.min(branch.depth, 4) * 14}px` }"
+                @click="handleBranchClick(s.id, branch.session_id)"
+              >
+                <span class="session-branch-title-row">
+                  <span v-if="isBranchLive(branch)" class="session-branch-active-indicator" aria-hidden="true">
+                    <svg class="session-branch-active-spinner" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <circle cx="12" cy="12" r="8" opacity="0.2" />
+                      <path d="M20 12a8 8 0 0 0-8-8" />
+                    </svg>
+                  </span>
+                  <span class="session-branch-title">{{ branchTitle(branch) }}</span>
+                </span>
+                <span class="session-branch-meta">{{ getSourceLabel(branch.source) }}</span>
+              </button>
+              <div v-if="chatStore.sessionBranchCount(s.id) > 0 && branchRows(s.id).length === 0" class="session-branch-empty">
+                {{ t('common.loading') }}
+              </div>
+              <button
+                v-if="hiddenBranchCount(s.id) > 0"
+                class="session-branch-toggle-more"
+                @click="toggleBranchTreeLimit(s.id)"
+              >
+                {{ isFullBranchTreeExpanded(s.id) ? t('chat.branchTreeShowLatest') : t('chat.branchTreeShowAll', { count: hiddenBranchCount(s.id) }) }}
+              </button>
+            </div>
+          </template>
         </template>
 
         <template v-for="group in groupedSessions" :key="group.source">
@@ -304,18 +439,52 @@ async function handleRenameConfirm() {
             <span class="session-group-count">{{ group.sessions.length }}</span>
           </div>
           <template v-if="!collapsedGroups.has(group.source)">
-            <SessionListItem
-              v-for="s in group.sessions"
-              :key="s.id"
-              :session="s"
-              :active="s.id === chatStore.activeSessionId"
-              :live="chatStore.isSessionLive(s.id)"
-              :pinned="false"
-              :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
-              @select="handleSessionClick(s.id)"
-              @contextmenu="handleContextMenu($event, s.id)"
-              @delete="handleDeleteSession(s.id)"
-            />
+            <template v-for="s in group.sessions" :key="s.id">
+              <SessionListItem
+                :session="s"
+                :active="isSessionTreeActive(s.id)"
+                :live="isSessionTreeLive(s.id)"
+                :pinned="false"
+                :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
+                :branch-count="chatStore.sessionBranchCount(s.id)"
+                :branches-expanded="isBranchExpanded(s.id)"
+                @select="handleSessionClick(s.id)"
+                @toggle-branches="toggleSessionBranches(s.id)"
+                @contextmenu="handleContextMenu($event, s.id)"
+                @delete="handleDeleteSession(s.id)"
+              />
+              <div v-if="isBranchExpanded(s.id)" class="session-branch-items">
+                <button
+                  v-for="branch in visibleBranchRows(s.id)"
+                  :key="branch.session_id"
+                  class="session-branch-item"
+                  :class="{ active: isBranchSelected(s.id, branch.session_id), live: isBranchLive(branch) }"
+                  :style="{ paddingLeft: `${18 + Math.min(branch.depth, 4) * 14}px` }"
+                  @click="handleBranchClick(s.id, branch.session_id)"
+                >
+                  <span class="session-branch-title-row">
+                    <span v-if="isBranchLive(branch)" class="session-branch-active-indicator" aria-hidden="true">
+                      <svg class="session-branch-active-spinner" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="8" opacity="0.2" />
+                        <path d="M20 12a8 8 0 0 0-8-8" />
+                      </svg>
+                    </span>
+                    <span class="session-branch-title">{{ branchTitle(branch) }}</span>
+                  </span>
+                  <span class="session-branch-meta">{{ getSourceLabel(branch.source) }}</span>
+                </button>
+                <div v-if="chatStore.sessionBranchCount(s.id) > 0 && branchRows(s.id).length === 0" class="session-branch-empty">
+                  {{ t('common.loading') }}
+                </div>
+                <button
+                  v-if="hiddenBranchCount(s.id) > 0"
+                  class="session-branch-toggle-more"
+                  @click="toggleBranchTreeLimit(s.id)"
+                >
+                  {{ isFullBranchTreeExpanded(s.id) ? t('chat.branchTreeShowLatest') : t('chat.branchTreeShowAll', { count: hiddenBranchCount(s.id) }) }}
+                </button>
+              </div>
+            </template>
           </template>
         </template>
       </div>
@@ -598,6 +767,36 @@ async function handleRenameConfirm() {
   overflow: hidden;
 }
 
+:deep(.session-item-branch-toggle),
+:deep(.session-item-branch-spacer) {
+  width: 14px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+:deep(.session-item-branch-toggle) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+  border: none;
+  background: transparent;
+  color: $text-muted;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all $transition-fast;
+
+  &.expanded {
+    transform: rotate(90deg);
+    color: $accent-primary;
+  }
+
+  &:hover {
+    background: rgba($accent-primary, 0.08);
+    color: $accent-primary;
+  }
+}
+
 :deep(.session-item-title-row) {
   display: flex;
   align-items: center;
@@ -704,6 +903,100 @@ async function handleRenameConfirm() {
   &:hover {
     color: $error;
     background: rgba($error, 0.1);
+  }
+}
+
+.session-branch-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: -1px 0 4px 0;
+}
+
+.session-branch-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-left: 1px solid rgba(var(--accent-primary-rgb), 0.25);
+  color: $text-secondary;
+  cursor: pointer;
+  padding-top: 5px;
+  padding-right: 8px;
+  padding-bottom: 5px;
+  text-align: left;
+  transition: all $transition-fast;
+
+  &:hover {
+    background: rgba($accent-primary, 0.05);
+    color: $text-primary;
+  }
+
+  &.active {
+    background: rgba(var(--accent-primary-rgb), 0.10);
+    color: $accent-primary;
+    border-left-color: rgba(var(--accent-primary-rgb), 0.75);
+  }
+
+  &.live .session-branch-title {
+    color: $accent-primary;
+  }
+}
+
+.session-branch-title-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.session-branch-active-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: $accent-primary;
+}
+
+.session-branch-active-spinner {
+  animation: session-spin 1.1s linear infinite;
+}
+
+.session-branch-title {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.session-branch-meta,
+.session-branch-empty {
+  color: $text-muted;
+  font-size: 10px;
+}
+
+.session-branch-empty {
+  padding: 5px 10px 7px 22px;
+}
+
+.session-branch-toggle-more {
+  align-self: flex-start;
+  margin: 2px 8px 4px 22px;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: $accent-primary;
+  cursor: pointer;
+  font-size: 11px;
+  border-radius: 4px;
+
+  &:hover {
+    background: rgba($accent-primary, 0.08);
   }
 }
 

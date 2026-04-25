@@ -10,12 +10,15 @@ const props = defineProps<{
   live: boolean
   pinned: boolean
   canDelete: boolean
+  branchCount?: number
+  branchesExpanded?: boolean
 }>()
 
 const emit = defineEmits<{
   select: []
   contextmenu: [event: MouseEvent]
   delete: []
+  toggleBranches: []
 }>()
 
 const { t } = useI18n()
@@ -29,6 +32,20 @@ const { t } = useI18n()
     @click="emit('select')"
     @contextmenu="emit('contextmenu', $event)"
   >
+    <span
+      v-if="props.branchCount"
+      class="session-item-branch-toggle"
+      :class="{ expanded: props.branchesExpanded }"
+      :aria-label="t('chat.branchSessions', { count: props.branchCount })"
+      role="button"
+      tabindex="0"
+      @click.stop="emit('toggleBranches')"
+      @keydown.enter.stop.prevent="emit('toggleBranches')"
+      @keydown.space.stop.prevent="emit('toggleBranches')"
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+    </span>
+    <span v-else class="session-item-branch-spacer" aria-hidden="true"></span>
     <div class="session-item-content">
       <span class="session-item-title-row">
         <span v-if="live" class="session-item-active-indicator" aria-hidden="true">

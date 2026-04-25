@@ -4,12 +4,14 @@ import ApprovalPrompt from './ApprovalPrompt.vue'
 import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
+import { useSettingsStore } from '@/stores/hermes/settings'
 import { fetchContextLength } from '@/api/hermes/sessions'
 import { NButton, NTooltip } from 'naive-ui'
 import { computed, ref, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 const { t } = useI18n()
 const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
@@ -19,7 +21,9 @@ const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
 
-const canSend = computed(() => inputText.value.trim() || attachments.value.length > 0)
+const busyQueueEnabled = computed(() => settingsStore.display.busy_input_mode === 'interrupt')
+const willQueueInput = computed(() => chatStore.isStreaming && busyQueueEnabled.value)
+const canSend = computed(() => (inputText.value.trim() || attachments.value.length > 0) && (!chatStore.isStreaming || busyQueueEnabled.value))
 
 // --- Context info ---
 
@@ -35,7 +39,10 @@ async function loadContextLength() {
   }
 }
 
-onMounted(loadContextLength)
+onMounted(() => {
+  void loadContextLength()
+  if (Object.keys(settingsStore.display).length === 0) void settingsStore.fetchSettings()
+})
 watch(() => useProfilesStore().activeProfileName, loadContextLength)
 watch(() => useAppStore().selectedModel, loadContextLength)
 
@@ -137,6 +144,7 @@ function handleDrop(e: DragEvent) {
 function handleSend() {
   const text = inputText.value.trim()
   if (!text && attachments.value.length === 0) return
+  if (!canSend.value) return
 
   chatStore.sendMessage(text, attachments.value.length > 0 ? attachments.value : undefined)
   inputText.value = ''
@@ -231,6 +239,12 @@ function isImage(type: string): boolean {
         />
       </div>
     </div>
+    <div v-if="willQueueInput || chatStore.activeQueuedInputCount > 0" class="busy-input-feedback">
+      <span v-if="chatStore.activeQueuedInputCount > 0">
+        {{ t('chat.busyInputQueued', { count: chatStore.activeQueuedInputCount }) }}
+      </span>
+      <span v-else>{{ t('chat.busyInputWillQueue') }}</span>
+    </div>
 
     <!-- Attachment previews -->
     <div v-if="attachments.length > 0" class="attachment-previews">
@@ -295,13 +309,13 @@ function isImage(type: string): boolean {
         <NButton
           size="small"
           type="primary"
-          :disabled="!canSend || chatStore.isStreaming"
+          :disabled="!canSend"
           @click="handleSend"
         >
           <template #icon>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </template>
-          {{ t('chat.send') }}
+          {{ willQueueInput ? t('chat.queueMessage') : t('chat.send') }}
         </NButton>
       </div>
     </div>
@@ -358,6 +372,16 @@ function isImage(type: string): boolean {
   &.context-bar-danger {
     background: linear-gradient(90deg, #c43a2a, #e85d4a);
   }
+}
+
+.busy-input-feedback {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(var(--accent-primary-rgb), 0.24);
+  border-radius: 8px;
+  background: rgba(var(--accent-primary-rgb), 0.08);
+  color: $text-muted;
+  font-size: 12px;
 }
 
 .attachment-previews {

@@ -1,14 +1,16 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { delimiter, resolve } from 'path'
 import { createInterface } from 'readline'
+import YAML from 'js-yaml'
 import {
   clearLivePendingApproval,
   clearLivePendingApprovalForRun,
   setLivePendingApprovalForRun,
   setRunSession,
 } from './run-state'
+import { getActiveConfigPath } from './hermes-profile'
 
 export interface BridgeRunEvent {
   event: string
@@ -26,6 +28,31 @@ export interface BridgeRunEvent {
   pattern_key?: string
   pattern_keys?: string[]
   pending_count?: number
+  subagent_id?: string
+  parent_id?: string
+  depth?: number
+  goal?: string
+  status?: string
+  summary?: string
+  text?: string
+  content?: string
+  reasoning?: string
+  thinking?: string
+  message?: string
+  task_count?: number
+  task_index?: number
+  model?: string
+  tool_name?: string
+  tool_preview?: string
+  output_tail?: Array<Record<string, unknown>>
+  files_read?: string[]
+  files_written?: string[]
+  input_tokens?: number
+  output_tokens?: number
+  reasoning_tokens?: number
+  api_calls?: number
+  cost_usd?: number
+  duration_seconds?: number
   usage?: {
     input_tokens: number
     output_tokens: number
@@ -47,6 +74,7 @@ interface RunState {
   waiters: Array<(event: BridgeRunEvent | null) => void>
   closed: boolean
   idleTimer?: ReturnType<typeof setTimeout>
+  completeTimer?: ReturnType<typeof setTimeout>
   pendingApproval?: boolean
 }
 
@@ -65,6 +93,7 @@ interface TuiSessionListItem {
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
+const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
 
 function resolvePython(root: string): string {
   const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
@@ -86,6 +115,25 @@ function resolveBridgeRoot(): string {
     || process.env.HERMES_PYTHON_SRC_ROOT?.trim()
     || process.env.HERMES_AGENT_ROOT?.trim()
     || resolve(process.env.HOME || process.cwd(), '.hermes/hermes-publish.HkvvHk')
+}
+
+function parseBridgeFlag(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return null
+}
+
+function readBridgeConfigEnabled(): boolean | null {
+  try {
+    const config = YAML.load(readFileSync(getActiveConfigPath(), 'utf-8')) as Record<string, any> | null
+    return parseBridgeFlag(config?.webui?.bridge_enabled)
+  } catch {
+    return null
+  }
 }
 
 class TuiGatewayClient extends EventEmitter {
@@ -219,7 +267,10 @@ class TuiBridgeService {
   }
 
   isEnabled(): boolean {
-    return /^(1|true|yes|on)$/i.test(process.env.HERMES_WEBUI_BRIDGE || '')
+    const configFlag = readBridgeConfigEnabled()
+    if (configFlag !== null) return configFlag
+    const envFlag = parseBridgeFlag(process.env.HERMES_WEBUI_BRIDGE)
+    return envFlag === true
   }
 
   hasSession(webSessionId: string): boolean {
@@ -418,6 +469,17 @@ class TuiBridgeService {
     const payload = event.payload || {}
     const timestamp = Date.now() / 1000
 
+    if (typeof event.type === 'string' && event.type.startsWith('subagent.')) {
+      this.push(runId, {
+        event: event.type,
+        run_id: runId,
+        timestamp,
+        ...payload,
+      })
+      this.scheduleIdleHeartbeat(runId)
+      return
+    }
+
     switch (event.type) {
       case 'approval.request':
         {
@@ -451,15 +513,39 @@ class TuiBridgeService {
         this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payload.text || '' })
         this.scheduleIdleHeartbeat(runId)
         break
-      case 'message.complete':
+      case 'reasoning.delta':
+      case 'thinking.delta':
+      case 'reasoning':
+      case 'thinking':
+      case 'reasoning.available':
+      case 'thinking.available':
+      case 'reasoning.complete':
+      case 'thinking.complete':
         this.push(runId, {
+          event: event.type === 'thinking.available' || event.type === 'thinking.complete' || event.type === 'reasoning.complete'
+            ? 'reasoning.available'
+            : event.type === 'reasoning' || event.type === 'thinking'
+              ? 'reasoning.delta'
+              : event.type,
+          run_id: runId,
+          timestamp,
+          text: payload.text || payload.reasoning || payload.thinking || payload.content || payload.message || '',
+          delta: payload.delta,
+          reasoning: payload.reasoning,
+          thinking: payload.thinking,
+          content: payload.content,
+          message: payload.message,
+        })
+        this.scheduleIdleHeartbeat(runId)
+        break
+      case 'message.complete':
+        this.scheduleRunCompleted(runId, {
           event: 'run.completed',
           run_id: runId,
           timestamp,
           output: payload.text || '',
           usage: payload.usage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
         })
-        this.closeRun(runId)
         break
       case 'error':
         clearLivePendingApprovalForRun(runId)
@@ -500,6 +586,22 @@ class TuiBridgeService {
     state.idleTimer = undefined
   }
 
+  private clearCompleteTimer(state: RunState) {
+    if (!state.completeTimer) return
+    clearTimeout(state.completeTimer)
+    state.completeTimer = undefined
+  }
+
+  private scheduleRunCompleted(runId: string, event: BridgeRunEvent) {
+    const state = this.runs.get(runId)
+    if (!state || state.closed) return
+    this.clearCompleteTimer(state)
+    state.completeTimer = setTimeout(() => {
+      this.push(runId, event)
+      this.closeRun(runId)
+    }, COMPLETE_GRACE_MS)
+  }
+
   private scheduleIdleHeartbeat(runId: string, delayMs = IDLE_HEARTBEAT_MS) {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
@@ -528,6 +630,7 @@ class TuiBridgeService {
     if (!state || state.closed) return
     state.closed = true
     this.clearIdleTimer(state)
+    this.clearCompleteTimer(state)
     clearLivePendingApprovalForRun(runId)
     this.activeRunsByBridgeSession.delete(state.bridgeSessionId)
     for (const waiter of state.waiters.splice(0)) waiter(null)

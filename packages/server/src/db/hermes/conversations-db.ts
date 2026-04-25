@@ -1,5 +1,6 @@
 import { getActiveProfileDir } from '../../services/hermes/hermes-profile'
 import type {
+  ConversationBranch,
   ConversationDetail,
   ConversationListOptions,
   ConversationMessage,
@@ -252,12 +253,12 @@ function isVisibleRoot(session: ConversationSessionRow | undefined, byId: Map<st
   return session.parent_session_id == null || isBranchRoot(session, byId)
 }
 
-function continuationCandidates(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSessionRow[] {
+function continuationCandidates(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
   const childIds = childrenByParent.get(parent.id) || []
   return childIds
     .map(childId => byId.get(childId))
     .filter((child): child is ConversationSessionRow => !!child)
-    .filter(child => child.source !== 'tool')
+    .filter(child => allowTool || child.source !== 'tool')
     .filter(child => child.source === parent.source)
     .filter(child => timingMatchesParent(parent, child))
     .sort((a, b) => {
@@ -268,9 +269,9 @@ function continuationCandidates(parent: ConversationSessionRow, byId: Map<string
     })
 }
 
-function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSessionRow | null {
+function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow | null {
   if (parent.end_reason !== 'compression') return null
-  const candidates = continuationCandidates(parent, byId, childrenByParent)
+  const candidates = continuationCandidates(parent, byId, childrenByParent, allowTool)
   if (candidates.length === 1) return candidates[0]
 
   const exactPreviewMatches = candidates.filter(child => {
@@ -283,14 +284,14 @@ function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string,
   return null
 }
 
-function collectConversationChain(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSessionRow[] {
+function collectConversationChain(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
   const chain: ConversationSessionRow[] = []
   const seen = new Set<string>()
   let current = byId.get(rootId) || null
   while (current && !seen.has(current.id)) {
     chain.push(current)
     seen.add(current.id)
-    current = nextContinuationChild(current, byId, childrenByParent)
+    current = nextContinuationChild(current, byId, childrenByParent, allowTool)
   }
   return chain
 }
@@ -318,6 +319,7 @@ function toSummary(session: ConversationSessionRow): ConversationSummary {
     preview: session.preview,
     is_active: session.is_active,
     thread_session_count: 1,
+    branch_session_count: 0,
   }
 }
 
@@ -328,6 +330,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
   const last = chain[chain.length - 1]
   const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
   const costStatuses = Array.from(new Set(chain.map(session => safeText(session.cost_status)).filter(Boolean)))
+  const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
 
   return {
     ...toSummary(root),
@@ -340,6 +343,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
     billing_provider: last?.billing_provider ?? root.billing_provider ?? null,
     cost_status: costStatuses.length === 1 ? costStatuses[0] : 'mixed',
     thread_session_count: chain.length,
+    branch_session_count: branchSessionCount,
     message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
     tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
     input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
@@ -374,6 +378,102 @@ function normalizeVisibleMessage(message: { id: number | string, session_id: str
   }
 }
 
+function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, sessions: ConversationSessionRow[]): ConversationMessage[] {
+  const sessionById = new Map(sessions.map(session => [session.id, session]))
+  return rows
+    .map(row => {
+      const session = sessionById.get(String(row.session_id || ''))
+      return normalizeVisibleMessage({
+        id: row.id as number | string,
+        session_id: String(row.session_id || ''),
+        role: String(row.role || ''),
+        content: row.content,
+        timestamp: normalizeNumber(row.timestamp),
+      }, session?.last_active || session?.started_at || 0)
+    })
+    .filter((message): message is ConversationMessage => !!message)
+    .sort((a, b) => {
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
+      return String(a.id).localeCompare(String(b.id))
+    })
+}
+
+function loadVisibleMessagesForSessions(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, sessions: ConversationSessionRow[]): ConversationMessage[] {
+  if (!sessions.length) return []
+  const ids = sessions.map(session => session.id)
+  const placeholders = ids.map(() => '?').join(', ')
+  const rows = db.prepare(`
+    SELECT id, session_id, role, content, timestamp
+    FROM messages
+    WHERE session_id IN (${placeholders})
+      AND role IN ('user', 'assistant')
+      AND content IS NOT NULL
+      AND content != ''
+    ORDER BY timestamp, id
+  `).all(...ids)
+  return normalizeVisibleMessagesFromRows(rows, sessions)
+}
+
+function collectBranchRoots(chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSessionRow[] {
+  const chainIds = new Set(chain.map(session => session.id))
+  const roots: ConversationSessionRow[] = []
+  for (const parent of chain) {
+    const continuation = nextContinuationChild(parent, byId, childrenByParent, true)
+    const childIds = childrenByParent.get(parent.id) || []
+    for (const childId of childIds) {
+      if (chainIds.has(childId) || childId === continuation?.id) continue
+      const child = byId.get(childId)
+      if (child) roots.push(child)
+    }
+  }
+  return roots.sort((a, b) => {
+    if (a.started_at !== b.started_at) return a.started_at - b.started_at
+    return a.id.localeCompare(b.id)
+  })
+}
+
+function collectConversationBranches(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): ConversationBranch[] {
+  const roots = collectBranchRoots(chain, byId, childrenByParent)
+  const branches: ConversationBranch[] = []
+  for (const root of roots) {
+    if (seen.has(root.id)) continue
+    seen.add(root.id)
+    const branchChain = collectConversationChain(root.id, byId, childrenByParent, true)
+    const messages = loadVisibleMessagesForSessions(db, branchChain)
+    branches.push({
+      session_id: root.id,
+      parent_session_id: root.parent_session_id ?? null,
+      source: safeText(root.source),
+      model: safeText(root.model),
+      title: root.title ?? null,
+      started_at: Number(root.started_at || 0),
+      ended_at: branchChain[branchChain.length - 1]?.ended_at ?? root.ended_at ?? null,
+      last_active: branchChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(root.last_active || root.started_at || 0)),
+      is_active: branchChain.some(session => session.is_active),
+      messages,
+      visible_count: messages.length,
+      thread_session_count: branchChain.length,
+      branches: collectConversationBranches(db, branchChain, byId, childrenByParent, seen),
+    })
+  }
+  return branches
+}
+
+function countBranches(branches: ConversationBranch[]): number {
+  return branches.reduce((sum, branch) => sum + 1 + countBranches(branch.branches), 0)
+}
+
+function countConversationBranchSessions(chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): number {
+  let count = 0
+  for (const root of collectBranchRoots(chain, byId, childrenByParent)) {
+    if (seen.has(root.id)) continue
+    seen.add(root.id)
+    const branchChain = collectConversationChain(root.id, byId, childrenByParent, true)
+    count += 1 + countConversationBranchSessions(branchChain, byId, childrenByParent, seen)
+  }
+  return count
+}
+
 async function openConversationDb() {
   if (!SQLITE_AVAILABLE) {
     throw new Error(`node:sqlite requires Node >= 22.5, current: ${process.versions.node}`)
@@ -383,7 +483,7 @@ async function openConversationDb() {
   return new DatabaseSync(conversationDbPath(), { open: true, readOnly: true })
 }
 
-function buildConversationSessionSql(source?: string): { sql: string, params: any[] } {
+function buildConversationSessionSql(source?: string, includeTool = false): { sql: string, params: any[] } {
   const sql = `
     SELECT
       s.id,
@@ -425,7 +525,7 @@ function buildConversationSessionSql(source?: string): { sql: string, params: an
           AND ${VISIBLE_HUMAN_MESSAGE_SQL}
       ) THEN 1 ELSE 0 END AS has_visible_messages
     FROM sessions s
-    WHERE s.source != 'tool'
+    WHERE ${includeTool ? '1 = 1' : "s.source != 'tool'"}
       ${source ? 'AND s.source = ?' : ''}
     ORDER BY s.started_at DESC
   `
@@ -433,11 +533,11 @@ function buildConversationSessionSql(source?: string): { sql: string, params: an
   return { sql, params: source ? [source] : [] }
 }
 
-async function loadConversationSessions(source?: string): Promise<ConversationSessionRow[]> {
+async function loadConversationSessions(source?: string, includeTool = false): Promise<ConversationSessionRow[]> {
   const liveTuiSessionKeys = await listLiveTuiSessionKeys()
   const db = await openConversationDb()
   try {
-    const { sql, params } = buildConversationSessionSql(source)
+    const { sql, params } = buildConversationSessionSql(source, includeTool)
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
     const nowSeconds = Date.now() / 1000
     const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
@@ -482,7 +582,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
 
 export async function getConversationDetailFromDb(sessionId: string, options: ConversationListOptions = {}): Promise<ConversationDetail | null> {
   const humanOnly = options.humanOnly !== false
-  const sessions = await loadConversationSessions(options.source)
+  const sessions = await loadConversationSessions(options.source, true)
   const byId = new Map(sessions.map(session => [session.id, session]))
   const childrenByParent = new Map<string | null, string[]>()
   for (const session of sessions) {
@@ -507,43 +607,18 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
 
   const db = await openConversationDb()
   try {
-    const ids = chain.map(session => session.id)
-    const placeholders = ids.map(() => '?').join(', ')
-    const rows = db.prepare(`
-      SELECT id, session_id, role, content, timestamp
-      FROM messages
-      WHERE session_id IN (${placeholders})
-        AND role IN ('user', 'assistant')
-        AND content IS NOT NULL
-        AND content != ''
-      ORDER BY timestamp, id
-    `).all(...ids) as Array<Record<string, unknown>>
-
-    const sessionById = new Map(chain.map(session => [session.id, session]))
-    const messages = rows
-      .map(row => {
-        const session = sessionById.get(String(row.session_id || ''))
-        return normalizeVisibleMessage({
-          id: row.id as number | string,
-          session_id: String(row.session_id || ''),
-          role: String(row.role || ''),
-          content: row.content,
-          timestamp: normalizeNumber(row.timestamp),
-        }, session?.last_active || session?.started_at || 0)
-      })
-      .filter((message): message is ConversationMessage => !!message)
-      .sort((a, b) => {
-        if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
-        return String(a.id).localeCompare(String(b.id))
-      })
+    const messages = loadVisibleMessagesForSessions(db, chain)
+    const branches = humanOnly ? collectConversationBranches(db, chain, byId, childrenByParent) : []
 
     if (!messages.length) {
-      if (humanOnly && !chain.some(session => session.is_live_tui_process)) return null
+      if (humanOnly && !branches.length && !chain.some(session => session.is_live_tui_process)) return null
       return {
         session_id: sessionId,
         messages: [],
         visible_count: 0,
         thread_session_count: chain.length,
+        branch_session_count: countBranches(branches),
+        branches,
       }
     }
     return {
@@ -551,6 +626,8 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       messages,
       visible_count: messages.length,
       thread_session_count: chain.length,
+      branch_session_count: countBranches(branches),
+      branches,
     }
   } finally {
     db.close()

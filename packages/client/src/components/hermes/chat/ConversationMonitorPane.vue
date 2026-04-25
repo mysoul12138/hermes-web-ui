@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { fetchConversationDetail, fetchConversationSummaries, type ConversationDetail, type ConversationSummary } from '@/api/hermes/conversations'
+import { fetchConversationDetail, fetchConversationSummaries, type ConversationBranch, type ConversationDetail, type ConversationSummary } from '@/api/hermes/conversations'
 import { formatTimestampSeconds, getSourceLabel } from '@/shared/session-display'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -7,7 +7,8 @@ import { useI18n } from 'vue-i18n'
 const props = defineProps<{ humanOnly: boolean }>()
 const { t } = useI18n()
 
-const POLL_INTERVAL_MS = 15000
+const SESSIONS_POLL_INTERVAL_MS = 15000
+const DETAIL_POLL_INTERVAL_MS = 2500
 
 const sessions = ref<ConversationSummary[]>([])
 const selectedSessionId = ref<string | null>(null)
@@ -15,11 +16,13 @@ const detail = ref<ConversationDetail | null>(null)
 const sessionsLoading = ref(false)
 const detailLoading = ref(false)
 const error = ref('')
-let refreshTimer: ReturnType<typeof setInterval> | null = null
+let sessionsRefreshTimer: ReturnType<typeof setInterval> | null = null
+let detailRefreshTimer: ReturnType<typeof setInterval> | null = null
 let sessionsRequestId = 0
 let detailRequestId = 0
 
 const selectedSession = computed(() => sessions.value.find(session => session.id === selectedSessionId.value) || null)
+const branchRows = computed(() => flattenBranches(detail.value?.branches || []))
 
 function roleLabel(role: string): string {
   return role === 'user' ? t('chat.monitorRoleUser') : t('chat.monitorRoleAssistant')
@@ -27,6 +30,13 @@ function roleLabel(role: string): string {
 
 function linkedSessionsLabel(count: number): string {
   return t('chat.linkedSessions', { count })
+}
+
+function flattenBranches(branches: ConversationBranch[], depth = 0): Array<ConversationBranch & { depth: number }> {
+  return branches.flatMap(branch => [
+    { ...branch, depth },
+    ...flattenBranches(branch.branches || [], depth + 1),
+  ])
 }
 
 function invalidateRequests() {
@@ -111,17 +121,18 @@ watch(() => props.humanOnly, async () => {
 
 onMounted(async () => {
   await loadSessions(false)
-  refreshTimer = setInterval(async () => {
+  sessionsRefreshTimer = setInterval(async () => {
     await loadSessions(true)
-    if (selectedSessionId.value) {
-      await loadDetail(selectedSessionId.value, true)
-    }
-  }, POLL_INTERVAL_MS)
+  }, SESSIONS_POLL_INTERVAL_MS)
+  detailRefreshTimer = setInterval(async () => {
+    if (selectedSessionId.value) await loadDetail(selectedSessionId.value, true)
+  }, DETAIL_POLL_INTERVAL_MS)
 })
 
 onUnmounted(() => {
   invalidateRequests()
-  if (refreshTimer) clearInterval(refreshTimer)
+  if (sessionsRefreshTimer) clearInterval(sessionsRefreshTimer)
+  if (detailRefreshTimer) clearInterval(detailRefreshTimer)
 })
 </script>
 
@@ -156,12 +167,16 @@ onUnmounted(() => {
           <span>{{ selectedSession.model }}</span>
           <span>·</span>
           <span>{{ linkedSessionsLabel(selectedSession.thread_session_count) }}</span>
+          <template v-if="detail?.branch_session_count">
+            <span>·</span>
+            <span>{{ t('chat.branchSessions', { count: detail.branch_session_count }) }}</span>
+          </template>
         </div>
       </header>
 
       <div v-if="error" class="conversation-monitor__empty conversation-monitor__empty--error">{{ error }}</div>
       <div v-else-if="detailLoading && !detail" class="conversation-monitor__empty">{{ t('common.loading') }}</div>
-      <div v-else-if="!detail || detail.messages.length === 0" class="conversation-monitor__empty">{{ t('chat.noVisibleMessages') }}</div>
+      <div v-else-if="!detail || (detail.messages.length === 0 && branchRows.length === 0)" class="conversation-monitor__empty">{{ t('chat.noVisibleMessages') }}</div>
       <div v-else class="conversation-monitor__messages">
         <article
           v-for="message in detail.messages"
@@ -172,6 +187,32 @@ onUnmounted(() => {
           <div class="conversation-monitor__message-meta">{{ roleLabel(message.role) }} · {{ formatTimestampSeconds(message.timestamp) }}</div>
           <div class="conversation-monitor__message-content">{{ message.content }}</div>
         </article>
+        <section
+          v-for="branch in branchRows"
+          :key="branch.session_id"
+          class="conversation-monitor__branch"
+          :style="{ marginLeft: `${Math.min(branch.depth, 4) * 16}px` }"
+        >
+          <header class="conversation-monitor__branch-header">
+            <div class="conversation-monitor__branch-title">
+              <span>{{ branch.title || branch.session_id }}</span>
+              <span v-if="branch.is_active" class="conversation-monitor__session-live">{{ t('chat.recentBadge') }}</span>
+            </div>
+            <div class="conversation-monitor__branch-meta">
+              {{ t('chat.branchSession') }} · {{ getSourceLabel(branch.source) }} · {{ formatTimestampSeconds(branch.last_active) }}
+            </div>
+          </header>
+          <div v-if="branch.messages.length === 0" class="conversation-monitor__branch-empty">{{ t('chat.noVisibleMessages') }}</div>
+          <article
+            v-for="message in branch.messages"
+            :key="`${branch.session_id}-${message.session_id}-${message.id}`"
+            class="conversation-monitor__message conversation-monitor__message--branch"
+            :class="`role-${message.role}`"
+          >
+            <div class="conversation-monitor__message-meta">{{ roleLabel(message.role) }} · {{ formatTimestampSeconds(message.timestamp) }}</div>
+            <div class="conversation-monitor__message-content">{{ message.content }}</div>
+          </article>
+        </section>
       </div>
     </section>
   </div>
@@ -293,6 +334,35 @@ onUnmounted(() => {
   &.role-assistant {
     border: 1px solid rgba($border-color, 0.9);
   }
+}
+
+.conversation-monitor__branch {
+  border-left: 2px solid rgba(var(--accent-primary-rgb), 0.35);
+  padding-left: 12px;
+}
+
+.conversation-monitor__branch-header {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(var(--accent-primary-rgb), 0.08);
+}
+
+.conversation-monitor__branch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.conversation-monitor__branch-meta,
+.conversation-monitor__branch-empty {
+  margin-top: 4px;
+  font-size: 12px;
+  color: $text-muted;
+}
+
+.conversation-monitor__message--branch {
+  margin-top: 8px;
 }
 
 .conversation-monitor__empty {

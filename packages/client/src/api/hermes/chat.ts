@@ -28,6 +28,10 @@ export interface RunEvent {
   delta?: string
   /** Payload text for `reasoning.delta` / `thinking.delta` / `reasoning.available` events. */
   text?: string
+  content?: string
+  reasoning?: string
+  thinking?: string
+  message?: string
   tool?: string
   name?: string
   preview?: string
@@ -39,6 +43,26 @@ export interface RunEvent {
   pattern_key?: string
   pattern_keys?: string[]
   pending_count?: number
+  subagent_id?: string
+  parent_id?: string
+  depth?: number
+  goal?: string
+  status?: string
+  summary?: string
+  task_count?: number
+  task_index?: number
+  model?: string
+  tool_name?: string
+  tool_preview?: string
+  output_tail?: Array<Record<string, unknown>>
+  files_read?: string[]
+  files_written?: string[]
+  input_tokens?: number
+  output_tokens?: number
+  reasoning_tokens?: number
+  api_calls?: number
+  cost_usd?: number
+  duration_seconds?: number
   /** Final response text on `run.completed`. May be empty/null if the agent
    * silently swallowed an upstream error — see chat store for fallback. */
   output?: string | null
@@ -68,6 +92,35 @@ function emitParsedEvent(eventName: string, raw: string, onEvent: (event: RunEve
   onEvent(fallback)
   return fallback
 }
+
+const NAMED_RUN_EVENTS = [
+  'approval',
+  'message.delta',
+  'message.complete',
+  'reasoning.delta',
+  'thinking.delta',
+  'reasoning',
+  'thinking',
+  'reasoning.available',
+  'thinking.available',
+  'reasoning.complete',
+  'thinking.complete',
+  'tool.started',
+  'tool.completed',
+  'tool.start',
+  'tool.complete',
+  'run.started',
+  'run.completed',
+  'run.failed',
+  'subagent.spawn_requested',
+  'subagent.start',
+  'subagent.thinking',
+  'subagent.progress',
+  'subagent.status',
+  'subagent.tool',
+  'subagent.complete',
+  'subagent.error',
+] as const
 
 export async function startRun(body: StartRunRequest): Promise<StartRunResponse> {
   return request<StartRunResponse>('/api/hermes/v1/runs', {
@@ -100,9 +153,9 @@ export function streamRunEvents(
   let closed = false
   const source = new EventSource(url)
 
-  source.onmessage = (e) => {
+  const handleSseEvent = (eventName: string, e: MessageEvent) => {
     if (closed) return
-    const parsed = emitParsedEvent('message', e.data, onEvent)
+    const parsed = emitParsedEvent(eventName, e.data, onEvent)
     if (parsed?.event === 'run.completed' || parsed?.event === 'run.failed') {
       closed = true
       source.close()
@@ -110,10 +163,11 @@ export function streamRunEvents(
     }
   }
 
-  source.addEventListener('approval', (e: MessageEvent) => {
-    if (closed) return
-    emitParsedEvent('approval', e.data, onEvent)
-  })
+  source.onmessage = (e) => handleSseEvent('message', e)
+
+  for (const eventName of NAMED_RUN_EVENTS) {
+    source.addEventListener(eventName, (e: MessageEvent) => handleSseEvent(eventName, e))
+  }
 
   source.onerror = () => {
     if (closed) return

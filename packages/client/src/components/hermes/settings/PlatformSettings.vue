@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, reactive, onUnmounted } from 'vue'
+import { computed, ref, reactive, onUnmounted } from 'vue'
 import { NSwitch, NInput, NButton, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
+import QRCode from 'qrcode'
 import { useSettingsStore } from '@/stores/hermes/settings'
 import { saveCredentials as saveCredsApi, fetchWeixinQrCode, pollWeixinQrStatus, saveWeixinCredentials } from '@/api/hermes/config'
 import PlatformCard from './PlatformCard.vue'
@@ -54,13 +55,31 @@ function getCreds(key: string) {
 
 // Weixin QR code login state
 const wxQrUrl = ref('')
+const wxQrLocalImage = ref('')
 const wxQrId = ref('')
 const wxQrStatus = ref<'idle' | 'loading' | 'waiting' | 'scaned' | 'confirmed' | 'error' | 'expired'>('idle')
 let wxPollTimer: ReturnType<typeof setTimeout> | null = null
 
+const wxQrImageSrc = computed(() => {
+  const raw = wxQrUrl.value.trim()
+  if (!raw) return ''
+  if (/^(data:image\/|blob:)/i.test(raw)) return raw
+  if (/^<svg[\s>]/i.test(raw)) return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}`
+  if (/^https?:\/\/.+\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(raw)) return raw
+  if (/^(iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)/.test(raw)) return `data:image/png;base64,${raw}`
+  return wxQrLocalImage.value
+})
+
+async function renderWeixinQrLocally(payload: string) {
+  wxQrLocalImage.value = payload
+    ? await QRCode.toDataURL(payload, { width: 180, margin: 1, errorCorrectionLevel: 'M' })
+    : ''
+}
+
 async function startWeixinQrLogin() {
   wxQrStatus.value = 'loading'
   wxQrUrl.value = ''
+  wxQrLocalImage.value = ''
   wxQrId.value = ''
   stopWeixinPoll()
 
@@ -68,7 +87,9 @@ async function startWeixinQrLogin() {
     const data = await fetchWeixinQrCode()
     wxQrId.value = data.qrcode
     wxQrUrl.value = data.qrcode_url
-    window.open(data.qrcode_url, '_blank')
+    if (!wxQrImageSrc.value) {
+      await renderWeixinQrLocally(data.qrcode_url || data.qrcode)
+    }
     wxQrStatus.value = 'waiting'
     pollWeixinStatus()
   } catch (err: any) {
@@ -84,7 +105,7 @@ function pollWeixinStatus() {
       const data = await pollWeixinQrStatus(wxQrId.value)
       if (data.status === 'wait') {
         pollWeixinStatus()
-      } else if (data.status === 'scaned') {
+      } else if (data.status === 'scaned' || data.status === 'scaned_but_redirect') {
         wxQrStatus.value = 'scaned'
         pollWeixinStatus()
       } else if (data.status === 'expired') {
@@ -318,8 +339,14 @@ const platforms = [
             <NSpin size="small" />
             <span>{{ t('platform.qrFetching') }}</span>
           </div>
-          <div v-if="wxQrStatus === 'waiting' || wxQrStatus === 'scaned'" class="weixin-qr-hint">
-            {{ wxQrStatus === 'scaned' ? t('platform.qrScanedHint') : t('platform.qrScanHint') }}
+          <div v-if="wxQrImageSrc && (wxQrStatus === 'waiting' || wxQrStatus === 'scaned')" class="weixin-qr-card">
+            <img :src="wxQrImageSrc" :alt="t('platform.qrLogin')" class="weixin-qr-image" />
+            <div class="weixin-qr-hint">
+              {{ wxQrStatus === 'scaned' ? t('platform.qrScanedHint') : t('platform.qrScanHint') }}
+            </div>
+          </div>
+          <div v-if="wxQrStatus === 'expired'" class="weixin-qr-hint">
+            {{ t('platform.qrExpiredHint') }}
           </div>
         </div>
         <SettingRow :label="t('platform.weixinToken')" :hint="t('platform.weixinTokenHint')">
@@ -361,6 +388,23 @@ const platforms = [
   gap: 8px;
   color: $text-muted;
   font-size: 13px;
+}
+
+.weixin-qr-card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid $border-color;
+  border-radius: $radius-md;
+  background: $bg-card;
+}
+
+.weixin-qr-image {
+  width: 180px;
+  height: 180px;
+  object-fit: contain;
 }
 
 .weixin-qr-hint {

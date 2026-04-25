@@ -17,6 +17,7 @@ const SOURCE_LABELS: Record<string, string> = {
   bluebubbles: 'iMessage',
   mattermost: 'Mattermost',
   cron: 'Cron',
+  subagent: 'Subagent',
 }
 
 export function getSourceLabel(source?: string): string {

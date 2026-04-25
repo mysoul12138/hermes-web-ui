@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { NSwitch, NSelect, useMessage } from 'naive-ui'
+import { computed, ref } from 'vue'
+import { NButton, NSwitch, NSelect, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/hermes/settings'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
+import { getApiKey, getBaseUrlValue } from '@/api/client'
 import SettingRow from './SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const message = useMessage()
 const { t } = useI18n()
 const { mode, setMode } = useTheme()
+const avatarInputRef = ref<HTMLInputElement | null>(null)
+const ASSISTANT_AVATAR_MAX_BYTES = 10 * 1024 * 1024
 
 const themeOptions = [
   { label: t('settings.display.themeLight'), value: 'light' },
@@ -30,6 +34,75 @@ function handleThemeChange(val: string) {
   setMode(m)
   save({ skin: m })
 }
+
+function withAuthToken(url: string): string {
+  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url
+  const base = getBaseUrlValue()
+  const resolved = url.startsWith('/') ? `${base}${url}` : url
+  if (!resolved.includes('/api/')) return resolved
+  const token = getApiKey()
+  if (!token || resolved.includes('token=')) return resolved
+  return `${resolved}${resolved.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+}
+
+const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || '/logo.png'))
+
+function openAvatarPicker() {
+  avatarInputRef.value?.click()
+}
+
+function isSupportedAvatarFile(file: File): boolean {
+  const name = file.name.toLowerCase()
+  return file.type.startsWith('image/')
+    || name.endsWith('.webp')
+}
+
+function isHeicAvatarFile(file: File): boolean {
+  const name = file.name.toLowerCase()
+  return name.endsWith('.heic') || name.endsWith('.heif') || /hei[cf]/i.test(file.type)
+}
+
+async function uploadAvatarFile(file: File): Promise<string> {
+  const formData = new FormData()
+  formData.append('file', file, file.name)
+  const base = getBaseUrlValue()
+  const token = getApiKey()
+  const res = await fetch(`${base}/upload`, {
+    method: 'POST',
+    body: formData,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
+  const data = await res.json() as { files?: Array<{ name: string; path: string }> }
+  const uploaded = data.files?.[0]
+  if (!uploaded?.path) throw new Error('Upload returned no file')
+  return `/api/hermes/download?path=${encodeURIComponent(uploaded.path)}&name=${encodeURIComponent(uploaded.name || file.name)}`
+}
+
+async function handleAvatarChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (isHeicAvatarFile(file)) {
+    message.error(t('settings.display.avatarHeicUnsupported'))
+    return
+  }
+  if (!isSupportedAvatarFile(file)) {
+    message.error(t('settings.display.avatarInvalid'))
+    return
+  }
+  if (file.size > ASSISTANT_AVATAR_MAX_BYTES) {
+    message.error(t('settings.display.avatarTooLarge'))
+    return
+  }
+  try {
+    const url = await uploadAvatarFile(file)
+    await save({ assistant_avatar_url: url })
+  } catch {
+    message.error(t('settings.saveFailed'))
+  }
+}
 </script>
 
 <template>
@@ -45,6 +118,29 @@ function handleThemeChange(val: string) {
     </SettingRow>
     <SettingRow :label="t('settings.display.showReasoning')" :hint="t('settings.display.showReasoningHint')">
       <NSwitch :value="settingsStore.display.show_reasoning" @update:value="v => save({ show_reasoning: v })" />
+    </SettingRow>
+    <SettingRow :label="t('settings.display.assistantAvatar')" :hint="t('settings.display.assistantAvatarHint')">
+      <div class="avatar-control">
+        <img :src="assistantAvatarUrl" alt="" class="avatar-preview" />
+        <input
+          ref="avatarInputRef"
+          type="file"
+          accept="image/*,.webp"
+          class="avatar-input"
+          @change="handleAvatarChange"
+        />
+        <NButton size="small" @click="openAvatarPicker">
+          {{ t('settings.display.uploadAvatar') }}
+        </NButton>
+        <NButton
+          size="small"
+          tertiary
+          :disabled="!settingsStore.display.assistant_avatar_url"
+          @click="save({ assistant_avatar_url: '' })"
+        >
+          {{ t('settings.display.resetAvatar') }}
+        </NButton>
+      </div>
     </SettingRow>
     <SettingRow :label="t('settings.display.showCost')" :hint="t('settings.display.showCostHint')">
       <NSwitch :value="settingsStore.display.show_cost" @update:value="v => save({ show_cost: v })" />
@@ -66,5 +162,25 @@ function handleThemeChange(val: string) {
 
 .settings-section {
   margin-top: 16px;
+}
+
+.avatar-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.avatar-preview {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid $border-color;
+}
+
+.avatar-input {
+  display: none;
 }
 </style>

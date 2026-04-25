@@ -12,6 +12,29 @@ const PLATFORM_SECTIONS = new Set([
 const configPath = () => getActiveConfigPath()
 const envPath = () => getActiveEnvPath()
 
+function parseBooleanFlag(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return null
+}
+
+function mergeWebUiRuntimeConfig(config: Record<string, any>) {
+  const configured = parseBooleanFlag(config.webui?.bridge_enabled)
+  const env = parseBooleanFlag(process.env.HERMES_WEBUI_BRIDGE)
+  const effective = configured ?? env ?? false
+  config.webui = {
+    ...(config.webui || {}),
+    bridge_enabled: configured ?? effective,
+    bridge_env_enabled: env === true,
+    bridge_env_locked: false,
+    bridge_effective_enabled: effective,
+  }
+}
+
 const envPlatformMap: Record<string, [string, string]> = {
   TELEGRAM_BOT_TOKEN: ['telegram', 'token'],
   DISCORD_BOT_TOKEN: ['discord', 'token'],
@@ -110,6 +133,7 @@ export async function getConfig(ctx: any) {
       }
       config.platforms = existing
     }
+    mergeWebUiRuntimeConfig(config)
     const { section, sections } = ctx.query
     if (section) {
       ctx.body = { [section as string]: config[section as string] || {} }

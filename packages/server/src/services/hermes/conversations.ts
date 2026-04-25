@@ -56,6 +56,7 @@ export interface ConversationSummary {
   preview: string
   is_active: boolean
   thread_session_count: number
+  branch_session_count: number
 }
 
 export interface ConversationMessage {
@@ -66,11 +67,29 @@ export interface ConversationMessage {
   timestamp: number
 }
 
+export interface ConversationBranch {
+  session_id: string
+  parent_session_id: string | null
+  source: string
+  model: string
+  title: string | null
+  started_at: number
+  ended_at: number | null
+  last_active: number
+  is_active: boolean
+  messages: ConversationMessage[]
+  visible_count: number
+  thread_session_count: number
+  branches: ConversationBranch[]
+}
+
 export interface ConversationDetail {
   session_id: string
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
+  branch_session_count: number
+  branches: ConversationBranch[]
 }
 
 export interface ConversationListOptions {
@@ -239,12 +258,12 @@ function isVisibleRoot(session: ConversationSession | undefined, byId: Map<strin
   return session.parent_session_id == null || isBranchRoot(session, byId)
 }
 
-function continuationCandidates(parent: ConversationSession, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>): ConversationSession[] {
+function continuationCandidates(parent: ConversationSession, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSession[] {
   const childIds = childrenByParent.get(parent.id) || []
   return childIds
     .map(childId => byId.get(childId))
     .filter((child): child is ConversationSession => !!child)
-    .filter(child => child.source !== 'tool')
+    .filter(child => allowTool || child.source !== 'tool')
     .filter(child => child.source === parent.source)
     .filter(child => timingMatchesParent(parent, child))
     .sort((a, b) => {
@@ -255,9 +274,9 @@ function continuationCandidates(parent: ConversationSession, byId: Map<string, C
     })
 }
 
-function nextContinuationChild(parent: ConversationSession, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>): ConversationSession | null {
+function nextContinuationChild(parent: ConversationSession, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSession | null {
   if (parent.end_reason !== 'compression') return null
-  const candidates = continuationCandidates(parent, byId, childrenByParent)
+  const candidates = continuationCandidates(parent, byId, childrenByParent, allowTool)
   if (candidates.length === 1) return candidates[0]
 
   const exactPreviewMatches = candidates.filter(child => {
@@ -270,14 +289,14 @@ function nextContinuationChild(parent: ConversationSession, byId: Map<string, Co
   return null
 }
 
-function collectConversationChain(rootId: string, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>): ConversationSession[] {
+function collectConversationChain(rootId: string, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSession[] {
   const chain: ConversationSession[] = []
   const seen = new Set<string>()
   let current = byId.get(rootId) || null
   while (current && !seen.has(current.id)) {
     chain.push(current)
     seen.add(current.id)
-    current = nextContinuationChild(current, byId, childrenByParent)
+    current = nextContinuationChild(current, byId, childrenByParent, allowTool)
   }
   return chain
 }
@@ -318,6 +337,66 @@ function visibleMessagesForSessions(sessions: HermesSessionFull[]): Conversation
     })
 }
 
+function collectBranchRoots(chain: ConversationSession[], byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>): ConversationSession[] {
+  const chainIds = new Set(chain.map(session => session.id))
+  const roots: ConversationSession[] = []
+  for (const parent of chain) {
+    const continuation = nextContinuationChild(parent, byId, childrenByParent, true)
+    const childIds = childrenByParent.get(parent.id) || []
+    for (const childId of childIds) {
+      if (chainIds.has(childId) || childId === continuation?.id) continue
+      const child = byId.get(childId)
+      if (child) roots.push(child)
+    }
+  }
+  return roots.sort((a, b) => {
+    if (a.started_at !== b.started_at) return a.started_at - b.started_at
+    return a.id.localeCompare(b.id)
+  })
+}
+
+function collectConversationBranches(chain: ConversationSession[], byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): ConversationBranch[] {
+  const roots = collectBranchRoots(chain, byId, childrenByParent)
+  const branches: ConversationBranch[] = []
+  for (const root of roots) {
+    if (seen.has(root.id)) continue
+    seen.add(root.id)
+    const branchChain = collectConversationChain(root.id, byId, childrenByParent, true)
+    const messages = visibleMessagesForSessions(branchChain)
+    branches.push({
+      session_id: root.id,
+      parent_session_id: root.parent_session_id ?? null,
+      source: safeText(root.source),
+      model: safeText(root.model),
+      title: root.title ?? null,
+      started_at: Number(root.started_at || 0),
+      ended_at: branchChain[branchChain.length - 1]?.ended_at ?? root.ended_at ?? null,
+      last_active: branchChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(root.last_active || root.started_at || 0)),
+      is_active: branchChain.some(session => session.is_active),
+      messages,
+      visible_count: messages.length,
+      thread_session_count: branchChain.length,
+      branches: collectConversationBranches(branchChain, byId, childrenByParent, seen),
+    })
+  }
+  return branches
+}
+
+function countBranches(branches: ConversationBranch[]): number {
+  return branches.reduce((sum, branch) => sum + 1 + countBranches(branch.branches), 0)
+}
+
+function countConversationBranchSessions(chain: ConversationSession[], byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): number {
+  let count = 0
+  for (const root of collectBranchRoots(chain, byId, childrenByParent)) {
+    if (seen.has(root.id)) continue
+    seen.add(root.id)
+    const branchChain = collectConversationChain(root.id, byId, childrenByParent, true)
+    count += 1 + countConversationBranchSessions(branchChain, byId, childrenByParent, seen)
+  }
+  return count
+}
+
 function hasVisibleHumanMessages(sessions: HermesSessionFull[]): boolean {
   return visibleMessagesForSessions(sessions).length > 0
     || sessions.some(session => (session as ConversationSession).is_live_tui_process)
@@ -346,6 +425,7 @@ function toSummary(session: ConversationSession): ConversationSummary {
     preview: session.preview,
     is_active: session.is_active,
     thread_session_count: 1,
+    branch_session_count: 0,
   }
 }
 
@@ -357,6 +437,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSession>
   const title = root.title || excerpt(firstVisibleHumanText(chain.flatMap(sessionMessages)), 72) || null
   const preview = root.preview || excerpt(firstVisibleHumanText(chain.flatMap(sessionMessages)))
   const costStatuses = Array.from(new Set(chain.map(session => safeText(session.cost_status)).filter(Boolean)))
+  const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
 
   return {
     ...toSummary(root),
@@ -369,6 +450,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSession>
     billing_provider: last?.billing_provider ?? root.billing_provider ?? null,
     cost_status: costStatuses.length === 1 ? costStatuses[0] : 'mixed',
     thread_session_count: chain.length,
+    branch_session_count: branchSessionCount,
     message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
     tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
     input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
@@ -464,6 +546,8 @@ export async function getConversationDetail(sessionId: string, options: Conversa
       messages,
       visible_count: messages.length,
       thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
     }
   }
 
@@ -471,11 +555,14 @@ export async function getConversationDetail(sessionId: string, options: Conversa
   if (!isVisibleRoot(root, byId)) return null
   const chain = collectConversationChain(sessionId, byId, childrenByParent)
   const messages = visibleMessagesForSessions(chain)
-  if (!messages.length && !chain.some(session => session.is_live_tui_process)) return null
+  const branches = collectConversationBranches(chain, byId, childrenByParent)
+  if (!messages.length && !branches.length && !chain.some(session => session.is_live_tui_process)) return null
   return {
     session_id: sessionId,
     messages,
     visible_count: messages.length,
     thread_session_count: chain.length,
+    branch_session_count: countBranches(branches),
+    branches,
   }
 }

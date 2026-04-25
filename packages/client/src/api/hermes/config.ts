@@ -11,6 +11,7 @@ export interface DisplayConfig {
   inline_diffs?: boolean
   show_cost?: boolean
   skin?: string
+  assistant_avatar_url?: string
 }
 
 export interface AgentConfig {
@@ -38,12 +39,20 @@ export interface PrivacyConfig {
   redact_pii?: boolean
 }
 
+export interface WebUiConfig {
+  bridge_enabled?: boolean
+  bridge_env_enabled?: boolean
+  bridge_env_locked?: boolean
+  bridge_effective_enabled?: boolean
+}
+
 export interface AppConfig {
   display?: DisplayConfig
   agent?: AgentConfig
   memory?: MemoryConfig
   session_reset?: SessionResetConfig
   privacy?: PrivacyConfig
+  webui?: WebUiConfig
   telegram?: Record<string, any>
   discord?: Record<string, any>
   slack?: Record<string, any>

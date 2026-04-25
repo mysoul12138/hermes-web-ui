@@ -8,6 +8,7 @@ import MarkdownRenderer from "./MarkdownRenderer.vue";
 import { parseThinking, countThinkingChars } from "@/utils/thinking-parser";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
+import { getApiKey, getBaseUrlValue } from "@/api/client";
 import {
   copyTextToClipboard,
   handleCodeBlockCopyClick,
@@ -25,6 +26,18 @@ const toolExpanded = ref(false);
 
 const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
+
+function withAuthToken(url: string): string {
+  if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
+  const base = getBaseUrlValue();
+  const resolved = url.startsWith("/") ? `${base}${url}` : url;
+  if (!resolved.includes("/api/")) return resolved;
+  const token = getApiKey();
+  if (!token || resolved.includes("token=")) return resolved;
+  return `${resolved}${resolved.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
+const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"));
 
 const parsedThinking = computed(() =>
   parseThinking(props.message.content || "", { streaming: !!props.message.isStreaming }),
@@ -255,7 +268,8 @@ const renderedToolResult = computed(() => {
 <template>
   <div
     class="message"
-    :class="[message.role, { highlight }]"
+    :class="[message.role, { highlight, subagent: !!message.subagentId }]"
+    :style="message.subagentId ? { marginLeft: `${Math.min(message.subagentDepth || 0, 4) * 16}px` } : undefined"
     :id="`message-${message.id}`"
   >
     <template v-if="message.role === 'tool'">
@@ -320,7 +334,7 @@ const renderedToolResult = computed(() => {
       <div class="msg-body">
         <img
           v-if="message.role === 'assistant'"
-          src="/logo.png"
+          :src="assistantAvatarUrl"
           alt="Hermes"
           class="msg-avatar"
         />
@@ -408,11 +422,12 @@ const renderedToolResult = computed(() => {
               :content="parsedThinking.body"
             />
 
-            <span v-if="message.isStreaming && !message.content" class="streaming-dots">
-              <span></span><span></span><span></span>
-            </span>
+            <span v-if="message.isStreaming" class="streaming-cursor"></span>
           </div>
-          <div class="message-time">{{ timeStr }}</div>
+          <div class="message-time">
+            <span v-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
+            {{ timeStr }}
+          </div>
         </div>
       </div>
     </template>
@@ -484,6 +499,11 @@ const renderedToolResult = computed(() => {
     .message-bubble {
       box-shadow: 0 0 0 1px rgba(var(--accent-primary-rgb), 0.45);
     }
+  }
+
+  &.subagent {
+    border-left: 2px solid rgba(var(--accent-primary-rgb), 0.35);
+    padding-left: 10px;
   }
 }
 
@@ -623,6 +643,17 @@ const renderedToolResult = computed(() => {
   }
 }
 
+.queued-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(var(--accent-primary-rgb), 0.12);
+  color: $accent-primary;
+  font-size: 10px;
+}
+
 .tool-line {
   display: flex;
   align-items: center;
@@ -735,23 +766,6 @@ const renderedToolResult = computed(() => {
   animation: blink 0.8s infinite;
 }
 
-.streaming-dots {
-  display: flex;
-  gap: 4px;
-  padding: 4px 0;
-
-  span {
-    width: 6px;
-    height: 6px;
-    background-color: $text-muted;
-    border-radius: 50%;
-    animation: pulse 1.4s infinite ease-in-out;
-
-    &:nth-child(2) { animation-delay: 0.2s; }
-    &:nth-child(3) { animation-delay: 0.4s; }
-  }
-}
-
 @keyframes blink {
   0%,
   50% {
@@ -760,19 +774,6 @@ const renderedToolResult = computed(() => {
   51%,
   100% {
     opacity: 0;
-  }
-}
-
-@keyframes pulse {
-  0%,
-  80%,
-  100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  40% {
-    opacity: 1;
-    transform: scale(1);
   }
 }
 

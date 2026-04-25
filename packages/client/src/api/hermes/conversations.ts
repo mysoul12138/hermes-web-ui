@@ -22,6 +22,7 @@ export interface ConversationSummary {
   preview: string
   is_active: boolean
   thread_session_count: number
+  branch_session_count: number
 }
 
 export interface ConversationMessage {
@@ -32,11 +33,29 @@ export interface ConversationMessage {
   timestamp: number
 }
 
+export interface ConversationBranch {
+  session_id: string
+  parent_session_id: string | null
+  source: string
+  model: string
+  title: string | null
+  started_at: number
+  ended_at: number | null
+  last_active: number
+  is_active: boolean
+  messages: ConversationMessage[]
+  visible_count: number
+  thread_session_count: number
+  branches: ConversationBranch[]
+}
+
 export interface ConversationDetail {
   session_id: string
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
+  branch_session_count: number
+  branches: ConversationBranch[]
 }
 
 export async function fetchConversationSummaries(params: { humanOnly?: boolean; source?: string; limit?: number } = {}): Promise<ConversationSummary[]> {

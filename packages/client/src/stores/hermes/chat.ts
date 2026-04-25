@@ -6,10 +6,12 @@ import {
   type PendingApproval,
 } from '@/api/hermes/approval'
 import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionSummary } from '@/api/hermes/sessions'
+import { fetchConversationDetail, fetchConversationSummaries, type ConversationBranch, type ConversationMessage, type ConversationSummary } from '@/api/hermes/conversations'
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useAppStore } from './app'
 import { useProfilesStore } from './profiles'
+import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 
 export interface Attachment {
@@ -32,6 +34,9 @@ export interface Message {
   toolResult?: string
   toolStatus?: 'running' | 'done' | 'error'
   isStreaming?: boolean
+  queued?: boolean
+  subagentId?: string
+  subagentDepth?: number
   attachments?: Attachment[]
   // 思考/推理文本。两条来源：
   //   1) 历史消息：来自 HermesMessage.reasoning 字段
@@ -54,6 +59,10 @@ export interface Session {
   outputTokens?: number
   endedAt?: number | null
   lastActiveAt?: number
+  branchSessionCount?: number
+  parentSessionId?: string | null
+  rootSessionId?: string | null
+  isBranchSession?: boolean
 }
 
 function uid(): string {
@@ -98,6 +107,13 @@ function extractCommandFromToolPreview(preview?: string): string | undefined {
   const value = preview?.trim()
   if (!value) return undefined
   return value.replace(/^terminal\s+/i, '').trim() || value
+}
+
+function textFromRunEvent(evt: RunEvent): string {
+  for (const value of [evt.text, evt.delta, evt.reasoning, evt.thinking, evt.content, evt.message]) {
+    if (typeof value === 'string' && value) return value
+  }
+  return ''
 }
 
 function extractPendingApprovalFromMessages(messages: Message[]): PendingApproval | null {
@@ -229,7 +245,7 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
   return result
 }
 
-function mapHermesSession(s: SessionSummary): Session {
+function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
   return {
     id: s.id,
     title: s.title || '',
@@ -242,6 +258,7 @@ function mapHermesSession(s: SessionSummary): Session {
     messageCount: s.message_count,
     endedAt: s.ended_at != null ? Math.round(s.ended_at * 1000) : null,
     lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
+    branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
   }
 }
 
@@ -297,6 +314,12 @@ interface ApprovalState {
   visibleSince: number
   signature: string
   submitting: boolean
+}
+
+interface QueuedInput {
+  content: string
+  attachments?: Attachment[]
+  messageId: string
 }
 
 function loadJson<T>(key: string): T | null {
@@ -446,11 +469,25 @@ export const useChatStore = defineStore('chat', () => {
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
   const approvalsBySession = ref<Record<string, ApprovalState>>({})
+  const queuedInputs = ref<Record<string, QueuedInput[]>>({})
+  const dbBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
+  const liveBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
   const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
 
   const activeSession = ref<Session | null>(null)
   const messages = computed<Message[]>(() => activeSession.value?.messages || [])
+  const activeBranches = computed<ConversationBranch[]>(() => {
+    const sid = activeSessionId.value
+    if (!sid) return []
+    const persisted = dbBranchesBySession.value[sid] || []
+    return persisted.length ? persisted : (liveBranchesBySession.value[sid] || [])
+  })
+  const displayMessages = computed<Message[]>(() => messages.value)
+  const activeQueuedInputCount = computed(() => {
+    const sid = activeSessionId.value
+    return sid ? queuedInputs.value[sid]?.length || 0 : 0
+  })
   const activeApproval = computed<ApprovalState | null>(() => {
     const sid = activeSessionId.value
     if (!sid) return null
@@ -459,6 +496,89 @@ export const useChatStore = defineStore('chat', () => {
 
   function isSessionLive(sessionId: string): boolean {
     return streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)
+  }
+
+  function countBranchTree(branches: ConversationBranch[]): number {
+    return branches.reduce((sum, branch) => sum + 1 + countBranchTree(branch.branches || []), 0)
+  }
+
+  function findBranchById(branches: ConversationBranch[], branchId: string): ConversationBranch | null {
+    for (const branch of branches) {
+      if (branch.session_id === branchId) return branch
+      const child = findBranchById(branch.branches || [], branchId)
+      if (child) return child
+    }
+    return null
+  }
+
+  function sessionBranches(sessionId: string): ConversationBranch[] {
+    const persisted = dbBranchesBySession.value[sessionId] || []
+    return persisted.length ? persisted : (liveBranchesBySession.value[sessionId] || [])
+  }
+
+  function sessionBranchCount(sessionId: string): number {
+    const loadedCount = countBranchTree(sessionBranches(sessionId))
+    if (loadedCount > 0) return loadedCount
+    return sessions.value.find(session => session.id === sessionId)?.branchSessionCount || 0
+  }
+
+  function branchMessagesToMessages(branch: ConversationBranch): Message[] {
+    return branch.messages.map(message => ({
+      id: String(message.id),
+      role: message.role,
+      content: message.content,
+      timestamp: Math.round(message.timestamp * 1000),
+    }))
+  }
+
+  function branchToSession(branch: ConversationBranch, rootSessionId: string): Session {
+    return {
+      id: branch.session_id,
+      title: branch.title || branch.messages.find(message => message.content.trim())?.content.slice(0, 40) || branch.session_id,
+      source: branch.source || undefined,
+      messages: branchMessagesToMessages(branch),
+      createdAt: Math.round(branch.started_at * 1000),
+      updatedAt: Math.round((branch.last_active || branch.ended_at || branch.started_at) * 1000),
+      model: branch.model,
+      messageCount: branch.messages.length,
+      endedAt: branch.ended_at != null ? Math.round(branch.ended_at * 1000) : null,
+      lastActiveAt: branch.last_active != null ? Math.round(branch.last_active * 1000) : undefined,
+      branchSessionCount: countBranchTree(branch.branches || []),
+      parentSessionId: branch.parent_session_id,
+      rootSessionId,
+      isBranchSession: true,
+    }
+  }
+
+  async function switchBranchSession(rootSessionId: string, branchId: string) {
+    let branch = findBranchById(sessionBranches(rootSessionId), branchId)
+    if (!branch) {
+      await refreshSessionBranches(rootSessionId)
+      branch = findBranchById(sessionBranches(rootSessionId), branchId)
+    }
+    if (branch) {
+      const nextSession = branchToSession(branch, rootSessionId)
+      const existing = sessions.value.find(session => session.id === branchId)
+      if (existing) {
+        existing.title = nextSession.title
+        existing.source = nextSession.source
+        existing.model = nextSession.model
+        existing.messages = nextSession.messages
+        existing.createdAt = nextSession.createdAt
+        existing.updatedAt = nextSession.updatedAt
+        existing.messageCount = nextSession.messageCount
+        existing.endedAt = nextSession.endedAt
+        existing.lastActiveAt = nextSession.lastActiveAt
+        existing.branchSessionCount = nextSession.branchSessionCount
+        existing.parentSessionId = nextSession.parentSessionId
+        existing.rootSessionId = nextSession.rootSessionId
+        existing.isBranchSession = true
+      } else {
+        sessions.value.push(nextSession)
+      }
+      persistSessionsList()
+    }
+    await switchSession(branchId)
   }
 
   function buildApprovalSignature(sessionId: string, pending: PendingApproval | null) {
@@ -666,6 +786,47 @@ export const useChatStore = defineStore('chat', () => {
     if (s) saveJsonWithLegacy(msgsCacheKey(sid), sanitizeForCache(s.messages), legacyMsgsCacheKey(sid))
   }
 
+  function busyInputQueueEnabled() {
+    return useSettingsStore().display.busy_input_mode === 'interrupt'
+  }
+
+  function queuedMessagesFor(sid: string, messages: Message[]): Message[] {
+    const queuedIds = new Set((queuedInputs.value[sid] || []).map(item => item.messageId))
+    if (queuedIds.size === 0) return []
+    return messages.filter(message => queuedIds.has(message.id))
+  }
+
+  function withQueuedMessages(sid: string, mapped: Message[], current: Message[]): Message[] {
+    const queued = queuedMessagesFor(sid, current)
+    return queued.length ? [...mapped, ...queued] : mapped
+  }
+
+  function setQueuedInputsForSession(sid: string, queue: QueuedInput[]) {
+    queuedInputs.value = {
+      ...queuedInputs.value,
+      [sid]: queue,
+    }
+  }
+
+  function queueBusyInput(sid: string, content: string, attachments?: Attachment[]) {
+    const messageId = uid()
+    const userMsg: Message = {
+      id: messageId,
+      role: 'user',
+      content: content.trim(),
+      timestamp: Date.now(),
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      queued: true,
+    }
+    addMessage(sid, userMsg)
+    updateSessionTitle(sid)
+    setQueuedInputsForSession(sid, [...(queuedInputs.value[sid] || []), { content, attachments, messageId }])
+    if (sid === activeSessionId.value) {
+      persistActiveMessages()
+      persistSessionsList()
+    }
+  }
+
   function markInFlight(sid: string, runId: string) {
     saveJsonWithLegacy(inFlightKey(sid), { runId, startedAt: Date.now() } as InFlightRun, legacyInFlightKey(sid))
   }
@@ -713,6 +874,21 @@ export const useChatStore = defineStore('chat', () => {
     return rec
   }
 
+  function sessionFetchId(sid: string): string {
+    return readBridgePersistentSessionId(sid) || sid
+  }
+
+  function resumeInFlightRun(sid: string): boolean {
+    const inFlight = readInFlight(sid)
+    if (!inFlight || streamStates.value.has(sid)) return false
+    if (inFlight.runId.startsWith('bridge_run_')) {
+      attachRunStream(sid, inFlight.runId)
+      return true
+    }
+    startPolling(sid)
+    return true
+  }
+
   function stopPolling(sid: string) {
     const t = pollTimers.get(sid)
     if (t) {
@@ -741,7 +917,7 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       try {
-        const detail = await fetchSession(sid)
+        const detail = await fetchSession(sessionFetchId(sid))
         if (!detail) return
         const target = sessions.value.find(s => s.id === sid)
         if (!target) return
@@ -765,10 +941,11 @@ export const useChatStore = defineStore('chat', () => {
           serverUsers > localUsers
           || (serverUsers === localUsers && serverAssistantLen >= localAssistantLen)
         if (serverIsAhead) {
-          target.messages = mapped
+          target.messages = withQueuedMessages(sid, mapped, target.messages)
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         }
+        void refreshSessionBranches(sid)
         syncApprovalFromMessages(sid, target.messages)
         // Stability detection ONLY matters when the server has at least as
         // many user turns as we do. Otherwise the server is still catching
@@ -787,11 +964,12 @@ export const useChatStore = defineStore('chat', () => {
               // Run is done on the server. Force-apply server view even if
               // our "don't retreat" guard above skipped it — the server is
               // now the authoritative source of truth.
-              target.messages = mapped
+              target.messages = withQueuedMessages(sid, mapped, target.messages)
               if (detail.title) target.title = detail.title
               if (sid === activeSessionId.value) persistActiveMessages()
               clearInFlight(sid)
               stopPolling(sid)
+              drainQueuedInput(sid)
             }
           } else {
             pollSignatures.set(sid, { sig, stableTicks: 0 })
@@ -823,7 +1001,12 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
 
-      const list = await fetchSessions()
+      let list: Array<SessionSummary | ConversationSummary>
+      try {
+        list = await fetchConversationSummaries({ humanOnly: true })
+      } catch {
+        list = await fetchSessions()
+      }
       const freshRaw = list.map(mapHermesSession)
       const freshRawIds = new Set(freshRaw.map(s => s.id))
       // Preserve already-loaded messages for sessions that are still present,
@@ -874,6 +1057,7 @@ export const useChatStore = defineStore('chat', () => {
         }
         if (readInFlight(s.id)) return true
         if (isBridgeLocalSession(s.id)) return true
+        if (s.isBranchSession) return true
         // Session no longer exists on server and no active run — clean up cache
         removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
         removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
@@ -906,13 +1090,14 @@ export const useChatStore = defineStore('chat', () => {
     const sid = activeSessionId.value
     if (!sid) return false
     try {
-      const detail = await fetchSession(sid)
+      const detail = await fetchSession(sessionFetchId(sid))
       if (!detail) return false
       const target = sessions.value.find(s => s.id === sid)
       if (!target) return false
       if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
-      target.messages = mapped
+      target.messages = withQueuedMessages(sid, mapped, target.messages)
+      void refreshSessionBranches(sid)
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, mapped)
       } else {
@@ -955,9 +1140,14 @@ export const useChatStore = defineStore('chat', () => {
         clearTimeout(persistTimer)
         persistTimer = null
       }
+      if (branchRefreshTimer) {
+        clearInterval(branchRefreshTimer)
+        branchRefreshTimer = null
+      }
     }
 
     let persistTimer: ReturnType<typeof setTimeout> | null = null
+    let branchRefreshTimer: ReturnType<typeof setInterval> | null = null
     let runProducedAssistantText = false
     let runHadToolActivity = false
     const schedulePersist = () => {
@@ -968,12 +1158,37 @@ export const useChatStore = defineStore('chat', () => {
       }, 800)
     }
 
+    if (runId.startsWith('bridge_run_')) {
+      void refreshSessionBranches(sid)
+      branchRefreshTimer = setInterval(() => {
+        void refreshSessionBranches(sid)
+      }, 3000)
+    }
+
     const ctrl = streamRunEvents(
       runId,
       (evt: RunEvent) => {
         switch (evt.event) {
           case 'run.started':
             break
+
+          case 'subagent.spawn_requested':
+          case 'subagent.start':
+          case 'subagent.thinking':
+          case 'subagent.progress':
+          case 'subagent.status':
+          case 'subagent.tool':
+          case 'subagent.complete':
+          case 'subagent.error': {
+            runHadToolActivity = true
+            const msgs = getSessionMsgs(sid)
+            const last = msgs[msgs.length - 1]
+            if (last?.isStreaming) {
+              updateMessage(sid, last.id, { isStreaming: false })
+            }
+            upsertSubagentBranch(sid, evt)
+            break
+          }
 
           case 'approval': {
             setApprovalPending(sid, {
@@ -990,13 +1205,13 @@ export const useChatStore = defineStore('chat', () => {
 
           case 'reasoning.delta':
           case 'thinking.delta': {
-            const text = evt.text || evt.delta || ''
+            const text = textFromRunEvent(evt)
             if (!text) break
             runProducedAssistantText = true
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
-              last.reasoning = (last.reasoning || '') + text
+              updateMessage(sid, last.id, { reasoning: (last.reasoning || '') + text })
               noteReasoningStart(last.id)
             } else {
               const newId = uid()
@@ -1015,10 +1230,28 @@ export const useChatStore = defineStore('chat', () => {
           }
 
           case 'reasoning.available': {
+            const text = textFromRunEvent(evt)
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
+              if (text && (!last.reasoning || !last.reasoning.includes(text))) {
+                updateMessage(sid, last.id, {
+                  reasoning: last.reasoning ? `${last.reasoning}\n\n${text}` : text,
+                })
+              }
               noteReasoningEnd(last.id)
+            } else if (text) {
+              const newId = uid()
+              addMessage(sid, {
+                id: newId,
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                isStreaming: true,
+                reasoning: text,
+              })
+              noteReasoningStart(newId)
+              noteReasoningEnd(newId)
             }
             schedulePersist()
             break
@@ -1033,7 +1266,7 @@ export const useChatStore = defineStore('chat', () => {
               const next = prev + (evt.delta || '')
               noteThinkingDelta(last.id, prev, next)
               if (last.reasoning) noteReasoningEnd(last.id)
-              last.content = next
+              updateMessage(sid, last.id, { content: next })
             } else {
               const newId = uid()
               const nextContent = evt.delta || ''
@@ -1130,7 +1363,13 @@ export const useChatStore = defineStore('chat', () => {
             stopApprovalPolling(sid)
             clearApproval(sid)
             if (sid === activeSessionId.value) {
-              void refreshActiveSession()
+              void refreshActiveSession().finally(() => {
+                void refreshSessionBranches(sid)
+                drainQueuedInput(sid)
+              })
+            } else {
+              void refreshSessionBranches(sid)
+              drainQueuedInput(sid)
             }
             break
           }
@@ -1166,6 +1405,7 @@ export const useChatStore = defineStore('chat', () => {
             stopPolling(sid)
             stopApprovalPolling(sid)
             clearApproval(sid)
+            drainQueuedInput(sid)
             break
           }
         }
@@ -1183,6 +1423,7 @@ export const useChatStore = defineStore('chat', () => {
         stopApprovalPolling(sid)
         clearApproval(sid)
         if (sid === activeSessionId.value) persistActiveMessages()
+        drainQueuedInput(sid)
       },
       (err) => {
         console.warn('SSE connection dropped, resyncing from server:', err.message)
@@ -1254,7 +1495,7 @@ export const useChatStore = defineStore('chat', () => {
     if (needsBlockingLoad) isLoadingMessages.value = true
 
     try {
-      const detail = await fetchSession(sessionId)
+      const detail = await fetchSession(sessionFetchId(sessionId))
       if (detail && detail.messages) {
         if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)
@@ -1286,8 +1527,9 @@ export const useChatStore = defineStore('chat', () => {
           serverUsers > localUsers
           || (serverUsers === localUsers && serverAssistantLen >= localAssistantLen)
         if (serverIsAhead) {
-          activeSession.value.messages = mapped
+          activeSession.value.messages = withQueuedMessages(sessionId, mapped, activeSession.value.messages)
         }
+        void refreshSessionBranches(sessionId)
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {
           syncApprovalFromMessages(sessionId, activeSession.value.messages)
         } else {
@@ -1323,7 +1565,7 @@ export const useChatStore = defineStore('chat', () => {
     // not currently streaming, start polling fetchSession to pick up progress
     // that happened while we were gone. Exits automatically on stability.
     if (readInFlight(sessionId) && !streamStates.value.has(sessionId)) {
-      startPolling(sessionId)
+      resumeInFlightRun(sessionId)
       void pollApprovalOnce(sessionId)
       startApprovalPolling(sessionId)
     }
@@ -1412,25 +1654,110 @@ export const useChatStore = defineStore('chat', () => {
     target.updatedAt = Date.now()
   }
 
-  async function sendMessage(content: string, attachments?: Attachment[]) {
-    if ((!content.trim() && !(attachments && attachments.length > 0)) || isStreaming.value) return
+  function textFromOutputTail(items: Array<Record<string, unknown>> | undefined): string {
+    if (!Array.isArray(items) || items.length === 0) return ''
+    return items
+      .map(item => {
+        const role = typeof item.role === 'string' ? `${item.role}: ` : ''
+        const content = item.content ?? item.text ?? item.summary ?? ''
+        return `${role}${typeof content === 'string' ? content : JSON.stringify(content)}`
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
 
-    if (!activeSession.value) {
-      const session = createSession()
-      switchSession(session.id)
+  function formatSubagentResult(evt: RunEvent): string | undefined {
+    const lines: string[] = []
+    if (evt.summary) lines.push(evt.summary)
+    const tail = textFromOutputTail(evt.output_tail)
+    if (tail) lines.push(tail)
+    const usage = [
+      evt.input_tokens != null ? `input=${evt.input_tokens}` : '',
+      evt.output_tokens != null ? `output=${evt.output_tokens}` : '',
+      evt.reasoning_tokens != null ? `reasoning=${evt.reasoning_tokens}` : '',
+      evt.api_calls != null ? `api_calls=${evt.api_calls}` : '',
+      evt.cost_usd != null ? `cost=$${evt.cost_usd}` : '',
+    ].filter(Boolean).join(', ')
+    if (usage) lines.push(usage)
+    if (evt.files_read?.length) lines.push(`files_read: ${evt.files_read.join(', ')}`)
+    if (evt.files_written?.length) lines.push(`files_written: ${evt.files_written.join(', ')}`)
+    return lines.join('\n\n') || undefined
+  }
+
+  async function refreshSessionBranches(sid: string) {
+    const fetchId = sessionFetchId(sid)
+    if (!fetchId) return
+    try {
+      const detail = await fetchConversationDetail(fetchId, { humanOnly: true })
+      dbBranchesBySession.value = {
+        ...dbBranchesBySession.value,
+        [sid]: detail.branches || [],
+      }
+    } catch {
+      // Branch detail is best-effort; normal chat streaming must not depend on it.
     }
+  }
 
-    // Capture session ID at send time — all callbacks use this, not activeSessionId
-    const sid = activeSessionId.value!
-
-    const userMsg: Message = {
-      id: uid(),
-      role: 'user',
-      content: content.trim(),
-      timestamp: Date.now(),
-      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+  function upsertSubagentBranch(sessionId: string, evt: RunEvent) {
+    const subagentId = evt.subagent_id || `${evt.parent_id || 'root'}:${evt.task_index ?? 0}:${evt.goal || evt.event}`
+    const depth = Math.max(0, Number(evt.depth || 0))
+    const status = evt.status || evt.event.replace(/^subagent\./, '')
+    const goal = evt.goal || evt.summary || evt.text || 'Subagent'
+    const preview = evt.tool_preview || evt.text || evt.summary || goal
+    const result = formatSubagentResult(evt)
+    const now = Date.now() / 1000
+    const existingBranches = liveBranchesBySession.value[sessionId] || []
+    const existing = existingBranches.find(branch => branch.session_id === subagentId)
+    const content = result || `[${status}] ${preview}`
+    const eventMessage: ConversationMessage = {
+      id: evt.event,
+      session_id: subagentId,
+      role: evt.event === 'subagent.spawn_requested' || evt.event === 'subagent.start' ? 'user' : 'assistant',
+      content,
+      timestamp: now,
     }
-    addMessage(sid, userMsg)
+    const previousMessages = existing?.messages || []
+    const messages = [
+      ...previousMessages.filter(message => message.id !== eventMessage.id),
+      eventMessage,
+    ].sort((a, b) => a.timestamp - b.timestamp)
+    const branch: ConversationBranch = {
+      session_id: subagentId,
+      parent_session_id: evt.parent_id || sessionFetchId(sessionId),
+      source: 'subagent',
+      model: evt.model || '',
+      title: depth > 0 ? `Subagent L${depth}: ${goal}` : goal,
+      started_at: existing?.started_at || now,
+      ended_at: evt.event === 'subagent.complete' || evt.event === 'subagent.error' ? now : null,
+      last_active: now,
+      is_active: evt.event !== 'subagent.complete' && evt.event !== 'subagent.error',
+      messages,
+      visible_count: messages.length,
+      thread_session_count: 1,
+      branches: existing?.branches || [],
+    }
+    liveBranchesBySession.value = {
+      ...liveBranchesBySession.value,
+      [sessionId]: existing
+        ? existingBranches.map(item => item.session_id === subagentId ? branch : item)
+        : [...existingBranches, branch],
+    }
+    void refreshSessionBranches(sessionId)
+  }
+
+  async function submitMessage(sid: string, content: string, attachments?: Attachment[], existingUserMessageId?: string) {
+    if (existingUserMessageId) {
+      updateMessage(sid, existingUserMessageId, { queued: false, timestamp: Date.now() })
+    } else {
+      const userMsg: Message = {
+        id: uid(),
+        role: 'user',
+        content: content.trim(),
+        timestamp: Date.now(),
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      }
+      addMessage(sid, userMsg)
+    }
     updateSessionTitle(sid)
     // Persist immediately so a refresh before the first SSE event (e.g. the
     // user closes the tab right after sending) still has the user's message
@@ -1444,7 +1771,7 @@ export const useChatStore = defineStore('chat', () => {
       // Build conversation history from past messages
       const sessionMsgs = getSessionMsgs(sid)
       const history: ChatMessage[] = sessionMsgs
-        .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+        .filter(m => !m.queued && (m.role === 'user' || m.role === 'assistant') && m.content.trim())
         .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
 
       // Upload attachments and build input with file paths
@@ -1456,7 +1783,8 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const appStore = useAppStore()
-      const sessionModel = activeSession.value?.model || appStore.selectedModel
+      const target = sessions.value.find(s => s.id === sid)
+      const sessionModel = target?.model || activeSession.value?.model || appStore.selectedModel
       const run = await startRun({
         input: inputText,
         conversation_history: history,
@@ -1492,6 +1820,33 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function sendMessage(content: string, attachments?: Attachment[]) {
+    if (!content.trim() && !(attachments && attachments.length > 0)) return
+
+    if (!activeSession.value) {
+      const session = createSession()
+      switchSession(session.id)
+    }
+
+    // Capture session ID at send time — all callbacks use this, not activeSessionId
+    const sid = activeSessionId.value!
+    if (isStreaming.value) {
+      if (busyInputQueueEnabled()) queueBusyInput(sid, content, attachments)
+      return
+    }
+
+    await submitMessage(sid, content, attachments)
+  }
+
+  function drainQueuedInput(sid: string) {
+    if (streamStates.value.has(sid) || readInFlight(sid)) return
+    const queue = queuedInputs.value[sid] || []
+    const next = queue[0]
+    if (!next) return
+    setQueuedInputsForSession(sid, queue.slice(1))
+    void submitMessage(sid, next.content, next.attachments, next.messageId)
+  }
+
   async function stopStreaming() {
     const sid = activeSessionId.value
     if (!sid) return
@@ -1520,12 +1875,14 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!inFlight?.runId || !inFlight.runId.startsWith('bridge_run_')) {
       clearInFlight(sid)
+      drainQueuedInput(sid)
       return
     }
 
     try {
       await cancelRun(inFlight.runId)
       clearInFlight(sid)
+      drainQueuedInput(sid)
     } catch (err) {
       console.warn('Failed to cancel run:', err)
     }
@@ -1537,7 +1894,7 @@ export const useChatStore = defineStore('chat', () => {
       if (document.visibilityState === 'visible' && activeSessionId.value && !isStreaming.value) {
         void refreshActiveSession()
         if (readInFlight(activeSessionId.value)) {
-          startPolling(activeSessionId.value)
+          resumeInFlightRun(activeSessionId.value)
           void pollApprovalOnce(activeSessionId.value)
           startApprovalPolling(activeSessionId.value)
         }
@@ -1596,11 +1953,17 @@ export const useChatStore = defineStore('chat', () => {
     activeSessionId,
     activeSession,
     activeApproval,
+    activeQueuedInputCount,
     focusMessageId,
     messages,
+    displayMessages,
+    activeBranches,
     isStreaming,
     isRunActive,
     isSessionLive,
+    sessionBranches,
+    sessionBranchCount,
+    switchBranchSession,
     isLoadingSessions,
     sessionsLoaded,
     isLoadingMessages,
@@ -1613,6 +1976,7 @@ export const useChatStore = defineStore('chat', () => {
     respondApproval,
     stopStreaming,
     loadSessions,
+    refreshSessionBranches,
     refreshActiveSession,
     getThinkingObservation,
     noteThinkingDelta,
