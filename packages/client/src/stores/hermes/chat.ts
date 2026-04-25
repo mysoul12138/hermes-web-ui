@@ -252,6 +252,8 @@ function mapHermesSession(s: SessionSummary): Session {
 const STORAGE_KEY_PREFIX = 'hermes_active_session_'
 const SESSIONS_CACHE_KEY_PREFIX = 'hermes_sessions_cache_v1_'
 const BRIDGE_LOCAL_SESSION_KEY_PREFIX = 'hermes_bridge_local_session_v1_'
+const BRIDGE_PERSISTENT_SESSION_KEY_PREFIX = 'hermes_bridge_persistent_session_v1_'
+const BRIDGE_SEEN_KEY_PREFIX = 'hermes_bridge_seen_v1_'
 const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
@@ -275,6 +277,8 @@ function getProfileName(): string {
 function storageKey(): string { return STORAGE_KEY_PREFIX + getProfileName() }
 function sessionsCacheKey(): string { return SESSIONS_CACHE_KEY_PREFIX + getProfileName() }
 function bridgeLocalSessionKey(sid: string): string { return `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
+function bridgePersistentSessionKey(sid: string): string { return `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
+function bridgeSeenKey(): string { return BRIDGE_SEEN_KEY_PREFIX + getProfileName() }
 function msgsCacheKey(sid: string): string { return `hermes_session_msgs_v1_${getProfileName()}_${sid}_` }
 function inFlightKey(sid: string): string { return `hermes_in_flight_v1_${getProfileName()}_${sid}` }
 function legacyStorageKey(): string | null { return getProfileName() === 'default' ? LEGACY_STORAGE_KEY : null }
@@ -316,6 +320,8 @@ function recoverStorageQuota() {
       sessionsCacheKey(),
       `hermes_session_msgs_v1_${getProfileName()}_`,
       `hermes_in_flight_v1_${getProfileName()}_`,
+      `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_`,
+      `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_`,
     ]
     const legacySessions = legacySessionsCacheKey()
     if (legacySessions) prefixes.push(legacySessions)
@@ -542,9 +548,15 @@ export const useChatStore = defineStore('chat', () => {
     }, 1200)
   }
 
+  function shouldPreserveLiveApproval(sessionId: string) {
+    const pending = approvalsBySession.value[sessionId]?.pending
+    return !!pending && !pending._optimistic && (isSessionLive(sessionId) || !!readInFlight(sessionId))
+  }
+
   function syncApprovalFromMessages(sessionId: string, messages: Message[]): boolean {
     const pending = extractPendingApprovalFromMessages(messages)
     if (!pending) {
+      if (shouldPreserveLiveApproval(sessionId)) return false
       clearApproval(sessionId)
       return false
     }
@@ -563,6 +575,7 @@ export const useChatStore = defineStore('chat', () => {
         setApprovalPending(sessionId, data.pending, data.pending_count || 1)
       } else {
         if (approvalsBySession.value[sessionId]?.pending?._optimistic) return
+        if (shouldPreserveLiveApproval(sessionId)) return
         clearApproval(sessionId)
       }
     } catch {
@@ -657,16 +670,33 @@ export const useChatStore = defineStore('chat', () => {
     saveJsonWithLegacy(inFlightKey(sid), { runId, startedAt: Date.now() } as InFlightRun, legacyInFlightKey(sid))
   }
 
-  function markBridgeLocalSession(sid: string) {
+  function markBridgeModeSeen() {
+    setItemBestEffort(bridgeSeenKey(), '1')
+  }
+
+  function shouldDefaultNewSessionToTui() {
+    return localStorage.getItem(bridgeSeenKey()) === '1'
+  }
+
+  function markBridgeLocalSession(sid: string, persistentSessionId?: string) {
     setItemBestEffort(bridgeLocalSessionKey(sid), '1')
+    markBridgeModeSeen()
+    if (persistentSessionId && persistentSessionId !== sid) {
+      setItemBestEffort(bridgePersistentSessionKey(sid), persistentSessionId)
+    }
   }
 
   function clearBridgeLocalSession(sid: string) {
     removeItem(bridgeLocalSessionKey(sid))
+    removeItem(bridgePersistentSessionKey(sid))
   }
 
   function isBridgeLocalSession(sid: string) {
     return localStorage.getItem(bridgeLocalSessionKey(sid)) === '1'
+  }
+
+  function readBridgePersistentSessionId(sid: string) {
+    return localStorage.getItem(bridgePersistentSessionKey(sid)) || null
   }
 
   function clearInFlight(sid: string) {
@@ -794,14 +824,33 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const list = await fetchSessions()
-      const fresh = list.map(mapHermesSession)
-      const freshIds = new Set(fresh.map(s => s.id))
+      const freshRaw = list.map(mapHermesSession)
+      const freshRawIds = new Set(freshRaw.map(s => s.id))
       // Preserve already-loaded messages for sessions that are still present,
       // so we don't blow away the active session's messages on refresh.
       const msgsByIdBefore = new Map(sessions.value.map(s => [s.id, s.messages]))
+      const bridgeLocalByPersistent = new Map<string, Session>()
+      for (const s of sessions.value) {
+        const persistentId = readBridgePersistentSessionId(s.id)
+        if (persistentId) bridgeLocalByPersistent.set(persistentId, s)
+      }
+      const isLocalRunActive = (sid: string) =>
+        streamStates.value.has(sid) || resumingRuns.value.has(sid) || !!readInFlight(sid)
+      const fresh = freshRaw.filter(s => {
+        const localBridge = bridgeLocalByPersistent.get(s.id)
+        return !(localBridge && isLocalRunActive(localBridge.id))
+      })
+      const freshIds = new Set(fresh.map(s => s.id))
       for (const s of fresh) {
         const prev = msgsByIdBefore.get(s.id)
-        if (prev && prev.length) s.messages = prev
+        const localBridge = bridgeLocalByPersistent.get(s.id)
+        const localBridgeMessages = localBridge ? msgsByIdBefore.get(localBridge.id) || localBridge.messages : null
+        if (prev && prev.length) {
+          s.messages = prev
+        } else if (localBridgeMessages?.length) {
+          s.messages = localBridgeMessages
+          saveJsonWithLegacy(msgsCacheKey(s.id), sanitizeForCache(localBridgeMessages), legacyMsgsCacheKey(s.id))
+        }
       }
       // Preserve local-only sessions the server hasn't seen yet — e.g. a chat
       // that was just created and whose first run is still in-flight. Without
@@ -811,6 +860,18 @@ export const useChatStore = defineStore('chat', () => {
       // cleaned up along with their cached messages.
       const localOnly = sessions.value.filter(s => {
         if (freshIds.has(s.id)) return false
+        const persistentId = readBridgePersistentSessionId(s.id)
+        if (persistentId && freshRawIds.has(persistentId)) {
+          if (isLocalRunActive(s.id)) return true
+          if (activeSessionId.value === s.id) {
+            activeSessionId.value = persistentId
+            setItemBestEffort(storageKey(), persistentId)
+          }
+          removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
+          removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
+          clearBridgeLocalSession(s.id)
+          return false
+        }
         if (readInFlight(s.id)) return true
         if (isBridgeLocalSession(s.id)) return true
         // Session no longer exists on server and no active run — clean up cache
@@ -1129,7 +1190,7 @@ export const useChatStore = defineStore('chat', () => {
     const session: Session = {
       id: uid(),
       title: '',
-      source: 'api_server',
+      source: shouldDefaultNewSessionToTui() ? 'tui' : 'api_server',
       messages: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1388,7 +1449,12 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
 
-      if ((run as any).bridge) markBridgeLocalSession(sid)
+      if ((run as any).bridge) {
+        const target = sessions.value.find(s => s.id === sid)
+        if (target) target.source = 'tui'
+        markBridgeLocalSession(sid, run.session_id)
+        persistSessionsList()
+      }
       attachRunStream(sid, runId)
     } catch (err: any) {
       addMessage(sid, {

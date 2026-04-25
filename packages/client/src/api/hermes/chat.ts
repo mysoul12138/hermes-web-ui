@@ -17,6 +17,8 @@ export interface StartRunResponse {
   run_id: string
   status: string
   bridge?: boolean
+  session_id?: string
+  bridge_session_id?: string
 }
 
 // SSE event types from /v1/runs/{id}/events

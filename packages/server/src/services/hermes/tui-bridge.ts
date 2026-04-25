@@ -53,12 +53,18 @@ interface RunState {
 interface BridgeSessionRef {
   id: string
   created: boolean
+  persistentSessionId?: string
+}
+
+interface TuiSessionListItem {
+  id?: string
+  source?: string
+  started_at?: number
 }
 
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
-const IDLE_COMPLETE_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_COMPLETE_MS || 20000))
-const DENY_COMPLETE_MS = Math.max(1000, Number(process.env.HERMES_TUI_DENY_COMPLETE_MS || 3000))
+const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
 
 function resolvePython(root: string): string {
   const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
@@ -204,6 +210,7 @@ class TuiBridgeService {
   private client = new TuiGatewayClient()
   private bridgeSessionsByWebSession = new Map<string, string>()
   private webSessionsByBridgeSession = new Map<string, string>()
+  private persistentSessionsByWebSession = new Map<string, string>()
   private activeRunsByBridgeSession = new Map<string, string>()
   private runs = new Map<string, RunState>()
 
@@ -223,6 +230,7 @@ class TuiBridgeService {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
     let bridgeSession = await this.ensureBridgeSession(webSessionId)
     let bridgeSessionId = bridgeSession.id
+    let persistentSessionId = bridgeSession.persistentSessionId
     const runId = `bridge_run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const state: RunState = {
       runId,
@@ -236,6 +244,7 @@ class TuiBridgeService {
     setRunSession(runId, webSessionId)
     this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
     this.push(runId, { event: 'run.started', run_id: runId, timestamp: Date.now() / 1000 })
+    this.scheduleIdleHeartbeat(runId)
 
     const prompt = bridgeSession.created ? this.buildPrompt(input, conversationHistory) : input
     try {
@@ -253,12 +262,20 @@ class TuiBridgeService {
       }
 
       this.activeRunsByBridgeSession.delete(bridgeSessionId)
-      bridgeSessionId = await this.createBridgeSession(webSessionId)
+      const recreated = await this.createBridgeSession(webSessionId)
+      bridgeSessionId = recreated.id
+      persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
-    return { run_id: runId, status: 'queued', bridge: true }
+    return {
+      run_id: runId,
+      status: 'queued',
+      bridge: true,
+      session_id: persistentSessionId,
+      bridge_session_id: bridgeSessionId,
+    }
   }
 
   async respondApproval(webSessionId: string, choice: string) {
@@ -274,9 +291,7 @@ class TuiBridgeService {
     if (runId) {
       const state = this.runs.get(runId)
       if (state) state.pendingApproval = false
-      if (choice === 'deny') {
-        this.scheduleIdleCompletion(runId, DENY_COMPLETE_MS)
-      }
+      this.scheduleIdleHeartbeat(runId)
     }
     return { ok: true, choice, bridge: true, result }
   }
@@ -321,18 +336,67 @@ class TuiBridgeService {
 
   private async ensureBridgeSession(webSessionId: string): Promise<BridgeSessionRef> {
     const existing = this.bridgeSessionsByWebSession.get(webSessionId)
-    if (existing) return { id: existing, created: false }
-    return { id: await this.createBridgeSession(webSessionId), created: true }
+    if (existing) {
+      return {
+        id: existing,
+        created: false,
+        persistentSessionId: this.persistentSessionsByWebSession.get(webSessionId),
+      }
+    }
+    const resumed = await this.tryResumeBridgeSession(webSessionId)
+    if (resumed) return resumed
+    return this.createBridgeSession(webSessionId)
   }
 
-  private async createBridgeSession(webSessionId: string): Promise<string> {
+  private async createBridgeSession(webSessionId: string): Promise<BridgeSessionRef> {
+    const before = await this.listPersistentSessionIds().catch(() => new Set<string>())
     const created = await this.client.request<{ session_id: string }>('session.create', { cols: 100 })
     const bridgeSessionId = created.session_id
+    const persistentSessionId = await this.waitForNewPersistentSessionId(before).catch(() => undefined)
     const previous = this.bridgeSessionsByWebSession.get(webSessionId)
     if (previous) this.webSessionsByBridgeSession.delete(previous)
     this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
     this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
-    return bridgeSessionId
+    if (persistentSessionId) this.persistentSessionsByWebSession.set(webSessionId, persistentSessionId)
+    return { id: bridgeSessionId, created: true, persistentSessionId }
+  }
+
+  private async tryResumeBridgeSession(webSessionId: string): Promise<BridgeSessionRef | null> {
+    if (!/^\d{8}_\d{6}_/.test(webSessionId)) return null
+    try {
+      const resumed = await this.client.request<{ session_id: string, resumed?: string }>('session.resume', {
+        session_id: webSessionId,
+        cols: 100,
+      })
+      const bridgeSessionId = resumed.session_id
+      this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
+      this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
+      this.persistentSessionsByWebSession.set(webSessionId, resumed.resumed || webSessionId)
+      return { id: bridgeSessionId, created: false, persistentSessionId: resumed.resumed || webSessionId }
+    } catch {
+      return null
+    }
+  }
+
+  private async listPersistentSessionIds(): Promise<Set<string>> {
+    const result = await this.client.request<{ sessions?: TuiSessionListItem[] }>('session.list', { limit: 200 })
+    return new Set((result.sessions || [])
+      .map(session => session.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0))
+  }
+
+  private async waitForNewPersistentSessionId(before: Set<string>): Promise<string | undefined> {
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const result = await this.client.request<{ sessions?: TuiSessionListItem[] }>('session.list', { limit: 200 })
+      const added = (result.sessions || [])
+        .filter(session => session.id && !before.has(session.id))
+        .sort((a, b) => (Number(b.started_at) || 0) - (Number(a.started_at) || 0))
+      const hit = added.find(session => session.source === 'tui') || added[0]
+      if (hit?.id) return hit.id
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+    return undefined
   }
 
   private buildPrompt(input: string, conversationHistory: Array<{ role: string, content: string }>): string {
@@ -360,8 +424,8 @@ class TuiBridgeService {
           const state = this.runs.get(runId)
           if (state) {
             state.pendingApproval = true
-            this.clearIdleTimer(state)
           }
+          this.scheduleIdleHeartbeat(runId)
         }
         setLivePendingApprovalForRun(runId, {
           approval_id: typeof payload.approval_id === 'string' ? payload.approval_id : undefined,
@@ -385,7 +449,7 @@ class TuiBridgeService {
         break
       case 'message.delta':
         this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payload.text || '' })
-        this.scheduleIdleCompletion(runId)
+        this.scheduleIdleHeartbeat(runId)
         break
       case 'message.complete':
         this.push(runId, {
@@ -405,7 +469,7 @@ class TuiBridgeService {
       case 'tool.start':
         {
           const state = this.runs.get(runId)
-          if (state) this.clearIdleTimer(state)
+          if (state) this.scheduleIdleHeartbeat(runId)
         }
         this.push(runId, {
           event: 'tool.started',
@@ -425,7 +489,7 @@ class TuiBridgeService {
           tool: payload.name,
           duration: typeof payload.duration_s === 'number' ? payload.duration_s : undefined,
         })
-        this.scheduleIdleCompletion(runId)
+        this.scheduleIdleHeartbeat(runId)
         break
     }
   }
@@ -436,21 +500,19 @@ class TuiBridgeService {
     state.idleTimer = undefined
   }
 
-  private scheduleIdleCompletion(runId: string, delayMs = IDLE_COMPLETE_MS) {
+  private scheduleIdleHeartbeat(runId: string, delayMs = IDLE_HEARTBEAT_MS) {
     const state = this.runs.get(runId)
-    if (!state || state.closed || state.pendingApproval) return
+    if (!state || state.closed) return
     this.clearIdleTimer(state)
     state.idleTimer = setTimeout(() => {
       const current = this.runs.get(runId)
-      if (!current || current.closed || current.pendingApproval) return
+      if (!current || current.closed) return
       this.push(runId, {
-        event: 'run.completed',
+        event: 'bridge.heartbeat',
         run_id: runId,
         timestamp: Date.now() / 1000,
-        output: '',
-        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
       })
-      this.closeRun(runId)
+      this.scheduleIdleHeartbeat(runId, delayMs)
     }, delayMs)
   }
 
