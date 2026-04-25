@@ -63,17 +63,6 @@ function createBridgeSessionFallback(id: string) {
   }
 }
 
-function createBridgeConversationFallback(id: string): ConversationDetail {
-  return {
-    session_id: id,
-    messages: [],
-    visible_count: 0,
-    thread_session_count: 1,
-    branch_session_count: 0,
-    branches: [],
-  }
-}
-
 function parseHumanOnly(value: unknown): boolean {
   if (typeof value !== 'string') return true
   return value !== 'false' && value !== '0'
@@ -153,10 +142,6 @@ export async function getConversationMessages(ctx: any) {
   try {
     const detail = await getConversationDetailFromDb(ctx.params.id, { source, humanOnly })
     if (!detail || hasPendingDeletedConversation(detail)) {
-      if (bridgeSessionFallbackEnabled()) {
-        ctx.body = createBridgeConversationFallback(ctx.params.id)
-        return
-      }
       ctx.status = 404
       ctx.body = { error: 'Conversation not found' }
       return
@@ -169,10 +154,6 @@ export async function getConversationMessages(ctx: any) {
 
   const detail = await getConversationDetail(ctx.params.id, { source, humanOnly })
   if (!detail || hasPendingDeletedConversation(detail)) {
-    if (bridgeSessionFallbackEnabled()) {
-      ctx.body = createBridgeConversationFallback(ctx.params.id)
-      return
-    }
     ctx.status = 404
     ctx.body = { error: 'Conversation not found' }
     return

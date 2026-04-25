@@ -53,11 +53,6 @@ vi.mock('../../packages/server/src/services/hermes/model-context', () => ({
   getModelContextLength: vi.fn(),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
-  getActiveConfigPath: vi.fn(() => '/tmp/hermes-web-ui-test-missing-config.yml'),
-  getActiveProfileName: vi.fn(() => 'default'),
-}))
-
 describe('session conversations controller', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -70,7 +65,6 @@ describe('session conversations controller', () => {
     getGroupChatServerMock.mockReset()
     getGroupChatServerMock.mockReturnValue(null)
     loggerWarnMock.mockReset()
-    delete process.env.HERMES_WEBUI_BRIDGE
   })
 
   it('prefers the DB-backed conversations summary path', async () => {
@@ -121,26 +115,6 @@ describe('session conversations controller', () => {
     expect(loggerWarnMock).toHaveBeenCalled()
     expect(getConversationDetailMock).toHaveBeenCalledWith('root', { source: undefined, humanOnly: false })
     expect(ctx.body).toEqual({ session_id: 'root', messages: [{ id: 1 }], visible_count: 1, thread_session_count: 1 })
-  })
-
-  it('returns an empty bridge conversation detail for local bridge sessions', async () => {
-    process.env.HERMES_WEBUI_BRIDGE = 'true'
-    getConversationDetailFromDbMock.mockResolvedValue(null)
-
-    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
-    const ctx: any = { params: { id: 'local-bridge-session' }, query: {}, body: null }
-    await mod.getConversationMessages(ctx)
-
-    expect(ctx.status).toBeUndefined()
-    expect(ctx.body).toEqual({
-      session_id: 'local-bridge-session',
-      messages: [],
-      visible_count: 0,
-      thread_session_count: 1,
-      branch_session_count: 0,
-      branches: [],
-    })
-    expect(getConversationDetailMock).not.toHaveBeenCalled()
   })
 
   it('serves DB-backed session detail before falling back to CLI export', async () => {
