@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { NModal, NForm, NFormItem, NInput, NButton, NSelect, NInputNumber, useMessage } from 'naive-ui'
-import type { CreateJobRequest, UpdateJobRequest } from '@/api/hermes/jobs'
+import type { UpdateJobRequest } from '@/api/hermes/jobs'
 import { useJobsStore } from '@/stores/hermes/jobs'
 import { useI18n } from 'vue-i18n'
 
@@ -94,14 +94,13 @@ async function handleSave() {
 
   loading.value = true
   try {
-    const basePayload: CreateJobRequest = {
+    const payload: UpdateJobRequest = {
       name: formData.value.name,
       schedule: formData.value.schedule,
       prompt: formData.value.prompt,
       deliver: formData.value.deliver,
       repeat: formData.value.repeat_times ?? undefined,
     }
-    const payload: UpdateJobRequest = { ...basePayload }
 
     if (isEdit.value && originalSchedule.value) {
       (payload as any).schedule = {
@@ -109,8 +108,6 @@ async function handleSave() {
         expr: formData.value.schedule,
         display: formData.value.schedule,
       }
-    }
-    if (isEdit.value) {
       Object.assign(payload, originalHiddenFields.value)
     }
 
@@ -118,7 +115,7 @@ async function handleSave() {
       await jobsStore.updateJob(props.jobId!, payload)
       message.success(t('jobs.jobUpdated'))
     } else {
-      await jobsStore.createJob(basePayload)
+      await jobsStore.createJob(payload)
       message.success(t('jobs.jobCreated'))
     }
     emit('saved')
