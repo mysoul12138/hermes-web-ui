@@ -49,7 +49,11 @@ export interface UpdateJobRequest {
   prompt?: string
   deliver?: string
   skills?: string[]
-  skill?: string
+  skill?: string | null
+  model?: string | null
+  provider?: string | null
+  base_url?: string | null
+  script?: string | null
   repeat?: number
   enabled?: boolean
 }

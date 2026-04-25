@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const mockChatApi = vi.hoisted(() => ({
   startRun: vi.fn(),
+  steerSession: vi.fn(),
   streamRunEvents: vi.fn(),
 }))
 
@@ -37,6 +38,7 @@ describe('Chat Store approvals', () => {
     vi.useRealTimers()
     localStorage.clear()
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
+    mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued' })
     mockSessionsApi.fetchSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue(null)

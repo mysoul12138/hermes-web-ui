@@ -17,6 +17,19 @@ vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
   updateUsage: mockUpdateUsage,
 }))
 
+const { mockTuiBridge } = vi.hoisted(() => ({
+  mockTuiBridge: {
+    isEnabled: vi.fn(() => false),
+    startRun: vi.fn(),
+    steer: vi.fn(),
+    cancelRun: vi.fn(),
+    stream: vi.fn(),
+  },
+}))
+vi.mock('../../packages/server/src/services/hermes/tui-bridge', () => ({
+  tuiBridge: mockTuiBridge,
+}))
+
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
@@ -72,6 +85,7 @@ function createSSEBody(events: string[]): ReadableStream<Uint8Array> {
 describe('Proxy Handler', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockTuiBridge.isEnabled.mockReturnValue(false)
   })
 
   it('rewrites /api/hermes/v1/* to /v1/*', async () => {
@@ -89,6 +103,29 @@ describe('Proxy Handler', () => {
     const url = mockFetch.mock.calls[0][0]
     expect(url).toContain('/v1/runs')
     expect(url).not.toContain('/api/hermes')
+  })
+
+  it('routes bridge steer requests without proxying upstream', async () => {
+    mockTuiBridge.isEnabled.mockReturnValue(true)
+    mockTuiBridge.steer.mockResolvedValue({
+      ok: true,
+      status: 'queued',
+      bridge: true,
+      run_id: 'bridge-run-1',
+      text: 'adjust direction',
+    })
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: { body: { text: 'adjust direction' } },
+    })
+    await proxy(ctx)
+
+    expect(mockTuiBridge.steer).toHaveBeenCalledWith('sess-1', 'adjust direction')
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(ctx.status).toBe(200)
+    expect(ctx.body).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge-run-1' })
   })
 
   it('rewrites /api/hermes/* to /api/*', async () => {

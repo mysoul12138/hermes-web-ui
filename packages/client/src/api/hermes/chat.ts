@@ -21,6 +21,14 @@ export interface StartRunResponse {
   bridge_session_id?: string
 }
 
+export interface SteerSessionResponse {
+  ok: boolean
+  status: string
+  bridge?: boolean
+  run_id?: string
+  text?: string
+}
+
 // SSE event types from /v1/runs/{id}/events
 export interface RunEvent {
   event: string
@@ -132,6 +140,13 @@ export async function startRun(body: StartRunRequest): Promise<StartRunResponse>
 export async function cancelRun(runId: string): Promise<void> {
   await request(`/api/hermes/v1/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
+  })
+}
+
+export async function steerSession(sessionId: string, text: string): Promise<SteerSessionResponse> {
+  return request<SteerSessionResponse>(`/api/hermes/v1/sessions/${encodeURIComponent(sessionId)}/steer`, {
+    method: 'POST',
+    body: JSON.stringify({ text }),
   })
 }
 

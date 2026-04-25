@@ -90,6 +90,7 @@ function buildProxyHeaders(ctx: Context, upstream: string): Record<string, strin
 
 const SSE_EVENTS_PATH = /^\/v1\/runs\/([^/]+)\/events$/
 const RUN_CANCEL_PATH = /^\/v1\/runs\/([^/]+)\/cancel$/
+const SESSION_STEER_PATH = /^\/v1\/sessions\/([^/]+)\/steer$/
 
 /**
  * Parse SSE text chunks and extract approval / completion lifecycle events.
@@ -225,6 +226,23 @@ export async function proxy(ctx: Context) {
       } catch (err) {
         ctx.status = 502
         ctx.body = { error: { message: `Bridge error: ${err instanceof Error ? err.message : String(err)}` } }
+        return
+      }
+    }
+
+    const bridgeSteerMatch = upstreamPath.match(SESSION_STEER_PATH)
+    if (tuiBridge.isEnabled() && ctx.req.method === 'POST' && bridgeSteerMatch && body) {
+      try {
+        const parsed = JSON.parse(body)
+        const text = typeof parsed.text === 'string' ? parsed.text : ''
+        const result = await tuiBridge.steer(bridgeSteerMatch[1], text)
+        ctx.status = 200
+        ctx.set('Content-Type', 'application/json')
+        ctx.body = result
+        return
+      } catch (err) {
+        ctx.status = 502
+        ctx.body = { error: { message: `Bridge steer error: ${err instanceof Error ? err.message : String(err)}` } }
         return
       }
     }
