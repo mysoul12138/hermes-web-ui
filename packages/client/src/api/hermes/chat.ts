@@ -56,6 +56,12 @@ export interface RunEvent {
   stdout?: unknown
   stderr?: unknown
   exit_code?: unknown
+  returncode?: unknown
+  exit_status?: unknown
+  exitCode?: unknown
+  duration?: number
+  duration_s?: number
+  duration_ms?: number
   timestamp?: number
   error?: string
   approval_id?: string

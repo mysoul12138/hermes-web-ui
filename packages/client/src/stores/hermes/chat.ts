@@ -104,12 +104,6 @@ function extractApprovalCommandFromArgs(toolArgs?: string): string | undefined {
     : undefined
 }
 
-function extractCommandFromToolPreview(preview?: string): string | undefined {
-  const value = preview?.trim()
-  if (!value) return undefined
-  return value.replace(/^terminal\s+/i, '').trim() || value
-}
-
 function textFromRunEvent(evt: RunEvent): string {
   for (const value of [evt.text, evt.delta, evt.reasoning, evt.thinking, evt.content, evt.message]) {
     if (typeof value === 'string' && value) return value
@@ -133,26 +127,40 @@ function pickToolArgs(evt: RunEvent): string | undefined {
     evt.args ??
     evt.parameters ??
     evt.input ??
-    evt.command ??
-    evt.context,
+    evt.command,
   )
 }
 
 function pickToolResult(evt: RunEvent): string | undefined {
-  const direct = stringifyToolPayload(
-    evt.result ??
-    evt.output ??
+  const details: Record<string, unknown> = {}
+  for (const key of [
+    'result',
+    'output',
+    'stdout',
+    'stderr',
+    'output_tail',
+    'files_read',
+    'files_written',
+    'exit_code',
+    'returncode',
+    'exit_status',
+    'exitCode',
+    'status',
+    'duration',
+    'duration_s',
+    'duration_ms',
+    'duration_seconds',
+    'error',
+  ]) {
+    if (evt[key] != null) details[key] = evt[key]
+  }
+  if (Object.keys(details).length > 0) return JSON.stringify(details)
+
+  return stringifyToolPayload(
     evt.content ??
     evt.message ??
     evt.summary,
   )
-  if (direct) return direct
-
-  const details: Record<string, unknown> = {}
-  for (const key of ['stdout', 'stderr', 'exit_code', 'status', 'duration', 'duration_seconds', 'error']) {
-    if (evt[key] != null) details[key] = evt[key]
-  }
-  return Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
 }
 
 function toolEventDetails(evt: RunEvent): string | undefined {
@@ -164,12 +172,20 @@ function toolEventDetails(evt: RunEvent): string | undefined {
     'context',
     'command',
     'duration',
+    'duration_s',
+    'duration_ms',
     'duration_seconds',
     'timestamp',
     'status',
     'stdout',
     'stderr',
+    'output_tail',
+    'files_read',
+    'files_written',
     'exit_code',
+    'returncode',
+    'exit_status',
+    'exitCode',
   ]) {
     if (evt[key] != null) details[key] = evt[key]
   }
@@ -330,6 +346,8 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
     model: s.model,
     provider: (s as any).billing_provider || '',
     messageCount: s.message_count,
+    inputTokens: s.input_tokens,
+    outputTokens: s.output_tokens,
     endedAt: s.ended_at != null ? Math.round(s.ended_at * 1000) : null,
     lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
     branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
@@ -604,6 +622,8 @@ export const useChatStore = defineStore('chat', () => {
       updatedAt: Math.round((branch.last_active || branch.ended_at || branch.started_at) * 1000),
       model: branch.model,
       messageCount: branch.messages.length,
+      inputTokens: branch.input_tokens,
+      outputTokens: branch.output_tokens,
       endedAt: branch.ended_at != null ? Math.round(branch.ended_at * 1000) : null,
       lastActiveAt: branch.last_active != null ? Math.round(branch.last_active * 1000) : undefined,
       branchSessionCount: countBranchTree(branch.branches || []),
@@ -708,27 +728,6 @@ export const useChatStore = defineStore('chat', () => {
     const next = { ...approvalsBySession.value }
     delete next[sessionId]
     approvalsBySession.value = next
-  }
-
-  function maybeShowTerminalApprovalFallback(sessionId: string, toolMsg: Message) {
-    const toolName = (toolMsg.toolName || '').toLowerCase()
-    const preview = toolMsg.toolPreview || ''
-    const looksLikeTerminal = toolName === 'terminal' || /^terminal\b/i.test(preview)
-    if (!looksLikeTerminal) return
-
-    window.setTimeout(() => {
-      const msgs = getSessionMsgs(sessionId)
-      const current = msgs.find(m => m.id === toolMsg.id)
-      if (!current || current.toolStatus !== 'running') return
-      if (approvalsBySession.value[sessionId]?.pending) return
-
-      setApprovalPending(sessionId, {
-        description: 'Terminal command is waiting for approval',
-        command: extractApprovalCommandFromArgs(current.toolArgs) || extractCommandFromToolPreview(current.toolPreview),
-        _session_id: sessionId,
-        _optimistic: true,
-      })
-    }, 1200)
   }
 
   function shouldPreserveLiveApproval(sessionId: string) {
@@ -1384,11 +1383,10 @@ export const useChatStore = defineStore('chat', () => {
               timestamp: Date.now(),
               toolName: evt.tool || evt.name || evt.tool_name,
               toolPreview: evt.preview || evt.tool_preview,
-              toolArgs: pickToolArgs(evt) || toolEventDetails(evt),
+              toolArgs: pickToolArgs(evt),
               toolStatus: 'running',
             }
             addMessage(sid, toolMessage)
-            maybeShowTerminalApprovalFallback(sid, toolMessage)
             schedulePersist()
             break
           }
@@ -1641,6 +1639,8 @@ export const useChatStore = defineStore('chat', () => {
             activeSession.value.title = t + (firstUser.content.length > 40 ? '...' : '')
           }
         }
+        activeSession.value.inputTokens = detail.input_tokens
+        activeSession.value.outputTokens = detail.output_tokens
         persistActiveMessages()
       }
     } catch (err) {
@@ -1661,7 +1661,9 @@ export const useChatStore = defineStore('chat', () => {
     // Fetch token usage for this session from web-ui DB
     try {
       const usage = await fetchSessionUsageSingle(sessionId)
-      if (usage) {
+      const currentTotal = (activeSession.value.inputTokens ?? 0) + (activeSession.value.outputTokens ?? 0)
+      const usageTotal = (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)
+      if (usage && (usageTotal > 0 || currentTotal === 0)) {
         activeSession.value.inputTokens = usage.input_tokens
         activeSession.value.outputTokens = usage.output_tokens
       }

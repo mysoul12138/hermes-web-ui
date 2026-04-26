@@ -81,6 +81,8 @@ describe('TuiBridgeService steer compatibility', () => {
       payload: {
         name: 'terminal',
         stdout: 'all passed',
+        output_tail: [{ text: 'all passed' }],
+        files_written: ['coverage.txt'],
         exit_code: 0,
         duration_s: 1.2,
       },
@@ -103,8 +105,11 @@ describe('TuiBridgeService steer compatibility', () => {
         event: 'tool.completed',
         tool: 'terminal',
         stdout: 'all passed',
+        output_tail: [{ text: 'all passed' }],
+        files_written: ['coverage.txt'],
         exit_code: 0,
         duration: 1.2,
+        duration_s: 1.2,
       }),
     ])
     ;(bridge as any).closeRun('bridge_run_tool')

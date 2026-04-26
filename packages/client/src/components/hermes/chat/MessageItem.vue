@@ -560,6 +560,10 @@ const renderedToolResult = computed(() => {
 @use "@/styles/variables" as *;
 
 .message {
+  --assistant-avatar-space: 48px;
+  --assistant-body-max: 840px;
+  --assistant-bubble-max: calc(var(--assistant-body-max) - var(--assistant-avatar-space));
+
   display: flex;
   flex-direction: column;
 
@@ -633,12 +637,17 @@ const renderedToolResult = computed(() => {
     align-items: flex-start;
 
     .msg-body {
-      max-width: min(100%, 840px);
+      max-width: min(100%, var(--assistant-body-max));
     }
   }
 
   &.tool {
     align-items: flex-start;
+
+    .tool-card {
+      margin-left: var(--assistant-avatar-space);
+      width: min(calc(100% - var(--assistant-avatar-space)), var(--assistant-bubble-max));
+    }
   }
 
   &.system {
@@ -968,7 +977,7 @@ const renderedToolResult = computed(() => {
 }
 
 .tool-card {
-  width: min(100%, 820px);
+  width: min(100%, var(--assistant-bubble-max));
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.58);
@@ -1187,6 +1196,11 @@ const renderedToolResult = computed(() => {
   .message.system .msg-body,
   .tool-card {
     max-width: 100%;
+    width: 100%;
+  }
+
+  .message.tool .tool-card {
+    margin-left: 0;
     width: 100%;
   }
 }

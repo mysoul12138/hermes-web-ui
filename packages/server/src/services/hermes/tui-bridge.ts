@@ -28,8 +28,16 @@ export interface BridgeRunEvent {
   result?: unknown
   stdout?: unknown
   stderr?: unknown
+  output_tail?: Array<Record<string, unknown>>
+  files_read?: string[]
+  files_written?: string[]
   exit_code?: unknown
+  returncode?: unknown
+  exit_status?: unknown
+  exitCode?: unknown
   duration?: number
+  duration_s?: number
+  duration_ms?: number
   approval_id?: string
   description?: string
   command?: string
@@ -52,9 +60,6 @@ export interface BridgeRunEvent {
   model?: string
   tool_name?: string
   tool_preview?: string
-  output_tail?: Array<Record<string, unknown>>
-  files_read?: string[]
-  files_written?: string[]
   input_tokens?: number
   output_tokens?: number
   reasoning_tokens?: number
@@ -169,8 +174,15 @@ function toolPayloadFields(payload: Record<string, any>): Record<string, unknown
     'output',
     'stdout',
     'stderr',
+    'output_tail',
+    'files_read',
+    'files_written',
     'exit_code',
+    'returncode',
+    'exit_status',
+    'exitCode',
     'duration_s',
+    'duration_ms',
     'status',
     'summary',
     'message',

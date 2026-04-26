@@ -80,6 +80,8 @@ export interface ConversationBranch {
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
+  input_tokens?: number
+  output_tokens?: number
   branches: ConversationBranch[]
 }
 
@@ -376,6 +378,8 @@ function collectConversationBranches(chain: ConversationSession[], byId: Map<str
       messages,
       visible_count: messages.length,
       thread_session_count: branchChain.length,
+      input_tokens: branchChain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
+      output_tokens: branchChain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
       branches: collectConversationBranches(branchChain, byId, childrenByParent, seen),
     })
   }

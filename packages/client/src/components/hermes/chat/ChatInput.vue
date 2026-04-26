@@ -52,6 +52,8 @@ const totalTokens = computed(() => {
   return input + output
 })
 
+const showContextStats = computed(() => !!chatStore.activeSessionId)
+
 const remainingTokens = computed(() => Math.max(0, contextLength.value - totalTokens.value))
 
 const usagePercent = computed(() =>
@@ -225,10 +227,10 @@ function isImage(type: string): boolean {
         </template>
         {{ t('chat.attachFiles') }}
       </NTooltip>
-      <span v-if="totalTokens > 0" class="context-info" :class="{ 'context-warning': usagePercent > 80 }">
+      <span v-if="showContextStats" class="context-info" :class="{ 'context-warning': usagePercent > 80 }">
         {{ formatTokens(totalTokens) }} / {{ formatTokens(contextLength) }} · {{ t('chat.contextRemaining') }} {{ formatTokens(remainingTokens) }}
       </span>
-      <div v-if="totalTokens > 0" class="context-bar">
+      <div v-if="showContextStats" class="context-bar">
         <div
           class="context-bar-fill"
           :class="{

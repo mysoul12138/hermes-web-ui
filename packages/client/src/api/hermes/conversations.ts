@@ -46,6 +46,8 @@ export interface ConversationBranch {
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
+  input_tokens?: number
+  output_tokens?: number
   branches: ConversationBranch[]
 }
 

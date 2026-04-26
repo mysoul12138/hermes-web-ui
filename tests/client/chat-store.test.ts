@@ -12,6 +12,7 @@ const mockChatApi = vi.hoisted(() => ({
 const mockSessionsApi = vi.hoisted(() => ({
   fetchSessions: vi.fn(),
   fetchSession: vi.fn(),
+  fetchSessionUsageSingle: vi.fn(),
   deleteSession: vi.fn(),
   renameSession: vi.fn(),
 }))
@@ -79,6 +80,7 @@ describe('Chat Store', () => {
     window.localStorage.clear()
     mockSessionsApi.fetchSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
+    mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue(null)
     mockSessionsApi.deleteSession.mockResolvedValue(true)
     mockSessionsApi.renameSession.mockResolvedValue(true)
     mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
@@ -330,6 +332,8 @@ describe('Chat Store', () => {
       event: 'tool.completed',
       tool: 'terminal',
       stdout: 'all passed',
+      output_tail: [{ text: 'all passed' }],
+      files_written: ['coverage.txt'],
       exit_code: 0,
     })
 
@@ -338,7 +342,54 @@ describe('Chat Store', () => {
       toolStatus: 'done',
     })
     expect(toolMessage?.toolResult).toContain(JSON.stringify({ stdout: 'running tests' }))
-    expect(toolMessage?.toolResult).toContain(JSON.stringify({ stdout: 'all passed', exit_code: 0 }))
+    expect(toolMessage?.toolResult).toContain('"stdout":"all passed"')
+    expect(toolMessage?.toolResult).toContain('"output_tail":[{"text":"all passed"}]')
+    expect(toolMessage?.toolResult).toContain('"files_written":["coverage.txt"]')
+    expect(toolMessage?.toolResult).toContain('"exit_code":0')
+
+    onEvent({
+      event: 'tool.started',
+      tool: 'terminal',
+      preview: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
+      context: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
+    })
+
+    const latestToolMessage = store.messages.filter(m => m.role === 'tool').at(-1)
+    expect(latestToolMessage?.toolPreview).toContain('python3')
+    expect(latestToolMessage?.toolArgs).toBeUndefined()
+  })
+
+  it('keeps Hermes DB token usage when the WebUI usage cache is empty', async () => {
+    const detail = {
+      ...makeDetail('session-with-usage', [
+        {
+          id: 1,
+          session_id: 'session-with-usage',
+          role: 'user',
+          content: 'long prior context',
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 1710000000,
+          token_count: null,
+          finish_reason: null,
+          reasoning: null,
+        },
+      ]),
+      input_tokens: 12345,
+      output_tokens: 678,
+    }
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([detail])
+    mockSessionsApi.fetchSession.mockResolvedValue(detail)
+    mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue({ input_tokens: 0, output_tokens: 0 })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.activeSession?.inputTokens).toBe(12345)
+    expect(store.activeSession?.outputTokens).toBe(678)
   })
 
   it('queues busy input and sends it after the current run completes', async () => {

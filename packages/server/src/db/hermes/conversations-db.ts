@@ -473,6 +473,8 @@ function collectConversationBranches(db: { prepare: (sql: string) => { all: (...
       messages,
       visible_count: messages.length,
       thread_session_count: branchChain.length,
+      input_tokens: branchChain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
+      output_tokens: branchChain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
       branches: collectConversationBranches(db, branchChain, byId, childrenByParent, seen),
     })
   }

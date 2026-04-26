@@ -399,7 +399,7 @@ describe('Chat Store approvals', () => {
     expect(store.messages.at(-1)?.content).toContain('approved output')
   })
 
-  it('does not send slash approval commands for optimistic terminal prompts', async () => {
+  it('does not show approval cards for terminal tools unless approval is confirmed', async () => {
     vi.useFakeTimers()
 
     let onEvent!: (event: any) => void
@@ -416,9 +416,9 @@ describe('Chat Store approvals', () => {
       tool: 'terminal',
       preview: 'terminal bash -lc "printf approval_map_variant"',
     })
-    await vi.advanceTimersByTimeAsync(1300)
+    await vi.advanceTimersByTimeAsync(2000)
 
-    expect(store.activeApproval?.pending._optimistic).toBe(true)
+    expect(store.activeApproval).toBeNull()
 
     await store.respondApproval('once')
 
