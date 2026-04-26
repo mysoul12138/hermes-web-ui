@@ -131,9 +131,14 @@ const NAMED_RUN_EVENTS = [
 ] as const
 
 export async function startRun(body: StartRunRequest): Promise<StartRunResponse> {
+  const headers: Record<string, string> = {}
+  if (body.session_id) {
+    headers['X-Hermes-Session-Id'] = body.session_id
+  }
   return request<StartRunResponse>('/api/hermes/v1/runs', {
     method: 'POST',
     body: JSON.stringify(body),
+    headers,
   })
 }
 
