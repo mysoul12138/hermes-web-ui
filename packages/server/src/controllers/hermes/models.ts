@@ -1,10 +1,60 @@
 import { readFile } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { getActiveEnvPath, getActiveAuthPath } from '../../services/hermes/hermes-profile'
-import { readConfigYaml, writeConfigYaml, fetchProviderModels, buildModelGroups, PROVIDER_ENV_MAP } from '../../services/config-helpers'
+import { readConfigYaml, writeConfigYaml, fetchProviderModels as fetchProviderModelsFromConfig, buildModelGroups, PROVIDER_ENV_MAP } from '../../services/config-helpers'
 import { buildProviderModelMap, PROVIDER_PRESETS } from '../../shared/providers'
 
 const PROVIDER_MODEL_CATALOG = buildProviderModelMap()
+
+export async function fetchProviderModels(ctx: any) {
+  const { base_url, api_key } = ctx.request.body as { base_url?: string; api_key?: string }
+  const baseUrl = String(base_url || '').trim()
+  const apiKey = String(api_key || '').trim()
+
+  if (!baseUrl) {
+    ctx.status = 400
+    ctx.body = { error: 'Missing base_url' }
+    return
+  }
+
+  const base = baseUrl.replace(/\/+$/, '')
+  const modelsUrl = /\/v\d+\/?$/.test(base) ? `${base}/models` : `${base}/v1/models`
+
+  try {
+    const headers: Record<string, string> = {}
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+
+    const res = await fetch(modelsUrl, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    })
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      ctx.status = 502
+      ctx.body = {
+        error: `Upstream model probe failed with HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`,
+      }
+      return
+    }
+
+    const data = await res.json() as { data?: Array<{ id: string }> }
+    if (!Array.isArray(data.data)) {
+      ctx.status = 502
+      ctx.body = { error: 'Unexpected upstream models response format' }
+      return
+    }
+
+    ctx.body = {
+      data: data.data
+        .filter(item => item && typeof item.id === 'string' && item.id.trim())
+        .map(item => ({ id: item.id })),
+    }
+  } catch (err: any) {
+    ctx.status = 502
+    ctx.body = { error: err?.message || 'Failed to fetch provider models' }
+  }
+}
 
 export async function getAvailable(ctx: any) {
   try {
@@ -98,7 +148,7 @@ export async function getAvailable(ctx: any) {
         const builtinPreset = PROVIDER_PRESETS.find(p => p.value === bareKey)
         let models = builtinPreset?.models?.length ? [...builtinPreset.models] : [cp.model]
         if (cp.api_key) {
-          try { const fetched = await fetchProviderModels(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([cp.model, ...fetched])] } catch { }
+          try { const fetched = await fetchProviderModelsFromConfig(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([cp.model, ...fetched])] } catch { }
         }
         const label = builtinPreset?.label || cp.name
         const presetBaseUrl = builtinPreset?.base_url || ''

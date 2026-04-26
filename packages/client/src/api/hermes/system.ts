@@ -40,6 +40,10 @@ export interface AvailableModelsResponse {
   allProviders: AvailableModelGroup[]
 }
 
+export interface ProviderModelProbeResponse {
+  data: Array<{ id: string }>
+}
+
 export interface CustomProvider {
   name: string
   base_url: string
@@ -63,6 +67,16 @@ export async function fetchConfigModels(): Promise<ConfigModelsResponse> {
 
 export async function fetchAvailableModels(): Promise<AvailableModelsResponse> {
   return request<AvailableModelsResponse>('/api/hermes/available-models')
+}
+
+export async function fetchProviderModels(data: {
+  base_url: string
+  api_key?: string
+}): Promise<ProviderModelProbeResponse> {
+  return request<ProviderModelProbeResponse>('/api/hermes/provider-models/fetch', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
 }
 
 export async function updateDefaultModel(data: {

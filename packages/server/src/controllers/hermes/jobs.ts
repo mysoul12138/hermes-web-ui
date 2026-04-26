@@ -1,6 +1,17 @@
+import { readFile } from 'fs/promises'
+import YAML from 'js-yaml'
 import type { Context } from 'koa'
 import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { config } from '../../config'
+import { getProfileDir } from '../../services/hermes/hermes-profile'
+
+type JobBody = Record<string, any>
+
+type JobDefaults = {
+  model: string | null
+  provider: string | null
+  base_url: string | null
+}
 
 function getUpstream(profile: string): string {
   const mgr = getGatewayManagerInstance()
@@ -23,9 +34,50 @@ function buildHeaders(profile: string): Record<string, string> {
   return headers
 }
 
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+export function applyJobModelDefaults<T extends JobBody>(payload: T, configData: Record<string, any> | null | undefined): T {
+  const modelSection = configData?.model
+  const configDefaultModel = typeof modelSection === 'object' && modelSection !== null
+    ? normalizeOptionalString(modelSection.default)
+    : normalizeOptionalString(modelSection)
+  const configDefaultProvider = typeof modelSection === 'object' && modelSection !== null
+    ? normalizeOptionalString(modelSection.provider)
+    : null
+  const configBaseUrl = typeof modelSection === 'object' && modelSection !== null
+    ? normalizeOptionalString(modelSection.base_url)
+    : null
+
+  return {
+    ...payload,
+    model: normalizeOptionalString(payload.model) ?? configDefaultModel,
+    provider: normalizeOptionalString(payload.provider) ?? configDefaultProvider,
+    base_url: normalizeOptionalString(payload.base_url) ?? configBaseUrl,
+  }
+}
+
+async function readProfileJobDefaults(profile: string): Promise<JobDefaults> {
+  try {
+    const raw = await readFile(`${getProfileDir(profile)}/config.yaml`, 'utf-8')
+    const configData = (YAML.load(raw) as Record<string, any> | null) || {}
+    const normalized = applyJobModelDefaults({} as JobBody, configData)
+    return {
+      model: normalizeOptionalString(normalized.model),
+      provider: normalizeOptionalString(normalized.provider),
+      base_url: normalizeOptionalString(normalized.base_url),
+    }
+  } catch {
+    return { model: null, provider: null, base_url: null }
+  }
+}
+
 const TIMEOUT_MS = 30_000
 
-async function proxyRequest(ctx: Context, upstreamPath: string, method?: string): Promise<void> {
+async function proxyRequest(ctx: Context, upstreamPath: string, method?: string, bodyOverride?: Record<string, any>): Promise<void> {
   const profile = resolveProfile(ctx)
   const upstream = getUpstream(profile)
   const params = new URLSearchParams(ctx.search || '')
@@ -35,7 +87,7 @@ async function proxyRequest(ctx: Context, upstreamPath: string, method?: string)
 
   const headers = buildHeaders(profile)
   const body = ctx.req.method !== 'GET' && ctx.req.method !== 'HEAD'
-    ? JSON.stringify(ctx.request.body || {})
+    ? JSON.stringify(bodyOverride ?? ctx.request.body ?? {})
     : undefined
 
   const res = await fetch(url, {
@@ -66,11 +118,25 @@ export async function get(ctx: Context) {
 }
 
 export async function create(ctx: Context) {
-  await proxyRequest(ctx, '/api/jobs')
+  const profile = resolveProfile(ctx)
+  const defaults = await readProfileJobDefaults(profile)
+  await proxyRequest(ctx, '/api/jobs', undefined, {
+    ...(ctx.request.body || {}),
+    model: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.model) ?? defaults.model,
+    provider: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.provider) ?? defaults.provider,
+    base_url: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.base_url) ?? defaults.base_url,
+  })
 }
 
 export async function update(ctx: Context) {
-  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}`)
+  const profile = resolveProfile(ctx)
+  const defaults = await readProfileJobDefaults(profile)
+  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}`, undefined, {
+    ...(ctx.request.body || {}),
+    model: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.model) ?? defaults.model,
+    provider: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.provider) ?? defaults.provider,
+    base_url: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.base_url) ?? defaults.base_url,
+  })
 }
 
 export async function remove(ctx: Context) {

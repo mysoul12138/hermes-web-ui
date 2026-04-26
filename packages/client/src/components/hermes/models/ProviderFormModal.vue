@@ -2,6 +2,7 @@
 import { ref, watch, computed, onMounted } from 'vue'
 import { NModal, NForm, NFormItem, NInput, NInputNumber, NButton, NSelect, NRadioGroup, NRadioButton, useMessage } from 'naive-ui'
 import { useModelsStore } from '@/stores/hermes/models'
+import * as systemApi from '@/api/hermes/system'
 import { useI18n } from 'vue-i18n'
 import CodexLoginModal from './CodexLoginModal.vue'
 import NousLoginModal from './NousLoginModal.vue'
@@ -109,15 +110,10 @@ async function fetchModels() {
 
   fetchingModels.value = true
   try {
-    const base = base_url.replace(/\/+$/, '')
-    const url = /\/v\d+\/?$/.test(base) ? `${base}/models` : `${base}/v1/models`
-    const headers: Record<string, string> = {}
-    if (formData.value.api_key.trim()) {
-      headers['Authorization'] = `Bearer ${formData.value.api_key.trim()}`
-    }
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { data?: Array<{ id: string }> }
+    const data = await systemApi.fetchProviderModels({
+      base_url: base_url.trim(),
+      api_key: formData.value.api_key.trim() || undefined,
+    })
     if (!Array.isArray(data.data)) throw new Error(t('models.unexpectedFormat'))
 
     modelOptions.value = data.data.map(m => ({ label: m.id, value: m.id }))
