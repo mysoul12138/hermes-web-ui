@@ -530,6 +530,95 @@ describe('Chat Store', () => {
     expect(window.localStorage.getItem(legacySessionMessagesKey('legacy-1'))).toBeNull()
   })
 
+  it('persists explicit bridge-to-tui mapping when fetchSession returns the real Hermes session id', async () => {
+    const localBridgeSessionId = 'moga25sfztsjc0'
+    const persistentSessionId = '20260425_203959_a51166'
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, localBridgeSessionId)
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: localBridgeSessionId,
+          title: '',
+          source: 'tui',
+          messages: [],
+          createdAt: new Date('2026-04-25T20:39:50+08:00').getTime(),
+          updatedAt: new Date('2026-04-25T20:40:10+08:00').getTime(),
+        },
+      ]),
+    )
+    window.localStorage.setItem(
+      sessionMessagesKey(localBridgeSessionId),
+      JSON.stringify([
+        { id: 'u1', role: 'user', content: 'fix test', timestamp: 1 },
+        { id: 't1', role: 'tool', content: '', timestamp: 2, toolName: 'terminal', toolPreview: 'echo "fix test"', toolResult: '{"summary":"fix test 20:40:03"}', toolStatus: 'done' },
+      ]),
+    )
+    window.localStorage.setItem(`hermes_bridge_local_session_v1_default_${localBridgeSessionId}`, '1')
+
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === localBridgeSessionId) {
+        return {
+          ...makeDetail(persistentSessionId, [
+            {
+              id: 11,
+              session_id: persistentSessionId,
+              role: 'user',
+              content: 'fix test',
+              tool_call_id: null,
+              tool_calls: null,
+              tool_name: null,
+              timestamp: 1,
+              token_count: null,
+              finish_reason: null,
+              reasoning: null,
+            },
+            {
+              id: 12,
+              session_id: persistentSessionId,
+              role: 'assistant',
+              content: '',
+              tool_call_id: null,
+              tool_calls: [{ id: 'call_1', function: { name: 'terminal', arguments: '{"command":"echo \\"fix test\\"","workdir":"/tmp"}' } }],
+              tool_name: null,
+              timestamp: 2,
+              token_count: null,
+              finish_reason: 'tool_calls',
+              reasoning: null,
+            },
+            {
+              id: 13,
+              session_id: persistentSessionId,
+              role: 'tool',
+              content: '{"output":"fix test 20:40:03","exit_code":0,"error":null}',
+              tool_call_id: 'call_1',
+              tool_calls: null,
+              tool_name: null,
+              timestamp: 3,
+              token_count: null,
+              finish_reason: null,
+              reasoning: null,
+            },
+          ]),
+          source: 'tui',
+          id: persistentSessionId,
+          tool_call_count: 1,
+        }
+      }
+      return null
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshActiveSession()
+
+    const toolMessage = store.messages.find(message => message.role === 'tool')
+    expect(toolMessage?.toolArgs).toContain('"command":"echo \\"fix test\\""')
+    expect(toolMessage?.toolResult).toContain('"output":"fix test 20:40:03"')
+    expect(window.localStorage.getItem(`hermes_bridge_persistent_session_v1_default_${localBridgeSessionId}`)).toBe(persistentSessionId)
+  })
+
   it('does not mark server sessions live from last_active alone', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-22T19:00:00.000Z'))

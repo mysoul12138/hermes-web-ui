@@ -5,7 +5,7 @@ import {
   type ApprovalChoice,
   type PendingApproval,
 } from '@/api/hermes/approval'
-import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionSummary } from '@/api/hermes/sessions'
+import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionDetail, type SessionSummary } from '@/api/hermes/sessions'
 import { fetchConversationDetail, fetchConversationSummaries, type ConversationBranch, type ConversationMessage, type ConversationSummary } from '@/api/hermes/conversations'
 import { getApiKey } from '@/api/client'
 import { defineStore } from 'pinia'
@@ -883,11 +883,11 @@ export const useChatStore = defineStore('chat', () => {
     if (s) saveJsonWithLegacy(msgsCacheKey(sid), sanitizeForCache(s.messages), legacyMsgsCacheKey(sid))
   }
 
-  function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
-    const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
-    const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
-    return localSteered.length ? [...mapped, ...localSteered] : mapped
-  }
+function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
+  const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
+  const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
+  return localSteered.length ? [...mapped, ...localSteered] : mapped
+}
 
   function getQueuedMessages(sid: string) {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
@@ -967,6 +967,14 @@ export const useChatStore = defineStore('chat', () => {
     return readBridgePersistentSessionId(sid) || sid
   }
 
+  async function fetchResolvedSessionDetail(sid: string): Promise<SessionDetail | null> {
+    const initial = await fetchSession(sessionFetchId(sid))
+    if (initial && initial.id && initial.id !== sid && isBridgeLocalSession(sid)) {
+      markBridgeLocalSession(sid, initial.id)
+    }
+    return initial
+  }
+
   function resumeInFlightRun(sid: string): boolean {
     const inFlight = readInFlight(sid)
     if (!inFlight || streamStates.value.has(sid)) return false
@@ -1041,7 +1049,7 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       try {
-        const detail = await fetchSession(sessionFetchId(sid))
+        const detail = await fetchResolvedSessionDetail(sid)
         if (!detail) return
         const target = sessions.value.find(s => s.id === sid)
         if (!target) return
@@ -1204,7 +1212,7 @@ export const useChatStore = defineStore('chat', () => {
     const sid = activeSessionId.value
     if (!sid) return false
     try {
-      const detail = await fetchSession(sessionFetchId(sid))
+      const detail = await fetchResolvedSessionDetail(sid)
       if (!detail) return false
       const target = sessions.value.find(s => s.id === sid)
       if (!target) return false
@@ -1633,7 +1641,7 @@ export const useChatStore = defineStore('chat', () => {
     if (needsBlockingLoad) isLoadingMessages.value = true
 
     try {
-      const detail = await fetchSession(sessionFetchId(sessionId))
+      const detail = await fetchResolvedSessionDetail(sessionId)
       if (detail && detail.messages) {
         if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)

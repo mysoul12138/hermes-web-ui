@@ -103,6 +103,11 @@ interface TuiSessionListItem {
   started_at?: number
 }
 
+interface PendingPersistentResolution {
+  before: Set<string>
+  deadlineAt: number
+}
+
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
@@ -321,6 +326,7 @@ export class TuiBridgeService {
   private bridgeSessionsByWebSession = new Map<string, string>()
   private webSessionsByBridgeSession = new Map<string, string>()
   private persistentSessionsByWebSession = new Map<string, string>()
+  private pendingPersistentResolutions = new Map<string, PendingPersistentResolution>()
   private activeRunsByBridgeSession = new Map<string, string>()
   private runs = new Map<string, RunState>()
 
@@ -337,6 +343,10 @@ export class TuiBridgeService {
 
   hasSession(webSessionId: string): boolean {
     return this.bridgeSessionsByWebSession.has(webSessionId)
+  }
+
+  getPersistentSessionId(webSessionId: string): string | null {
+    return this.persistentSessionsByWebSession.get(webSessionId) || null
   }
 
   async startRun(input: string, webSessionId: string, conversationHistory: Array<{ role: string, content: string }> = []) {
@@ -521,7 +531,11 @@ export class TuiBridgeService {
     if (previous) this.webSessionsByBridgeSession.delete(previous)
     this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
     this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
-    if (persistentSessionId) this.persistentSessionsByWebSession.set(webSessionId, persistentSessionId)
+    if (persistentSessionId) {
+      this.rememberPersistentSessionId(webSessionId, persistentSessionId)
+    } else {
+      this.schedulePersistentSessionResolution(webSessionId, before)
+    }
     return { id: bridgeSessionId, created: true, persistentSessionId }
   }
 
@@ -535,10 +549,42 @@ export class TuiBridgeService {
       const bridgeSessionId = resumed.session_id
       this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
       this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
-      this.persistentSessionsByWebSession.set(webSessionId, resumed.resumed || webSessionId)
-      return { id: bridgeSessionId, created: false, persistentSessionId: resumed.resumed || webSessionId }
+      const persistentSessionId = resumed.resumed || webSessionId
+      this.rememberPersistentSessionId(webSessionId, persistentSessionId)
+      return { id: bridgeSessionId, created: false, persistentSessionId }
     } catch {
       return null
+    }
+  }
+
+  private rememberPersistentSessionId(webSessionId: string, persistentSessionId: string) {
+    this.persistentSessionsByWebSession.set(webSessionId, persistentSessionId)
+    this.pendingPersistentResolutions.delete(webSessionId)
+  }
+
+  private schedulePersistentSessionResolution(webSessionId: string, before: Set<string>) {
+    if (this.persistentSessionsByWebSession.has(webSessionId)) return
+    this.pendingPersistentResolutions.set(webSessionId, {
+      before: new Set(before),
+      deadlineAt: Date.now() + STARTUP_TIMEOUT_MS,
+    })
+    void this.resolvePendingPersistentSession(webSessionId)
+  }
+
+  private async resolvePendingPersistentSession(webSessionId: string) {
+    while (true) {
+      const pending = this.pendingPersistentResolutions.get(webSessionId)
+      if (!pending) return
+      if (Date.now() >= pending.deadlineAt) {
+        this.pendingPersistentResolutions.delete(webSessionId)
+        return
+      }
+      const found = await this.findNewPersistentSessionIdOnce(pending.before).catch(() => undefined)
+      if (found?.id) {
+        this.rememberPersistentSessionId(webSessionId, found.id)
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 500))
     }
   }
 
@@ -552,15 +598,20 @@ export class TuiBridgeService {
   private async waitForNewPersistentSessionId(before: Set<string>): Promise<string | undefined> {
     const deadline = Date.now() + STARTUP_TIMEOUT_MS
     while (Date.now() < deadline) {
-      const result = await this.client.request<{ sessions?: TuiSessionListItem[] }>('session.list', { limit: 200 })
-      const added = (result.sessions || [])
-        .filter(session => session.id && !before.has(session.id))
-        .sort((a, b) => (Number(b.started_at) || 0) - (Number(a.started_at) || 0))
-      const hit = added.find(session => session.source === 'tui') || added[0]
+      const hit = await this.findNewPersistentSessionIdOnce(before)
       if (hit?.id) return hit.id
       await new Promise(resolve => setTimeout(resolve, 250))
     }
     return undefined
+  }
+
+  private async findNewPersistentSessionIdOnce(before: Set<string>): Promise<TuiSessionListItem | undefined> {
+    const claimedIds = new Set(this.persistentSessionsByWebSession.values())
+    const result = await this.client.request<{ sessions?: TuiSessionListItem[] }>('session.list', { limit: 200 })
+    const added = (result.sessions || [])
+      .filter(session => session.id && !before.has(session.id) && !claimedIds.has(session.id))
+      .sort((a, b) => (Number(b.started_at) || 0) - (Number(a.started_at) || 0))
+    return added.find(session => session.source === 'tui') || added[0]
   }
 
   private buildPrompt(input: string, conversationHistory: Array<{ role: string, content: string }>): string {

@@ -11,6 +11,7 @@ import type { ConversationDetail, ConversationSummary } from '../../services/her
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { getGroupChatServer } from '../../routes/hermes/group-chat'
 import { logger } from '../../services/logger'
+import { tuiBridge } from '../../services/hermes/tui-bridge'
 import { existsSync, readFileSync } from 'fs'
 import YAML from 'js-yaml'
 import { getActiveConfigPath } from '../../services/hermes/hermes-profile'
@@ -233,6 +234,25 @@ export async function get(ctx: any) {
     }
   } catch (err) {
     logger.warn(err, 'Hermes Session DB: detail query failed, falling back to CLI')
+  }
+
+  const persistentSessionId = tuiBridge.getPersistentSessionId(ctx.params.id)
+  if (persistentSessionId && persistentSessionId !== ctx.params.id) {
+    try {
+      const mappedSession = await getSessionDetailFromDb(persistentSessionId)
+      if (mappedSession && !hasPendingDeletedSessionDetail(mappedSession)) {
+        ctx.body = { session: mappedSession }
+        return
+      }
+    } catch (err) {
+      logger.warn(err, 'Hermes Session DB: mapped bridge detail query failed, falling back to CLI')
+    }
+
+    const mappedCliSession = await hermesCli.getSession(persistentSessionId)
+    if (mappedCliSession) {
+      ctx.body = { session: mappedCliSession }
+      return
+    }
   }
 
   const session = await hermesCli.getSession(ctx.params.id)
