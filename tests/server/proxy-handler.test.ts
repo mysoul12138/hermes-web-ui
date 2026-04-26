@@ -128,6 +128,22 @@ describe('Proxy Handler', () => {
     expect(ctx.body).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge-run-1' })
   })
 
+  it('returns unsupported instead of 502 when bridge has no session.steer method', async () => {
+    mockTuiBridge.isEnabled.mockReturnValue(true)
+    mockTuiBridge.steer.mockRejectedValue(new Error('unknown method: session.steer'))
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: { body: { text: 'adjust direction' } },
+    })
+    await proxy(ctx)
+
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(ctx.status).toBe(200)
+    expect(ctx.body).toMatchObject({ ok: false, status: 'unsupported', bridge: true })
+  })
+
   it('rewrites /api/hermes/* to /api/*', async () => {
     mockFetch.mockResolvedValue({
       status: 200,

@@ -797,6 +797,11 @@ export const useChatStore = defineStore('chat', () => {
   async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const messageId = uid()
     let steerText = content.trim()
+    const msgs = getSessionMsgs(sid)
+    const last = msgs[msgs.length - 1]
+    if (last?.role === 'assistant' && last.isStreaming) {
+      updateMessage(sid, last.id, { isStreaming: false })
+    }
     const userMsg: Message = {
       id: messageId,
       role: 'user',

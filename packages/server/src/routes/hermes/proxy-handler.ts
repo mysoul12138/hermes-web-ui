@@ -92,6 +92,11 @@ const SSE_EVENTS_PATH = /^\/v1\/runs\/([^/]+)\/events$/
 const RUN_CANCEL_PATH = /^\/v1\/runs\/([^/]+)\/cancel$/
 const SESSION_STEER_PATH = /^\/v1\/sessions\/([^/]+)\/steer$/
 
+function isUnsupportedBridgeSteerError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /unknown method:\s*session\.steer|unknown method:\s*command\.dispatch|unknown method:\s*slash\.exec|does not support \/steer|true mid-run steer is not available|agent does not support steer/i.test(message)
+}
+
 /**
  * Parse SSE text chunks and extract approval / completion lifecycle events.
  */
@@ -241,6 +246,17 @@ export async function proxy(ctx: Context) {
         ctx.body = result
         return
       } catch (err) {
+        if (isUnsupportedBridgeSteerError(err)) {
+          ctx.status = 200
+          ctx.set('Content-Type', 'application/json')
+          ctx.body = {
+            ok: false,
+            status: 'unsupported',
+            bridge: true,
+            error: 'Current Hermes TUI bridge does not support session.steer',
+          }
+          return
+        }
         ctx.status = 502
         ctx.body = { error: { message: `Bridge steer error: ${err instanceof Error ? err.message : String(err)}` } }
         return

@@ -136,6 +136,19 @@ function readBridgeConfigEnabled(): boolean | null {
   }
 }
 
+function isUnknownBridgeMethod(error: unknown, method: string): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return new RegExp(`unknown method:\\s*${method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(message)
+}
+
+function normalizeSteerResult(result: { status?: string, text?: string } | null | undefined, text: string) {
+  return {
+    ok: result?.status === 'queued',
+    status: result?.status || 'unknown',
+    text: result?.text || text,
+  }
+}
+
 class TuiGatewayClient extends EventEmitter {
   private proc: ChildProcess | null = null
   private reqId = 0
@@ -254,15 +267,14 @@ class TuiGatewayClient extends EventEmitter {
   }
 }
 
-class TuiBridgeService {
-  private client = new TuiGatewayClient()
+export class TuiBridgeService {
   private bridgeSessionsByWebSession = new Map<string, string>()
   private webSessionsByBridgeSession = new Map<string, string>()
   private persistentSessionsByWebSession = new Map<string, string>()
   private activeRunsByBridgeSession = new Map<string, string>()
   private runs = new Map<string, RunState>()
 
-  constructor() {
+  constructor(private client = new TuiGatewayClient()) {
     this.client.on('event', event => this.handleGatewayEvent(event))
   }
 
@@ -353,17 +365,48 @@ class TuiBridgeService {
     if (!bridgeSessionId) throw new Error('bridge session not found')
     const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
     if (!runId) throw new Error('session is not running')
-    const result = await this.client.request<{ status?: string, text?: string }>('session.steer', {
-      session_id: bridgeSessionId,
-      text,
-    })
+    let result: { status?: string, text?: string }
+    try {
+      result = await this.client.request<{ status?: string, text?: string }>('session.steer', {
+        session_id: bridgeSessionId,
+        text,
+      })
+    } catch (error) {
+      if (!isUnknownBridgeMethod(error, 'session.steer')) throw error
+      result = await this.steerViaCommandDispatch(bridgeSessionId, text)
+    }
+    const normalized = normalizeSteerResult(result, text)
     this.scheduleIdleHeartbeat(runId)
     return {
-      ok: result.status === 'queued',
-      status: result.status || 'unknown',
-      text: result.text || text,
+      ...normalized,
       run_id: runId,
       bridge: true,
+    }
+  }
+
+  private async steerViaCommandDispatch(bridgeSessionId: string, text: string): Promise<{ status?: string, text?: string }> {
+    try {
+      const dispatched = await this.client.request<{ type?: string, output?: string, message?: string }>('command.dispatch', {
+        session_id: bridgeSessionId,
+        command: `/steer ${text}`,
+      })
+      if (dispatched?.type === 'exec') return { status: 'queued', text }
+      if (dispatched?.type === 'send') {
+        throw new Error('Hermes bridge accepted /steer only as a new message; true mid-run steer is not available')
+      }
+      return { status: 'queued', text }
+    } catch (error) {
+      if (!isUnknownBridgeMethod(error, 'command.dispatch')) throw error
+      const slash = await this.client.request<{ output?: string }>('slash.exec', {
+        session_id: bridgeSessionId,
+        command: `/steer ${text}`,
+      })
+      const output = slash?.output || ''
+      if (/not a quick\/plugin\/skill command|unknown command|usage:/i.test(output)) {
+        throw new Error(output || 'Hermes bridge does not support /steer')
+      }
+      if (/Steer queued|arrives after the next tool call|queued/i.test(output)) return { status: 'queued', text }
+      throw new Error(output || 'Hermes bridge does not support /steer')
     }
   }
 

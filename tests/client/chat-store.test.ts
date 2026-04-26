@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const mockChatApi = vi.hoisted(() => ({
   startRun: vi.fn(),
+  cancelRun: vi.fn(),
   steerSession: vi.fn(),
   streamRunEvents: vi.fn(),
 }))
@@ -83,6 +84,7 @@ describe('Chat Store', () => {
     mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
     mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
+    mockChatApi.cancelRun.mockResolvedValue(undefined)
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
     mockChatApi.streamRunEvents.mockImplementation(() => ({
       abort: vi.fn(),
