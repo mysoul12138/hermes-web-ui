@@ -44,6 +44,10 @@ const parsedThinking = computed(() =>
   parseThinking(props.message.content || "", { streaming: !!props.message.isStreaming }),
 );
 
+const showStreamingCursor = computed(() =>
+  !!props.message.isStreaming && parsedThinking.value.body.trim().length > 0,
+);
+
 // 优先使用来自 reasoning 字段/事件的思考文本；否则回退到从 content 解析的 <think> 标签。
 // 若两者共存，则拼接展示（罕见，但保持信息不丢）。
 const hasReasoningField = computed(() => !!(props.message.reasoning && props.message.reasoning.length > 0));
@@ -422,9 +426,8 @@ const renderedToolResult = computed(() => {
             <MarkdownRenderer
               v-if="parsedThinking.body"
               :content="parsedThinking.body"
+              :class="{ 'with-streaming-cursor': showStreamingCursor }"
             />
-
-            <span v-if="message.isStreaming" class="streaming-cursor"></span>
           </div>
           <div class="message-time">
             <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
@@ -765,14 +768,18 @@ const renderedToolResult = computed(() => {
   }
 }
 
-.streaming-cursor {
-  display: inline-block;
-  width: 2px;
-  height: 1em;
-  background-color: $text-muted;
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  animation: blink 0.8s infinite;
+.with-streaming-cursor {
+  :deep(> :last-child)::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    background-color: $text-muted;
+    border-radius: 1px;
+    vertical-align: text-bottom;
+    animation: blink 0.8s infinite;
+  }
 }
 
 @keyframes blink {

@@ -3,18 +3,48 @@ import { ref, computed, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import MessageItem from "./MessageItem.vue";
 import { useChatStore } from "@/stores/hermes/chat";
+import { useSettingsStore } from "@/stores/hermes/settings";
+import { parseThinking } from "@/utils/thinking-parser";
+import { getApiKey, getBaseUrlValue } from "@/api/client";
 
 const chatStore = useChatStore();
+const settingsStore = useSettingsStore();
 const { t } = useI18n();
 const listRef = ref<HTMLElement>();
 
 const displayMessages = computed(() => chatStore.displayMessages);
 
-const showRunCursor = computed(() => {
-  if (!chatStore.isRunActive) return false;
-  const last = displayMessages.value[displayMessages.value.length - 1];
-  return !last?.isStreaming;
+function withAuthToken(url: string): string {
+  if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
+  const base = getBaseUrlValue();
+  const resolved = url.startsWith("/") ? `${base}${url}` : url;
+  if (!resolved.includes("/api/")) return resolved;
+  const token = getApiKey();
+  if (!token || resolved.includes("token=")) return resolved;
+  return `${resolved}${resolved.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
+const assistantAvatarUrl = computed(() =>
+  withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"),
+);
+
+const streamingAssistantHasVisibleOutput = computed(() => {
+  const streamingAssistant = [...displayMessages.value]
+    .reverse()
+    .find((msg) => msg.role === "assistant" && msg.isStreaming);
+  if (!streamingAssistant) return false;
+  if (streamingAssistant.reasoning?.trim()) return true;
+  const parsed = parseThinking(streamingAssistant.content || "", { streaming: true });
+  return (
+    parsed.body.trim().length > 0 ||
+    parsed.segments.some((segment) => segment.trim().length > 0) ||
+    (parsed.pending?.trim().length ?? 0) > 0
+  );
 });
+
+const showRunPlaceholder = computed(() =>
+  chatStore.isRunActive && !streamingAssistantHasVisibleOutput.value,
+);
 
 function isNearBottom(threshold = 200): boolean {
   const el = listRef.value;
@@ -82,7 +112,7 @@ watch(
   },
 );
 watch(
-  () => `${chatStore.activeSessionId || ""}:${displayMessages.value.length}:${showRunCursor.value}`,
+  () => `${chatStore.activeSessionId || ""}:${displayMessages.value.length}:${showRunPlaceholder.value}`,
   () => {
     if (!chatStore.isStreaming) { scrollToBottom(); return; }
     if (!isNearBottom()) return;
@@ -107,8 +137,19 @@ watch(
       :message="msg"
       :highlight="chatStore.focusMessageId === msg.id"
     />
-    <div v-if="showRunCursor" class="run-cursor-row" aria-live="polite">
-      <span class="run-cursor"></span>
+    <div v-if="showRunPlaceholder" class="run-placeholder" aria-live="polite">
+      <img :src="assistantAvatarUrl" alt="Hermes" class="run-placeholder-avatar" />
+      <div class="run-placeholder-content">
+        <div class="run-placeholder-bubble">
+          <span class="run-placeholder-dots" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+          <span>{{ t("chat.thinkingInProgress") }}</span>
+        </div>
+        <div class="run-placeholder-time">{{ t("jobs.status.running") }}</div>
+      </div>
     </div>
   </div>
 </template>
@@ -172,24 +213,85 @@ watch(
   font-size: 11px;
 }
 
-.run-cursor-row {
+.run-placeholder {
   display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 80%;
+}
+
+.run-placeholder-avatar {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.run-placeholder-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.run-placeholder-bubble {
+  display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 2px 0 2px 44px;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: $msg-assistant-bg;
+  color: $text-muted;
+  font-size: 14px;
+  line-height: 1.65;
 }
 
-.run-cursor {
-  display: inline-block;
-  width: 2px;
+.run-placeholder-time {
+  margin-top: 4px;
+  padding: 0 4px;
+  color: $text-muted;
+  font-size: 11px;
+
+  .dark & {
+    color: #999999;
+  }
+}
+
+.run-placeholder-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   height: 18px;
-  background: $text-muted;
-  border-radius: 1px;
-  animation: run-cursor-blink 0.85s steps(2, start) infinite;
+  flex-shrink: 0;
 }
 
-@keyframes run-cursor-blink {
-  0%, 45% { opacity: 1; }
-  46%, 100% { opacity: 0; }
+.run-placeholder-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: $text-muted;
+  animation: run-placeholder-dot 1.15s ease-in-out infinite;
 }
+
+.run-placeholder-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.run-placeholder-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes run-placeholder-dot {
+  0%, 70%, 100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
 </style>
