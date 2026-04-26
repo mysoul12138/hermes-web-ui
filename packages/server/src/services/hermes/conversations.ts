@@ -88,8 +88,8 @@ export interface ConversationDetail {
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
-  branch_session_count: number
-  branches: ConversationBranch[]
+  branch_session_count?: number
+  branches?: ConversationBranch[]
 }
 
 export interface ConversationListOptions {

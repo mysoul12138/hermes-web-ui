@@ -54,8 +54,8 @@ export interface ConversationDetail {
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number
-  branch_session_count: number
-  branches: ConversationBranch[]
+  branch_session_count?: number
+  branches?: ConversationBranch[]
 }
 
 export async function fetchConversationSummaries(params: { humanOnly?: boolean; source?: string; limit?: number } = {}): Promise<ConversationSummary[]> {

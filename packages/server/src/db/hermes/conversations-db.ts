@@ -242,15 +242,8 @@ function timingMatchesParent(parent: ConversationSessionRow | undefined, child: 
   return Math.abs(Number(child.started_at || 0) - Number(parent.ended_at || 0)) <= LINEAGE_TOLERANCE_SECONDS
 }
 
-function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
-  if (!session?.parent_session_id) return false
-  const parent = byId.get(session.parent_session_id)
-  return !!parent && parent.end_reason === 'branched' && timingMatchesParent(parent, session)
-}
-
-function isVisibleRoot(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
-  if (!session || session.source === 'tool') return false
-  return session.parent_session_id == null || isBranchRoot(session, byId)
+function isCompressionEndReason(reason: string | null): boolean {
+  return reason === 'compression' || reason === 'compressed'
 }
 
 function continuationCandidates(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
@@ -270,7 +263,7 @@ function continuationCandidates(parent: ConversationSessionRow, byId: Map<string
 }
 
 function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow | null {
-  if (parent.end_reason !== 'compression') return null
+  if (!isCompressionEndReason(parent.end_reason)) return null
   const candidates = continuationCandidates(parent, byId, childrenByParent, allowTool)
   if (candidates.length === 1) return candidates[0]
 
@@ -282,6 +275,33 @@ function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string,
 
   if (exactPreviewMatches.length === 1) return exactPreviewMatches[0]
   return null
+}
+
+function isCompressionContinuationChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
+  if (!session?.parent_session_id) return false
+  const parent = byId.get(session.parent_session_id)
+  if (!parent) return false
+  return nextContinuationChild(parent, byId, childrenByParent)?.id === session.id
+}
+
+function compressionChainRootId(sessionId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): string | null {
+  let current = byId.get(sessionId) || null
+  if (!current || current.source === 'tool') return null
+
+  const seen = new Set<string>()
+  while (current?.parent_session_id && !seen.has(current.id)) {
+    seen.add(current.id)
+    const parent = byId.get(current.parent_session_id)
+    if (!parent) break
+    if (nextContinuationChild(parent, byId, childrenByParent)?.id !== current.id) break
+    current = parent
+  }
+  return current?.id || null
+}
+
+function isVisibleConversationStart(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
+  if (!session || session.source === 'tool') return false
+  return !isCompressionContinuationChild(session, byId, childrenByParent)
 }
 
 function collectConversationChain(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
@@ -333,10 +353,10 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
   const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
 
   return {
-    ...toSummary(root),
-    title: root.title || firstPreview || null,
-    preview: root.preview || firstPreview,
-    model: safeText(last?.model || root.model),
+    ...toSummary(last),
+    title: last.title || root.title || firstPreview || null,
+    preview: last.preview || root.preview || firstPreview,
+    started_at: Number(root.started_at || 0),
     ended_at: last?.ended_at ?? null,
     last_active: Math.max(...chain.map(session => session.last_active)),
     is_active: chain.some(session => session.is_active),
@@ -573,7 +593,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
   }
 
   const summaries = sessions
-    .filter(session => isVisibleRoot(session, byId))
+    .filter(session => isVisibleConversationStart(session, byId, childrenByParent))
     .map(session => aggregateSummary(session.id, byId, childrenByParent))
     .filter((summary): summary is ConversationSummary => !!summary)
 
@@ -598,9 +618,12 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     if (!session || session.source === 'tool') return null
     chain = [session]
   } else {
-    const root = byId.get(sessionId)
-    if (!isVisibleRoot(root, byId)) return null
-    chain = collectConversationChain(sessionId, byId, childrenByParent)
+    const session = byId.get(sessionId)
+    if (!session || session.source === 'tool') return null
+    const rootId = compressionChainRootId(sessionId, byId, childrenByParent)
+    if (!rootId) return null
+    if (!isVisibleConversationStart(byId.get(rootId), byId, childrenByParent)) return null
+    chain = collectConversationChain(rootId, byId, childrenByParent)
   }
 
   if (!chain.length) return null
@@ -612,23 +635,29 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
 
     if (!messages.length) {
       if (humanOnly && !branches.length && !chain.some(session => session.is_live_tui_process)) return null
-      return {
+      const detail: ConversationDetail = {
         session_id: sessionId,
         messages: [],
         visible_count: 0,
         thread_session_count: chain.length,
-        branch_session_count: countBranches(branches),
-        branches,
       }
+      if (humanOnly) {
+        detail.branch_session_count = countBranches(branches)
+        detail.branches = branches
+      }
+      return detail
     }
-    return {
+    const detail: ConversationDetail = {
       session_id: sessionId,
       messages,
       visible_count: messages.length,
       thread_session_count: chain.length,
-      branch_session_count: countBranches(branches),
-      branches,
     }
+    if (humanOnly) {
+      detail.branch_session_count = countBranches(branches)
+      detail.branches = branches
+    }
+    return detail
   } finally {
     db.close()
   }
