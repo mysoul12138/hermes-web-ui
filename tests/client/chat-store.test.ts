@@ -292,7 +292,7 @@ describe('Chat Store', () => {
     )
   })
 
-  it('sends busy input through steer instead of queueing a new run', async () => {
+  it('queues busy input and sends it after the current run completes', async () => {
     const settings = useSettingsStore()
     settings.display.busy_input_mode = 'interrupt'
     const store = useChatStore()
@@ -309,13 +309,29 @@ describe('Chat Store', () => {
     await flushPromises()
 
     expect(mockChatApi.startRun).toHaveBeenCalledTimes(1)
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.steerSession).not.toHaveBeenCalled()
     expect(store.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'user',
           content: 'adjust direction',
-          steered: true,
+          queued: true,
+        }),
+      ]),
+    )
+
+    const onDone = mockChatApi.streamRunEvents.mock.calls[0]?.[2]
+    expect(typeof onDone).toBe('function')
+    onDone()
+    await flushPromises()
+
+    expect(mockChatApi.startRun).toHaveBeenCalledTimes(2)
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          queued: false,
         }),
       ]),
     )

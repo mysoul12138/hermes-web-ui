@@ -21,9 +21,9 @@ const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
 
-const busySteerEnabled = computed(() => settingsStore.display.busy_input_mode === 'interrupt')
-const willSteerInput = computed(() => chatStore.isStreaming && busySteerEnabled.value)
-const canSend = computed(() => (inputText.value.trim() || attachments.value.length > 0) && (!chatStore.isStreaming || busySteerEnabled.value))
+const willQueueInput = computed(() => chatStore.isStreaming)
+const queuedCount = computed(() => chatStore.messages.filter(message => message.queued).length)
+const canSend = computed(() => !!(inputText.value.trim() || attachments.value.length > 0))
 
 // --- Context info ---
 
@@ -239,8 +239,8 @@ function isImage(type: string): boolean {
         />
       </div>
     </div>
-    <div v-if="willSteerInput" class="busy-input-feedback">
-      <span>{{ t('chat.busyInputWillSteer') }}</span>
+    <div v-if="willQueueInput" class="busy-input-feedback">
+      <span>{{ queuedCount > 0 ? t('chat.busyInputQueued', { count: queuedCount }) : t('chat.busyInputWillQueue') }}</span>
     </div>
 
     <!-- Attachment previews -->
@@ -312,7 +312,7 @@ function isImage(type: string): boolean {
           <template #icon>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </template>
-          {{ willSteerInput ? t('chat.steerMessage') : t('chat.send') }}
+          {{ willQueueInput ? t('chat.queueMessage') : t('chat.send') }}
         </NButton>
       </div>
     </div>

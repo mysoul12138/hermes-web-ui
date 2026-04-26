@@ -144,6 +144,22 @@ describe('Proxy Handler', () => {
     expect(ctx.body).toMatchObject({ ok: false, status: 'unsupported', bridge: true })
   })
 
+  it('returns unsupported instead of 502 when bridge rejects /steer as a non-command', async () => {
+    mockTuiBridge.isEnabled.mockReturnValue(true)
+    mockTuiBridge.steer.mockRejectedValue(new Error('not a quick/plugin/skill command:'))
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: { body: { text: 'adjust direction' } },
+    })
+    await proxy(ctx)
+
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(ctx.status).toBe(200)
+    expect(ctx.body).toMatchObject({ ok: false, status: 'unsupported', bridge: true })
+  })
+
   it('rewrites /api/hermes/* to /api/*', async () => {
     mockFetch.mockResolvedValue({
       status: 200,

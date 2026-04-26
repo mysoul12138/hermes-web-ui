@@ -1,4 +1,4 @@
-import { cancelRun, startRun, steerSession, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import { cancelRun, startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
 import {
   getPendingApproval,
   respondApproval as respondApprovalApi,
@@ -12,7 +12,6 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useAppStore } from './app'
 import { useProfilesStore } from './profiles'
-import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 
 export interface Attachment {
@@ -784,31 +783,24 @@ export const useChatStore = defineStore('chat', () => {
     if (s) saveJsonWithLegacy(msgsCacheKey(sid), sanitizeForCache(s.messages), legacyMsgsCacheKey(sid))
   }
 
-  function busyInputSteerEnabled() {
-    return useSettingsStore().display.busy_input_mode === 'interrupt'
-  }
-
   function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
     const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
     const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
     return localSteered.length ? [...mapped, ...localSteered] : mapped
   }
 
-  async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
-    const messageId = uid()
-    let steerText = content.trim()
-    const msgs = getSessionMsgs(sid)
-    const last = msgs[msgs.length - 1]
-    if (last?.role === 'assistant' && last.isStreaming) {
-      updateMessage(sid, last.id, { isStreaming: false })
-    }
+  function getQueuedMessages(sid: string) {
+    return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
+  }
+
+  function queueBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const userMsg: Message = {
-      id: messageId,
+      id: uid(),
       role: 'user',
-      content: steerText,
+      content: content.trim(),
       timestamp: Date.now(),
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
-      steered: true,
+      queued: true,
     }
     addMessage(sid, userMsg)
     updateSessionTitle(sid)
@@ -816,34 +808,12 @@ export const useChatStore = defineStore('chat', () => {
       persistActiveMessages()
       persistSessionsList()
     }
+  }
 
-    try {
-      if (attachments && attachments.length > 0) {
-        const uploaded = await uploadFiles(attachments)
-        const pathParts = uploaded.map(f => `[File: ${f.name}](${f.path})`)
-        steerText = steerText ? steerText + '\n\n' + pathParts.join('\n') : pathParts.join('\n')
-      }
-      const result = await steerSession(sid, steerText)
-      if (!result.ok) {
-        updateMessage(sid, messageId, { steered: false })
-        addMessage(sid, {
-          id: uid(),
-          role: 'system',
-          content: `Error: /steer was not accepted (${result.status || 'unknown'}).`,
-          timestamp: Date.now(),
-        })
-      }
-    } catch (err: any) {
-      updateMessage(sid, messageId, { steered: false })
-      addMessage(sid, {
-        id: uid(),
-        role: 'system',
-        content: `Error: ${err.message}`,
-        timestamp: Date.now(),
-      })
-    } finally {
-      if (sid === activeSessionId.value) persistActiveMessages()
-    }
+  async function submitNextQueuedMessage(sid: string) {
+    const nextQueued = getQueuedMessages(sid)[0]
+    if (!nextQueued) return
+    await submitMessage(sid, nextQueued.content, nextQueued.attachments, nextQueued.id)
   }
 
   function markInFlight(sid: string, runId: string) {
@@ -1470,6 +1440,7 @@ export const useChatStore = defineStore('chat', () => {
         stopApprovalPolling(sid)
         clearApproval(sid)
         if (sid === activeSessionId.value) persistActiveMessages()
+        void submitNextQueuedMessage(sid)
       },
       (err) => {
         console.warn('SSE connection dropped, resyncing from server:', err.message)
@@ -1875,7 +1846,7 @@ export const useChatStore = defineStore('chat', () => {
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
     if (isStreaming.value) {
-      if (busyInputSteerEnabled()) void steerBusyInput(sid, content, attachments)
+      queueBusyInput(sid, content, attachments)
       return
     }
 
@@ -1910,12 +1881,14 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!inFlight?.runId || !inFlight.runId.startsWith('bridge_run_')) {
       clearInFlight(sid)
+      await submitNextQueuedMessage(sid)
       return
     }
 
     try {
       await cancelRun(inFlight.runId)
       clearInFlight(sid)
+      await submitNextQueuedMessage(sid)
     } catch (err) {
       console.warn('Failed to cancel run:', err)
     }

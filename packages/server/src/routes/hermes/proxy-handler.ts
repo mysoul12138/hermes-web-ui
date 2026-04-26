@@ -94,7 +94,7 @@ const SESSION_STEER_PATH = /^\/v1\/sessions\/([^/]+)\/steer$/
 
 function isUnsupportedBridgeSteerError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
-  return /unknown method:\s*session\.steer|unknown method:\s*command\.dispatch|unknown method:\s*slash\.exec|does not support \/steer|true mid-run steer is not available|agent does not support steer/i.test(message)
+  return /unknown method:\s*session\.steer|unknown method:\s*command\.dispatch|unknown method:\s*slash\.exec|does not support \/steer|true mid-run steer is not available|agent does not support steer|not a quick\/plugin\/skill command/i.test(message)
 }
 
 /**
