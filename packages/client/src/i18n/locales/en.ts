@@ -138,6 +138,7 @@ export default {
     liveMode: 'Live',
     liveSessions: 'Live Sessions',
     recentBadge: 'Recent',
+    visibleMessages: '{count} visible messages',
     linkedSessions: '{count} linked',
     branchSession: 'Branch session',
     branchSessions: '{count} branch sessions',

@@ -138,6 +138,7 @@ export default {
     liveMode: '实时',
     liveSessions: '实时会话',
     recentBadge: '最近',
+    visibleMessages: '可见消息 {count} 条',
     linkedSessions: '关联 {count} 个会话',
     branchSession: '分支会话',
     branchSessions: '分支 {count} 个会话',

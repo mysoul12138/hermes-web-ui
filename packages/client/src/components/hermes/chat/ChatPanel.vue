@@ -271,9 +271,25 @@ const headerTitle = computed(() =>
   currentMode.value === 'live' ? t('chat.liveSessions') : activeSessionTitle.value,
 )
 
+const headerKicker = computed(() =>
+  currentMode.value === 'live' ? t('chat.liveMode') : t('chat.chatMode'),
+)
+
 const activeSessionSource = computed(() =>
   currentMode.value === 'chat' ? (chatStore.activeSession?.source || '') : '',
 )
+
+const activeModelLabel = computed(() =>
+  currentMode.value === 'chat' ? (chatStore.activeSession?.model || '') : '',
+)
+
+const headerSubtitle = computed(() => {
+  if (currentMode.value === 'live') return t('chat.liveSessions')
+  const parts = [t('chat.chatMode')]
+  if (activeSessionSource.value) parts.push(getSourceLabel(activeSessionSource.value))
+  if (chatStore.activeSession?.id) parts.push(chatStore.activeSession.id.slice(0, 8))
+  return parts.join(' · ')
+})
 
 function handleNewChat() {
   chatStore.newChat()
@@ -361,7 +377,7 @@ async function handleRenameConfirm() {
 <template>
   <div class="chat-panel">
     <div v-if="currentMode === 'chat'" class="session-backdrop" :class="{ active: showSessions }" @click="showSessions = false" />
-    <aside v-if="currentMode === 'chat'" class="session-list" :class="{ collapsed: !showSessions }">
+    <aside v-if="currentMode === 'chat'" class="session-list chat-surface-pane" :class="{ collapsed: !showSessions }">
       <div class="session-list-header">
         <span v-if="showSessions" class="session-list-title">{{ t('chat.sessions') }}</span>
         <div class="session-list-actions">
@@ -517,7 +533,7 @@ async function handleRenameConfirm() {
       />
     </NModal>
 
-    <div class="chat-main">
+    <div class="chat-main chat-surface-pane">
       <header class="chat-header">
         <div class="header-left">
           <NButton v-if="currentMode === 'chat'" quaternary size="small" @click="showSessions = !showSessions" circle>
@@ -525,10 +541,17 @@ async function handleRenameConfirm() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
             </template>
           </NButton>
-          <span class="header-session-title">{{ headerTitle }}</span>
-          <span v-if="activeSessionSource" class="source-badge">{{ getSourceLabel(activeSessionSource) }}</span>
+          <div class="chat-header-copy">
+            <div class="chat-header-kicker">{{ headerKicker }}</div>
+            <div class="chat-header-title-row">
+              <span class="header-session-title">{{ headerTitle }}</span>
+              <span v-if="activeSessionSource" class="source-badge">{{ getSourceLabel(activeSessionSource) }}</span>
+            </div>
+            <div class="chat-header-subtitle">{{ headerSubtitle }}</div>
+          </div>
         </div>
         <div class="header-actions">
+          <span v-if="activeModelLabel" class="header-status-chip">{{ activeModelLabel }}</span>
           <div class="chat-mode-toggle">
             <NButton
               size="small"
@@ -580,6 +603,14 @@ async function handleRenameConfirm() {
   display: flex;
   height: 100%;
   position: relative;
+}
+
+.chat-surface-pane {
+  background: $bg-card;
+
+  .dark & {
+    background: #333333;
+  }
 }
 
 .session-list {
@@ -1022,45 +1053,111 @@ async function handleRenameConfirm() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 21px 20px;
+  gap: 16px;
+  padding: 18px 20px 16px;
   border-bottom: 1px solid $border-color;
   flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.015);
+
+  .dark & {
+    background: rgba(255, 255, 255, 0.015);
+  }
 }
 
 .header-left {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
   overflow: hidden;
   flex: 1;
   min-width: 0;
 }
 
+.chat-header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-header-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $text-muted;
+}
+
+.chat-header-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .header-session-title {
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
   color: $text-primary;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.source-badge {
-  font-size: 10px;
+.chat-header-subtitle {
   color: $text-muted;
-  background: rgba($text-muted, 0.12);
-  padding: 1px 7px;
-  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: $text-secondary;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
   flex-shrink: 0;
   white-space: nowrap;
-  line-height: 16px;
+
+  .dark & {
+    color: #d2d6dc;
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+.header-status-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.02);
+  color: $text-secondary;
+  font-size: 12px;
+  line-height: 1;
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    color: #e5e7eb;
+  }
 }
 
 .chat-mode-toggle {
@@ -1073,6 +1170,14 @@ async function handleRenameConfirm() {
 @media (max-width: $breakpoint-mobile) {
   .chat-header {
     padding: 16px 12px 16px 52px;
+  }
+
+  .chat-header-subtitle {
+    font-size: 11px;
+  }
+
+  .header-status-chip {
+    display: none;
   }
 }
 </style>

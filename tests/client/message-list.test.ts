@@ -57,4 +57,29 @@ describe('MessageList', () => {
     expect(rendered).toContain('user:hello')
     expect(rendered).toContain('tool:terminal')
   })
+
+  it('wraps messages in a dedicated content stage for the modern layout', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'sess-modern'
+    store.activeSession = {
+      id: 'sess-modern',
+      title: 'Modern',
+      source: 'api_server',
+      messages: [
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: 'render me',
+          timestamp: Date.now(),
+        },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.message-list-stage').exists()).toBe(true)
+    expect(wrapper.find('.message-list-stack').exists()).toBe(true)
+  })
 })

@@ -56,6 +56,80 @@ describe('MessageItem tool details', () => {
     expect(blocks[1].find('.code-lang').text()).toBe('json')
   })
 
+  it('renders modernized assistant and tool chrome for the content area', async () => {
+    const assistantWrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello world',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(assistantWrapper.find('.message-bubble-header').exists()).toBe(true)
+    expect(assistantWrapper.find('.message-bubble-surface').exists()).toBe(true)
+
+    const toolWrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'tool-modern',
+          role: 'tool',
+          content: '',
+          timestamp: Date.now(),
+          toolName: 'terminal',
+          toolResult: '{"ok":true}',
+          toolStatus: 'done',
+        } satisfies Message,
+      },
+    })
+
+    expect(toolWrapper.find('.tool-card').exists()).toBe(true)
+    await toolWrapper.find('.tool-line').trigger('click')
+    expect(toolWrapper.find('.tool-status-badge').exists()).toBe(true)
+  })
+
+  it('expands preview-only tool messages', async () => {
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'tool-preview-only',
+          role: 'tool',
+          content: '',
+          timestamp: Date.now(),
+          toolName: 'terminal',
+          toolPreview: 'terminal npm run build',
+          toolStatus: 'done',
+        } satisfies Message,
+      },
+    })
+
+    await wrapper.find('.tool-line').trigger('click')
+
+    expect(wrapper.find('.tool-details').exists()).toBe(true)
+    expect(wrapper.find('.tool-detail-label').text()).toBe('files.preview')
+    expect(wrapper.find('.tool-details code.hljs').text()).toContain('terminal npm run build')
+  })
+
+  it('marks outbound user messages so they can be right-aligned and use palette option 5', () => {
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'user-1',
+          role: 'user',
+          content: 'please align me right',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(wrapper.find('.msg-body--outbound').exists()).toBe(true)
+    expect(wrapper.find('.msg-content--outbound').exists()).toBe(true)
+    expect(wrapper.find('.message-bubble--user').exists()).toBe(true)
+    expect(wrapper.find('.message-bubble--user-palette-5').exists()).toBe(true)
+  })
+
   it('copies tool detail code through the delegated click handler', async () => {
     const writeText = vi.mocked(navigator.clipboard.writeText)
     const wrapper = mount(MessageItem, {

@@ -323,9 +323,14 @@ function isImage(type: string): boolean {
 @use '@/styles/variables' as *;
 
 .chat-input-area {
-  padding: 12px 20px 16px;
+  padding: 14px 20px 16px;
   border-top: 1px solid $border-color;
+  background: rgba(0, 0, 0, 0.025);
   flex-shrink: 0;
+
+  .dark & {
+    background: rgba(0, 0, 0, 0.18);
+  }
 }
 
 .approval-slot {
@@ -462,18 +467,29 @@ function isImage(type: string): boolean {
   display: flex;
   align-items: center;
   gap: 10px;
-  background-color: $bg-input;
-  border: 1px solid $border-color;
-  border-radius: $radius-md;
-  padding: 10px 12px;
-  transition: border-color $transition-fast, background-color $transition-fast;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  padding: 11px 12px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+  transition: border-color $transition-fast, background-color $transition-fast, box-shadow $transition-fast;
 
   &:focus-within {
     border-color: $accent-primary;
+    background: $bg-input;
+    box-shadow: 0 0 0 3px rgba(var(--accent-primary-rgb), 0.08);
   }
 
   .dark & {
-    background-color: #333333;
+    background: #262626;
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.22);
+
+    &:focus-within {
+      background: #2b2b2b;
+      border-color: rgba(255, 255, 255, 0.24);
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.055);
+    }
   }
 }
 

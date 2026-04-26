@@ -12,7 +12,9 @@ vi.mock('@/api/hermes/conversations', () => mockConversationsApi)
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
+      if (key === 'chat.visibleMessages' && params?.count != null) return `${params.count} visible`
       if (key === 'chat.linkedSessions' && params?.count != null) return `${params.count} linked`
+      if (key === 'chat.branchSessions' && params?.count != null) return `${params.count} branches`
       return key
     },
   }),
@@ -114,6 +116,9 @@ describe('ConversationMonitorPane', () => {
     expect(wrapper.text()).toContain('First conversation')
     expect(wrapper.text()).toContain('hello')
     expect(wrapper.text()).toContain('world')
+    expect(wrapper.text()).toContain('2 visible')
+    expect(wrapper.text()).toContain('1 linked')
+    expect(wrapper.text()).toContain('0 branches')
   })
 
   it('ignores stale detail responses when selection changes quickly', async () => {
@@ -170,6 +175,25 @@ describe('ConversationMonitorPane', () => {
     await flushPromises()
     wrapper.unmount()
 
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1)
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back to summary counts while detail is missing branch stats', async () => {
+    mockConversationsApi.fetchConversationDetail.mockResolvedValueOnce({
+      session_id: 'conv-1',
+      visible_count: 2,
+      thread_session_count: 1,
+      messages: [],
+    })
+
+    const wrapper = mount(ConversationMonitorPane, {
+      props: { humanOnly: true },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('2 visible')
+    expect(wrapper.text()).toContain('1 linked')
+    expect(wrapper.text()).toContain('0 branches')
   })
 })

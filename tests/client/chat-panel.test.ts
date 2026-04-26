@@ -8,6 +8,8 @@ const mockChatStore = vi.hoisted(() => ({
   activeSession: null as Record<string, any> | null,
   isLoadingSessions: false,
   isSessionLive: vi.fn((sessionId: string) => sessionId === 'discord-active'),
+  sessionBranches: vi.fn(() => []),
+  sessionBranchCount: vi.fn(() => 0),
   newChat: vi.fn(),
   switchSession: vi.fn(),
   deleteSession: vi.fn(),

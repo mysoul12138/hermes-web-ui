@@ -117,6 +117,72 @@ function textFromRunEvent(evt: RunEvent): string {
   return ''
 }
 
+function stringifyToolPayload(value: unknown): string | undefined {
+  if (value == null) return undefined
+  if (typeof value === 'string') return value.trim() ? value : undefined
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function pickToolArgs(evt: RunEvent): string | undefined {
+  return stringifyToolPayload(
+    evt.arguments ??
+    evt.args ??
+    evt.parameters ??
+    evt.input ??
+    evt.command ??
+    evt.context,
+  )
+}
+
+function pickToolResult(evt: RunEvent): string | undefined {
+  const direct = stringifyToolPayload(
+    evt.result ??
+    evt.output ??
+    evt.content ??
+    evt.message ??
+    evt.summary,
+  )
+  if (direct) return direct
+
+  const details: Record<string, unknown> = {}
+  for (const key of ['stdout', 'stderr', 'exit_code', 'status', 'duration', 'duration_seconds', 'error']) {
+    if (evt[key] != null) details[key] = evt[key]
+  }
+  return Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
+}
+
+function toolEventDetails(evt: RunEvent): string | undefined {
+  const details: Record<string, unknown> = {}
+  for (const key of [
+    'tool',
+    'name',
+    'preview',
+    'context',
+    'command',
+    'duration',
+    'duration_seconds',
+    'timestamp',
+    'status',
+    'stdout',
+    'stderr',
+    'exit_code',
+  ]) {
+    if (evt[key] != null) details[key] = evt[key]
+  }
+  return Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
+}
+
+function mergeToolResult(previous: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return previous
+  if (!previous) return next
+  if (previous.includes(next)) return previous
+  return `${previous}\n\n${next}`
+}
+
 function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
   const r = reasoningText.trim()
   const c = assistantContent.trim()
@@ -1303,6 +1369,7 @@ export const useChatStore = defineStore('chat', () => {
             break
           }
 
+          case 'tool.start':
           case 'tool.started': {
             runHadToolActivity = true
             const msgs = getSessionMsgs(sid)
@@ -1315,8 +1382,9 @@ export const useChatStore = defineStore('chat', () => {
               role: 'tool',
               content: '',
               timestamp: Date.now(),
-              toolName: evt.tool || evt.name,
-              toolPreview: evt.preview,
+              toolName: evt.tool || evt.name || evt.tool_name,
+              toolPreview: evt.preview || evt.tool_preview,
+              toolArgs: pickToolArgs(evt) || toolEventDetails(evt),
               toolStatus: 'running',
             }
             addMessage(sid, toolMessage)
@@ -1325,6 +1393,24 @@ export const useChatStore = defineStore('chat', () => {
             break
           }
 
+          case 'tool.progress': {
+            runHadToolActivity = true
+            const msgs = getSessionMsgs(sid)
+            const toolMsgs = msgs.filter(
+              m => m.role === 'tool' && m.toolStatus === 'running',
+            )
+            if (toolMsgs.length > 0) {
+              const last = toolMsgs[toolMsgs.length - 1]
+              updateMessage(sid, last.id, {
+                toolPreview: last.toolPreview || evt.preview || evt.tool_preview,
+                toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+              })
+            }
+            schedulePersist()
+            break
+          }
+
+          case 'tool.complete':
           case 'tool.completed': {
             runHadToolActivity = true
             const msgs = getSessionMsgs(sid)
@@ -1333,7 +1419,11 @@ export const useChatStore = defineStore('chat', () => {
             )
             if (toolMsgs.length > 0) {
               const last = toolMsgs[toolMsgs.length - 1]
-              updateMessage(sid, last.id, { toolStatus: 'done' })
+              updateMessage(sid, last.id, {
+                toolStatus: 'done',
+                toolPreview: last.toolPreview || evt.preview || evt.tool_preview,
+                toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+              })
             }
             if (approvalsBySession.value[sid]?.pending?._optimistic) {
               clearApproval(sid)

@@ -31,6 +31,7 @@ export interface SteerSessionResponse {
 
 // SSE event types from /v1/runs/{id}/events
 export interface RunEvent {
+  [key: string]: unknown
   event: string
   run_id?: string
   delta?: string
@@ -43,6 +44,18 @@ export interface RunEvent {
   tool?: string
   name?: string
   preview?: string
+  arguments?: unknown
+  args?: unknown
+  parameters?: unknown
+  input?: unknown
+  context?: unknown
+  result?: unknown
+  /** Final response text on `run.completed`. May be empty/null if the agent
+   * silently swallowed an upstream error — see chat store for fallback. */
+  output?: string | null
+  stdout?: unknown
+  stderr?: unknown
+  exit_code?: unknown
   timestamp?: number
   error?: string
   approval_id?: string
@@ -71,9 +84,6 @@ export interface RunEvent {
   api_calls?: number
   cost_usd?: number
   duration_seconds?: number
-  /** Final response text on `run.completed`. May be empty/null if the agent
-   * silently swallowed an upstream error — see chat store for fallback. */
-  output?: string | null
   usage?: {
     input_tokens: number
     output_tokens: number
@@ -114,6 +124,7 @@ const NAMED_RUN_EVENTS = [
   'reasoning.complete',
   'thinking.complete',
   'tool.started',
+  'tool.progress',
   'tool.completed',
   'tool.start',
   'tool.complete',

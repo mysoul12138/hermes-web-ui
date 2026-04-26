@@ -23,6 +23,9 @@ let detailRequestId = 0
 
 const selectedSession = computed(() => sessions.value.find(session => session.id === selectedSessionId.value) || null)
 const branchRows = computed(() => flattenBranches(detail.value?.branches || []))
+const visibleMessageCount = computed(() => detail.value?.visible_count ?? selectedSession.value?.message_count ?? 0)
+const linkedSessionCount = computed(() => detail.value?.thread_session_count ?? selectedSession.value?.thread_session_count ?? 1)
+const branchSessionCount = computed(() => detail.value?.branch_session_count ?? selectedSession.value?.branch_session_count ?? 0)
 
 function roleLabel(role: string): string {
   return role === 'user' ? t('chat.monitorRoleUser') : t('chat.monitorRoleAssistant')
@@ -166,11 +169,11 @@ onUnmounted(() => {
           <span>·</span>
           <span>{{ selectedSession.model }}</span>
           <span>·</span>
-          <span>{{ linkedSessionsLabel(selectedSession.thread_session_count) }}</span>
-          <template v-if="detail?.branch_session_count">
-            <span>·</span>
-            <span>{{ t('chat.branchSessions', { count: detail.branch_session_count }) }}</span>
-          </template>
+          <span>{{ t('chat.visibleMessages', { count: visibleMessageCount }) }}</span>
+          <span>·</span>
+          <span>{{ linkedSessionsLabel(linkedSessionCount) }}</span>
+          <span>·</span>
+          <span>{{ t('chat.branchSessions', { count: branchSessionCount }) }}</span>
         </div>
       </header>
 

@@ -292,6 +292,55 @@ describe('Chat Store', () => {
     )
   })
 
+  it('captures live tool payloads so tool cards can expand details', async () => {
+    const store = useChatStore()
+
+    await flushPromises()
+    await store.sendMessage('run tests')
+    await flushPromises()
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    expect(typeof onEvent).toBe('function')
+
+    onEvent({
+      event: 'tool.started',
+      tool: 'terminal',
+      preview: 'npm run test',
+      arguments: { command: 'npm run test' },
+    })
+
+    let toolMessage = store.messages.find(m => m.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolPreview: 'npm run test',
+      toolStatus: 'running',
+      toolArgs: JSON.stringify({ command: 'npm run test' }),
+    })
+
+    onEvent({
+      event: 'tool.progress',
+      tool: 'terminal',
+      stdout: 'running tests',
+    })
+
+    toolMessage = store.messages.find(m => m.role === 'tool')
+    expect(toolMessage?.toolResult).toBe(JSON.stringify({ stdout: 'running tests' }))
+
+    onEvent({
+      event: 'tool.completed',
+      tool: 'terminal',
+      stdout: 'all passed',
+      exit_code: 0,
+    })
+
+    toolMessage = store.messages.find(m => m.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolStatus: 'done',
+    })
+    expect(toolMessage?.toolResult).toContain(JSON.stringify({ stdout: 'running tests' }))
+    expect(toolMessage?.toolResult).toContain(JSON.stringify({ stdout: 'all passed', exit_code: 0 }))
+  })
+
   it('queues busy input and sends it after the current run completes', async () => {
     const settings = useSettingsStore()
     settings.display.busy_input_mode = 'interrupt'

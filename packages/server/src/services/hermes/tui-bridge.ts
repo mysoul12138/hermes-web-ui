@@ -21,6 +21,14 @@ export interface BridgeRunEvent {
   error?: string
   tool?: string
   preview?: string
+  arguments?: unknown
+  args?: unknown
+  input?: unknown
+  context?: unknown
+  result?: unknown
+  stdout?: unknown
+  stderr?: unknown
+  exit_code?: unknown
   duration?: number
   approval_id?: string
   description?: string
@@ -147,6 +155,36 @@ function normalizeSteerResult(result: { status?: string, text?: string } | null 
     status: result?.status || 'unknown',
     text: result?.text || text,
   }
+}
+
+function toolPayloadFields(payload: Record<string, any>): Record<string, unknown> {
+  const fields: Record<string, unknown> = {}
+  for (const key of [
+    'arguments',
+    'args',
+    'input',
+    'context',
+    'command',
+    'result',
+    'output',
+    'stdout',
+    'stderr',
+    'exit_code',
+    'duration_s',
+    'status',
+    'summary',
+    'message',
+    'content',
+  ]) {
+    if (payload[key] !== undefined && payload[key] !== null) fields[key] = payload[key]
+  }
+  if (fields.arguments === undefined) {
+    fields.arguments = payload.args ?? payload.input ?? payload.command
+  }
+  if (fields.result === undefined) {
+    fields.result = payload.result ?? payload.output ?? payload.stdout ?? payload.stderr
+  }
+  return fields
 }
 
 class TuiGatewayClient extends EventEmitter {
@@ -626,9 +664,19 @@ export class TuiBridgeService {
           timestamp,
           tool: payload.name,
           preview: payload.preview || payload.context || payload.name,
+          ...toolPayloadFields(payload),
         })
         break
       case 'tool.progress':
+        this.push(runId, {
+          event: 'tool.progress',
+          run_id: runId,
+          timestamp,
+          tool: payload.name,
+          preview: payload.preview || payload.context || payload.name,
+          ...toolPayloadFields(payload),
+        })
+        this.scheduleIdleHeartbeat(runId)
         break
       case 'tool.complete':
         this.push(runId, {
@@ -637,6 +685,7 @@ export class TuiBridgeService {
           timestamp,
           tool: payload.name,
           duration: typeof payload.duration_s === 'number' ? payload.duration_s : undefined,
+          ...toolPayloadFields(payload),
         })
         this.scheduleIdleHeartbeat(runId)
         break

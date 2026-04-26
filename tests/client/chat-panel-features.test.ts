@@ -10,6 +10,8 @@ const mockChatStore = vi.hoisted(() => ({
   isLoadingSessions: false,
   sessionsLoaded: true,
   isSessionLive: vi.fn((sessionId: string) => sessionId === 'discord-active'),
+  sessionBranches: vi.fn(() => []),
+  sessionBranchCount: vi.fn(() => 0),
   newChat: vi.fn(),
   switchSession: vi.fn(),
   deleteSession: vi.fn(),
@@ -232,5 +234,43 @@ describe('ChatPanel modes and pinning', () => {
     expect(chatButtons[1].attributes('aria-pressed')).toBe('false')
     expect(wrapper.find('.session-list').classes()).not.toContain('collapsed')
     expect(wrapper.find('.chat-input-mock').exists()).toBe(true)
+  })
+
+  it('renders a richer header copy block for the modernized content area', () => {
+    const wrapper = mount(ChatPanel, {
+      global: {
+        stubs: {
+          NDropdown: NDropdownStub,
+          NInput: true,
+          NModal: true,
+          NPopconfirm: true,
+          NTooltip: true,
+          NButton: NButtonStub,
+        },
+      },
+    })
+
+    expect(wrapper.find('.chat-header-copy').exists()).toBe(true)
+    expect(wrapper.find('.chat-header-kicker').text()).toBe('chat.chatMode')
+    expect(wrapper.find('.chat-header-subtitle').text()).toContain('chat.chatMode')
+    expect(wrapper.find('.header-status-chip').text()).toBe('gpt-4o')
+  })
+
+  it('uses the same shared surface class for the session list and content area', () => {
+    const wrapper = mount(ChatPanel, {
+      global: {
+        stubs: {
+          NDropdown: NDropdownStub,
+          NInput: true,
+          NModal: true,
+          NPopconfirm: true,
+          NTooltip: true,
+          NButton: NButtonStub,
+        },
+      },
+    })
+
+    expect(wrapper.find('.session-list').classes()).toContain('chat-surface-pane')
+    expect(wrapper.find('.chat-main').classes()).toContain('chat-surface-pane')
   })
 })

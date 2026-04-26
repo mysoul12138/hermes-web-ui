@@ -42,4 +42,71 @@ describe('TuiBridgeService steer compatibility', () => {
     ])
     ;(bridge as any).closeRun('bridge_run_1')
   })
+
+  it('forwards tool arguments, progress, and result payloads to WebUI events', () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+
+    ;(bridge as any).webSessionsByBridgeSession.set('tui-session', 'web-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_tool')
+    ;(bridge as any).runs.set('bridge_run_tool', {
+      runId: 'bridge_run_tool',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+    })
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'tool.start',
+      payload: {
+        name: 'terminal',
+        preview: 'npm test',
+        arguments: { command: 'npm test' },
+      },
+    })
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'tool.progress',
+      payload: {
+        name: 'terminal',
+        stdout: 'running tests',
+      },
+    })
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'tool.complete',
+      payload: {
+        name: 'terminal',
+        stdout: 'all passed',
+        exit_code: 0,
+        duration_s: 1.2,
+      },
+    })
+
+    const events = (bridge as any).runs.get('bridge_run_tool').events
+    expect(events).toEqual([
+      expect.objectContaining({
+        event: 'tool.started',
+        tool: 'terminal',
+        preview: 'npm test',
+        arguments: { command: 'npm test' },
+      }),
+      expect.objectContaining({
+        event: 'tool.progress',
+        tool: 'terminal',
+        stdout: 'running tests',
+      }),
+      expect.objectContaining({
+        event: 'tool.completed',
+        tool: 'terminal',
+        stdout: 'all passed',
+        exit_code: 0,
+        duration: 1.2,
+      }),
+    ])
+    ;(bridge as any).closeRun('bridge_run_tool')
+  })
 })

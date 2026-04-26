@@ -134,6 +134,19 @@ const timeStr = computed(() => {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 });
 
+const showMessageHeader = computed(() => props.message.role === "assistant");
+const messageHeadTitle = computed(() => (props.message.role === "assistant" ? "Hermes" : ""));
+const messageHeadStatus = computed(() => {
+  if (props.message.role !== "assistant") return "";
+  return props.message.isStreaming ? t("chat.thinkingInProgress") : timeStr.value;
+});
+
+const toolStatusLabel = computed(() => {
+  if (props.message.toolStatus === "running") return t("jobs.status.running");
+  if (props.message.toolStatus === "error") return t("chat.error");
+  return "passed";
+});
+
 function isImage(type: string): boolean {
   return type.startsWith("image/");
 }
@@ -229,6 +242,10 @@ async function handleToolDetailClick(event: MouseEvent): Promise<void> {
     await copyTextToClipboard(fullToolArgs.value);
     return;
   }
+  if (source === "tool-preview" && fullToolPreview.value) {
+    await copyTextToClipboard(fullToolPreview.value);
+    return;
+  }
   if (source === "tool-result" && fullToolResult.value) {
     await copyTextToClipboard(fullToolResult.value);
     return;
@@ -242,16 +259,32 @@ const hasAttachments = computed(
 );
 
 const hasToolDetails = computed(
-  () => !!(props.message.toolArgs || props.message.toolResult),
+  () => !!(
+    props.message.toolArgs ||
+    props.message.toolResult ||
+    props.message.toolPreview ||
+    props.message.content
+  ),
 );
 
+const toolPreviewPayload = computed(() => formatToolPayload(props.message.toolPreview || props.message.content));
 const toolArgsPayload = computed(() => formatToolPayload(props.message.toolArgs));
 const toolResultPayload = computed(() => formatToolPayload(props.message.toolResult));
 
+const fullToolPreview = computed(() => toolPreviewPayload.value.full);
+const formattedToolPreview = computed(() => toolPreviewPayload.value.display);
 const fullToolArgs = computed(() => toolArgsPayload.value.full);
 const formattedToolArgs = computed(() => toolArgsPayload.value.display);
 const fullToolResult = computed(() => toolResultPayload.value.full);
 const formattedToolResult = computed(() => toolResultPayload.value.display);
+
+const renderedToolPreview = computed(() => {
+  if (!formattedToolPreview.value) return "";
+  return renderToolPayload(
+    formattedToolPreview.value,
+    toolPreviewPayload.value.language,
+  );
+});
 
 const renderedToolArgs = computed(() => {
   if (!formattedToolArgs.value) return "";
@@ -279,155 +312,175 @@ const renderedToolResult = computed(() => {
   >
     <template v-if="message.role === 'tool'">
       <div
-        class="tool-line"
-        :class="{ expandable: hasToolDetails }"
-        @click="hasToolDetails && (toolExpanded = !toolExpanded)"
+        class="tool-card"
+        :class="[
+          `tool-card--${message.toolStatus || 'done'}`,
+          { expandable: hasToolDetails, expanded: toolExpanded },
+        ]"
       >
-        <svg
-          v-if="hasToolDetails"
-          width="10"
-          height="10"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          class="tool-chevron"
-          :class="{ rotated: toolExpanded }"
+        <div
+          class="tool-line"
+          :class="{ expandable: hasToolDetails }"
+          @click="hasToolDetails && (toolExpanded = !toolExpanded)"
         >
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
-        <svg
-          v-else
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          class="tool-icon"
-        >
-          <path
-            d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-          />
-        </svg>
-        <span class="tool-name">{{ message.toolName }}</span>
-        <span
-          v-if="message.toolPreview && !toolExpanded"
-          class="tool-preview"
-          >{{ message.toolPreview }}</span
-        >
-        <span
-          v-if="message.toolStatus === 'running'"
-          class="tool-spinner"
-        ></span>
-        <span v-if="message.toolStatus === 'error'" class="tool-error-badge">{{
-          t("chat.error")
-        }}</span>
-      </div>
-      <div v-if="toolExpanded && hasToolDetails" class="tool-details" @click="handleToolDetailClick">
-        <div v-if="formattedToolArgs" class="tool-detail-section" data-copy-source="tool-args">
-          <div class="tool-detail-label">{{ t("chat.arguments") }}</div>
-          <div class="tool-detail-code-block" v-html="renderedToolArgs"></div>
+          <svg
+            v-if="hasToolDetails"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="tool-chevron"
+            :class="{ rotated: toolExpanded }"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+          <svg
+            v-else
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            class="tool-icon"
+          >
+            <path
+              d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+            />
+          </svg>
+          <div class="tool-summary">
+            <span class="tool-name">{{ message.toolName }}</span>
+            <span
+              v-if="message.toolPreview && !toolExpanded"
+              class="tool-preview"
+              >{{ message.toolPreview }}</span
+            >
+          </div>
+          <span class="tool-status-badge" :class="message.toolStatus || 'done'">
+            <span
+              v-if="message.toolStatus === 'running'"
+              class="tool-spinner"
+            ></span>
+            {{ toolStatusLabel }}
+          </span>
         </div>
-        <div v-if="formattedToolResult" class="tool-detail-section" data-copy-source="tool-result">
-          <div class="tool-detail-label">{{ t("chat.result") }}</div>
-          <div class="tool-detail-code-block" v-html="renderedToolResult"></div>
+        <div v-if="toolExpanded && hasToolDetails" class="tool-details" @click="handleToolDetailClick">
+          <div v-if="formattedToolPreview" class="tool-detail-section" data-copy-source="tool-preview">
+            <div class="tool-detail-label">{{ t("files.preview") }}</div>
+            <div class="tool-detail-code-block" v-html="renderedToolPreview"></div>
+          </div>
+          <div v-if="formattedToolArgs" class="tool-detail-section" data-copy-source="tool-args">
+            <div class="tool-detail-label">{{ t("chat.arguments") }}</div>
+            <div class="tool-detail-code-block" v-html="renderedToolArgs"></div>
+          </div>
+          <div v-if="formattedToolResult" class="tool-detail-section" data-copy-source="tool-result">
+            <div class="tool-detail-label">{{ t("chat.result") }}</div>
+            <div class="tool-detail-code-block" v-html="renderedToolResult"></div>
+          </div>
         </div>
       </div>
     </template>
     <template v-else>
-      <div class="msg-body">
+      <div class="msg-body" :class="{ 'msg-body--outbound': message.role === 'user' }">
         <img
           v-if="message.role === 'assistant'"
           :src="assistantAvatarUrl"
           alt="Hermes"
           class="msg-avatar"
         />
-        <div class="msg-content" :class="message.role">
-          <div class="message-bubble" :class="{ system: isSystem }">
-            <div v-if="hasAttachments" class="msg-attachments">
-              <div
-                v-for="att in message.attachments"
-                :key="att.id"
-                class="msg-attachment"
-                :class="{ image: isImage(att.type) }"
-              >
-                <template v-if="isImage(att.type) && att.url">
-                  <img
-                    :src="att.url"
-                    :alt="att.name"
-                    class="msg-attachment-thumb"
-                    @click="previewUrl = att.url"
-                  />
-                </template>
-                <template v-else>
-                  <div class="msg-attachment-file" @click="handleAttachmentDownload(att)" style="cursor: pointer;" :title="t('download.downloadFile')">
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    >
-                      <path
-                        d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                      />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                    <span class="att-name">{{ att.name }}</span>
-                    <span class="att-size">{{ formatSize(att.size) }}</span>
-                    <svg class="att-download-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                  </div>
-                </template>
-              </div>
+        <div class="msg-content" :class="[message.role, { 'msg-content--outbound': message.role === 'user' }]">
+          <div class="message-bubble" :class="{ system: isSystem, 'has-header': showMessageHeader, 'message-bubble--user': message.role === 'user', 'message-bubble--user-palette-5': message.role === 'user' }">
+            <div v-if="showMessageHeader" class="message-bubble-header">
+              <span class="message-bubble-name">{{ messageHeadTitle }}</span>
+              <span class="message-bubble-status">{{ messageHeadStatus }}</span>
             </div>
-            <div
-              v-if="hasThinking"
-              class="thinking-block"
-              :class="{ expanded: thinkingExpanded }"
-            >
-              <div class="thinking-header" @click="toggleThinking">
-                <svg
-                  width="10"
-                  height="10"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  class="thinking-chevron"
-                  :class="{ rotated: thinkingExpanded }"
+            <div class="message-bubble-surface">
+              <div v-if="hasAttachments" class="msg-attachments">
+                <div
+                  v-for="att in message.attachments"
+                  :key="att.id"
+                  class="msg-attachment"
+                  :class="{ image: isImage(att.type) }"
                 >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-                <span class="thinking-icon">💭</span>
-                <span class="thinking-label">
-                  {{
-                    thinkingStreamingNow
-                      ? t('chat.thinkingInProgress')
-                      : t('chat.thinkingLabel')
-                  }}
-                </span>
-                <span v-if="thinkingDurationMs !== null && thinkingDurationMs > 0" class="thinking-meta">
-                  · {{ t('chat.thinkingDuration', { duration: formatDuration(thinkingDurationMs) }) }}
-                </span>
-                <span class="thinking-meta">
-                  · {{ t('chat.thinkingChars', { count: thinkingCharCount }) }}
-                </span>
+                  <template v-if="isImage(att.type) && att.url">
+                    <img
+                      :src="att.url"
+                      :alt="att.name"
+                      class="msg-attachment-thumb"
+                      @click="previewUrl = att.url"
+                    />
+                  </template>
+                  <template v-else>
+                    <div class="msg-attachment-file" @click="handleAttachmentDownload(att)" style="cursor: pointer;" :title="t('download.downloadFile')">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                      >
+                        <path
+                          d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                        />
+                        <polyline points="14 2 14 8 20 8" />
+                      </svg>
+                      <span class="att-name">{{ att.name }}</span>
+                      <span class="att-size">{{ formatSize(att.size) }}</span>
+                      <svg class="att-download-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                    </div>
+                  </template>
+                </div>
               </div>
-              <div v-if="thinkingExpanded" class="thinking-body">
-                <MarkdownRenderer :content="thinkingFullText" />
+              <div
+                v-if="hasThinking"
+                class="thinking-block"
+                :class="{ expanded: thinkingExpanded }"
+              >
+                <div class="thinking-header" @click="toggleThinking">
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    class="thinking-chevron"
+                    :class="{ rotated: thinkingExpanded }"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span class="thinking-icon">💭</span>
+                  <span class="thinking-label">
+                    {{
+                      thinkingStreamingNow
+                        ? t('chat.thinkingInProgress')
+                        : t('chat.thinkingLabel')
+                    }}
+                  </span>
+                  <span v-if="thinkingDurationMs !== null && thinkingDurationMs > 0" class="thinking-meta">
+                    · {{ t('chat.thinkingDuration', { duration: formatDuration(thinkingDurationMs) }) }}
+                  </span>
+                  <span class="thinking-meta">
+                    · {{ t('chat.thinkingChars', { count: thinkingCharCount }) }}
+                  </span>
+                </div>
+                <div v-if="thinkingExpanded" class="thinking-body">
+                  <MarkdownRenderer :content="thinkingFullText" />
+                </div>
               </div>
+              <MarkdownRenderer
+                v-if="parsedThinking.body"
+                :content="parsedThinking.body"
+                :class="{ 'with-streaming-cursor': showStreamingCursor }"
+              />
             </div>
-            <MarkdownRenderer
-              v-if="parsedThinking.body"
-              :content="parsedThinking.body"
-              :class="{ 'with-streaming-cursor': showStreamingCursor }"
-            />
           </div>
           <div class="message-time">
             <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
@@ -456,7 +509,7 @@ const renderedToolResult = computed(() => {
     align-items: flex-end;
 
     .msg-body {
-      max-width: 75%;
+      max-width: min(100%, 760px);
     }
 
     .msg-content.user {
@@ -464,30 +517,41 @@ const renderedToolResult = computed(() => {
     }
 
     .message-bubble {
-      background-color: $msg-user-bg;
-      border-radius: 10px;
+      border: 1px solid rgba(59, 130, 246, 0.20);
+      background: linear-gradient(
+        180deg,
+        rgba(214, 239, 255, 0.74) 0%,
+        rgba(147, 197, 253, 0.56) 50%,
+        rgba(59, 130, 246, 0.34) 100%
+      );
+      box-shadow: 0 1px 0 rgba(59, 130, 246, 0.05);
+
+      .dark & {
+        border-color: rgba(96, 165, 250, 0.34);
+        background: linear-gradient(
+          180deg,
+          rgba(96, 165, 250, 0.22) 0%,
+          rgba(59, 130, 246, 0.22) 50%,
+          rgba(37, 99, 235, 0.20) 100%
+        );
+        box-shadow: 0 1px 0 rgba(59, 130, 246, 0.11);
+      }
+    }
+
+    .message-bubble-surface {
+      color: $text-primary;
+
+      .dark & {
+        color: #f8fafc;
+      }
     }
   }
 
   &.assistant {
-    flex-direction: row;
     align-items: flex-start;
-    gap: 8px;
 
     .msg-body {
-      max-width: 80%;
-    }
-
-    .msg-avatar {
-      width: 40px;
-      height: 40px;
-      flex-shrink: 0;
-      margin-top: 2px;
-    }
-
-    .message-bubble {
-      background-color: $msg-assistant-bg;
-      border-radius: 10px;
+      max-width: min(100%, 840px);
     }
   }
 
@@ -498,16 +562,19 @@ const renderedToolResult = computed(() => {
   &.system {
     align-items: flex-start;
 
+    .msg-body {
+      max-width: min(100%, 760px);
+    }
+
     .message-bubble.system {
       border-left: 3px solid $warning;
-      border-radius: $radius-sm;
-      max-width: 80%;
       background-color: rgba(var(--warning-rgb), 0.06);
     }
   }
 
   &.highlight {
-    .message-bubble {
+    .message-bubble,
+    .tool-card {
       box-shadow: 0 0 0 1px rgba(var(--accent-primary-rgb), 0.45);
     }
   }
@@ -521,8 +588,28 @@ const renderedToolResult = computed(() => {
 .msg-body {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  max-width: 85%;
+  gap: 10px;
+  width: 100%;
+}
+
+.msg-body--outbound {
+  justify-content: flex-end;
+}
+
+.msg-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.04);
+  object-fit: cover;
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+  }
 }
 
 .msg-content {
@@ -531,36 +618,98 @@ const renderedToolResult = computed(() => {
   min-width: 0;
 }
 
+.msg-content--outbound {
+  align-items: flex-end;
+  margin-left: auto;
+}
+
 .message-bubble {
-  padding: 10px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  }
+}
+
+.message-bubble--user {
+  backdrop-filter: saturate(0.92);
+}
+
+.message-bubble--user-palette-5 {
+  backdrop-filter: saturate(1.02);
+}
+
+.message-bubble-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  background: rgba(0, 0, 0, 0.015);
+  color: $text-muted;
+  font-size: 11px;
+
+  .dark & {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: #9aa0a6;
+  }
+}
+
+.message-bubble-name {
+  color: $text-secondary;
+  font-weight: 650;
+
+  .dark & {
+    color: #d2d6dc;
+  }
+}
+
+.message-bubble-status {
+  white-space: nowrap;
+}
+
+.message-bubble-surface {
+  padding: 12px 14px;
   font-size: 14px;
-  line-height: 1.65;
+  line-height: 1.7;
   word-break: break-word;
-  border-radius: 10px;
 }
 
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .msg-attachment {
-  border-radius: $radius-sm;
+  border-radius: 10px;
   overflow: hidden;
-  background-color: rgba(0, 0, 0, 0.04);
-  border: 1px solid $border-light;
+  background-color: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+
+  .dark & {
+    background-color: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
 
   &.image {
-    max-width: 200px;
+    max-width: 220px;
   }
 }
 
 .msg-attachment-thumb {
   display: block;
-  max-width: 200px;
-  max-height: 160px;
+  max-width: 220px;
+  max-height: 180px;
   object-fit: contain;
   cursor: pointer;
 }
@@ -569,7 +718,7 @@ const renderedToolResult = computed(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   font-size: 12px;
   color: $text-secondary;
 
@@ -588,23 +737,43 @@ const renderedToolResult = computed(() => {
 }
 
 .thinking-block {
-  margin-bottom: 8px;
-  padding: 4px 0;
-  border-bottom: 1px dashed $border-light;
+  margin-bottom: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.035);
+  }
 
   .thinking-header {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    flex-wrap: wrap;
+    font-size: 12px;
     color: $text-muted;
     cursor: pointer;
-    padding: 2px 4px;
-    border-radius: $radius-sm;
+    padding: 8px 10px;
     user-select: none;
+    border-bottom: 1px solid transparent;
 
     &:hover {
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 0, 0, 0.02);
+
+      .dark & {
+        background: rgba(255, 255, 255, 0.02);
+      }
+    }
+  }
+
+  &.expanded .thinking-header {
+    border-bottom-color: rgba(0, 0, 0, 0.05);
+
+    .dark & {
+      border-bottom-color: rgba(255, 255, 255, 0.08);
     }
   }
 
@@ -623,8 +792,13 @@ const renderedToolResult = computed(() => {
   }
 
   .thinking-label {
-    font-weight: 500;
+    font-weight: 600;
     flex-shrink: 0;
+    color: $text-secondary;
+
+    .dark & {
+      color: #d2d6dc;
+    }
   }
 
   .thinking-meta {
@@ -633,21 +807,24 @@ const renderedToolResult = computed(() => {
   }
 
   .thinking-body {
-    margin-top: 6px;
-    padding: 6px 10px;
-    border-left: 2px solid $border-light;
+    padding: 9px 10px;
     font-size: 13px;
-    opacity: 0.85;
-    font-style: italic;
+    color: $text-secondary;
 
-    :deep(p) { margin: 0.3em 0; }
+    .dark & {
+      color: #cdd1d6;
+    }
+
+    :deep(p) {
+      margin: 0.3em 0;
+    }
   }
 }
 
 .message-time {
   font-size: 11px;
   color: $text-muted;
-  margin-top: 4px;
+  margin-top: 5px;
   padding: 0 4px;
 
   .dark & {
@@ -666,33 +843,101 @@ const renderedToolResult = computed(() => {
   font-size: 10px;
 }
 
+.tool-card {
+  width: min(100%, 820px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  }
+}
+
 .tool-line {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 10px;
+  font-size: 12px;
   color: $text-muted;
-  padding: 2px 4px;
-  border-radius: $radius-sm;
+  padding: 10px 12px;
 
   &.expandable {
     cursor: pointer;
 
     &:hover {
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 0, 0, 0.02);
+
+      .dark & {
+        background: rgba(255, 255, 255, 0.02);
+      }
+    }
+  }
+}
+
+.tool-summary {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-name {
+  font-family: $font-code;
+  flex-shrink: 0;
+  color: $text-secondary;
+
+  .dark & {
+    color: #e5e7eb;
+  }
+}
+
+.tool-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: $text-muted;
+}
+
+.tool-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+
+  &.done {
+    color: #15803d;
+    background: rgba(74, 222, 128, 0.14);
+
+    .dark & {
+      color: #86efac;
+      background: rgba(74, 222, 128, 0.14);
     }
   }
 
-  .tool-name {
-    font-family: $font-code;
-    flex-shrink: 0;
+  &.error {
+    color: $error;
+    background: rgba(var(--error-rgb), 0.14);
   }
 
-  .tool-preview {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 400px;
+  &.running {
+    color: #b45309;
+    background: rgba(251, 191, 36, 0.18);
+
+    .dark & {
+      color: #fde68a;
+      background: rgba(251, 191, 36, 0.16);
+    }
   }
 }
 
@@ -708,40 +953,37 @@ const renderedToolResult = computed(() => {
 .tool-spinner {
   width: 10px;
   height: 10px;
-  border: 1.5px solid $text-muted;
+  border: 1.5px solid currentColor;
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
   flex-shrink: 0;
 }
 
-.tool-error-badge {
-  font-size: 9px;
-  color: $error;
-  background: rgba(var(--error-rgb), 0.08);
-  padding: 0 4px;
-  border-radius: 3px;
-  line-height: 14px;
-}
-
 .tool-details {
-  margin-left: 16px;
-  margin-top: 2px;
-  border-left: 2px solid $border-light;
-  padding-left: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  padding: 12px;
+
+  .dark & {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
 }
 
 .tool-detail-section {
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
 }
 
 .tool-detail-label {
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   color: $text-muted;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
-  margin-bottom: 2px;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
 }
 
 .tool-detail-code-block {
@@ -751,6 +993,10 @@ const renderedToolResult = computed(() => {
 
   :deep(.code-header) {
     background: rgba(0, 0, 0, 0.02);
+
+    .dark & {
+      background: rgba(255, 255, 255, 0.03);
+    }
   }
 
   :deep(code.hljs) {
@@ -793,19 +1039,6 @@ const renderedToolResult = computed(() => {
   }
 }
 
-@keyframes pulse {
-  0%,
-  80%,
-  100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  40% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 .image-preview-overlay {
   position: fixed;
   inset: 0;
@@ -823,17 +1056,14 @@ const renderedToolResult = computed(() => {
   object-fit: contain;
   border-radius: 4px;
 }
+
 @media (max-width: $breakpoint-mobile) {
-  .message.user .msg-body {
+  .message.user .msg-body,
+  .message.assistant .msg-body,
+  .message.system .msg-body,
+  .tool-card {
     max-width: 100%;
-  }
-
-  .message.assistant .msg-body {
-    max-width: 100%;
-  }
-
-  .message.system .msg-body {
-    max-width: 100%;
+    width: 100%;
   }
 }
 </style>
