@@ -16,6 +16,8 @@ import {
 } from "./highlight";
 
 const TOOL_PAYLOAD_DISPLAY_LIMIT = 2000;
+const USER_LONG_FORM_CHAR_THRESHOLD = 420;
+const USER_LONG_FORM_LINE_THRESHOLD = 8;
 
 const props = defineProps<{ message: Message; highlight?: boolean }>();
 const { t } = useI18n();
@@ -66,6 +68,17 @@ const parsedThinking = computed(() =>
 const showStreamingCursor = computed(() =>
   !!props.message.isStreaming && parsedThinking.value.body.trim().length > 0,
 );
+
+const isLongUserMessage = computed(() => {
+  if (props.message.role !== "user") return false;
+  const content = props.message.content || "";
+  const lineCount = content.split(/\r?\n/).length;
+  return (
+    content.length >= USER_LONG_FORM_CHAR_THRESHOLD ||
+    lineCount >= USER_LONG_FORM_LINE_THRESHOLD ||
+    /```|<pre\b|<code\b/i.test(content)
+  );
+});
 
 // 优先使用来自 reasoning 字段/事件的思考文本；否则回退到从 content 解析的 <think> 标签。
 // 若两者共存，则拼接展示（罕见，但保持信息不丢）。
@@ -402,7 +415,13 @@ const renderedToolResult = computed(() => {
       </div>
     </template>
     <template v-else>
-      <div class="msg-body" :class="{ 'msg-body--outbound': message.role === 'user' }">
+      <div
+        class="msg-body"
+        :class="{
+          'msg-body--outbound': message.role === 'user',
+          'msg-body--long-user': isLongUserMessage,
+        }"
+      >
         <img
           v-if="message.role === 'assistant'"
           :src="assistantAvatarUrl"
@@ -410,7 +429,16 @@ const renderedToolResult = computed(() => {
           class="msg-avatar"
         />
         <div class="msg-content" :class="[message.role, { 'msg-content--outbound': message.role === 'user' }]">
-          <div class="message-bubble" :class="{ system: isSystem, 'has-header': showMessageHeader, 'message-bubble--user': message.role === 'user', 'message-bubble--user-palette-5': message.role === 'user' }">
+          <div
+            class="message-bubble"
+            :class="{
+              system: isSystem,
+              'has-header': showMessageHeader,
+              'message-bubble--user': message.role === 'user',
+              'message-bubble--user-palette-5': message.role === 'user',
+              'message-bubble--user-long': isLongUserMessage,
+            }"
+          >
             <div v-if="showMessageHeader" class="message-bubble-header">
               <span class="message-bubble-name">{{ messageHeadTitle }}</span>
               <span class="message-bubble-status">{{ messageHeadStatus }}</span>
@@ -540,6 +568,10 @@ const renderedToolResult = computed(() => {
 
     .msg-body {
       max-width: min(100%, 760px);
+
+      &.msg-body--long-user {
+        max-width: min(100%, 860px);
+      }
     }
 
     .msg-content.user {
@@ -547,32 +579,52 @@ const renderedToolResult = computed(() => {
     }
 
     .message-bubble {
-      border: 1px solid rgba(59, 130, 246, 0.20);
+      border: 1px solid rgba(37, 99, 235, 0.22);
       background: linear-gradient(
         180deg,
-        rgba(214, 239, 255, 0.74) 0%,
-        rgba(147, 197, 253, 0.56) 50%,
-        rgba(59, 130, 246, 0.34) 100%
+        rgba(37, 99, 235, 0.95) 0%,
+        rgba(30, 86, 205, 0.95) 100%
       );
-      box-shadow: 0 1px 0 rgba(59, 130, 246, 0.05);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
 
       .dark & {
-        border-color: rgba(96, 165, 250, 0.34);
+        border-color: rgba(37, 99, 235, 0.22);
         background: linear-gradient(
           180deg,
-          rgba(96, 165, 250, 0.22) 0%,
-          rgba(59, 130, 246, 0.22) 50%,
-          rgba(37, 99, 235, 0.20) 100%
+          rgba(37, 99, 235, 0.95) 0%,
+          rgba(30, 86, 205, 0.95) 100%
         );
-        box-shadow: 0 1px 0 rgba(59, 130, 246, 0.11);
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
       }
     }
 
     .message-bubble-surface {
-      color: $text-primary;
+      color: #f4f4f5;
 
       .dark & {
-        color: #f8fafc;
+        color: #f4f4f5;
+      }
+    }
+
+    .message-bubble--user-long {
+      border-color: rgba(37, 99, 235, 0.22);
+      border-left: 3px solid rgba(37, 99, 235, 0.88);
+      background: rgba(248, 250, 252, 0.92);
+      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+
+      .message-bubble-surface {
+        color: $text-primary;
+      }
+
+      .dark & {
+        border-color: rgba(255, 255, 255, 0.10);
+        border-left-color: rgba(37, 99, 235, 0.95);
+        background: rgba(47, 47, 47, 0.96);
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.16);
+
+        .message-bubble-surface {
+          color: #f4f4f5;
+        }
       }
     }
   }
