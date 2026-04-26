@@ -23,6 +23,7 @@ const toast = useMessage();
 
 const isSystem = computed(() => props.message.role === "system");
 const toolExpanded = ref(false);
+const previewUrl = ref<string | null>(null);
 
 const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
@@ -352,6 +353,7 @@ const renderedToolResult = computed(() => {
                     :src="att.url"
                     :alt="att.name"
                     class="msg-attachment-thumb"
+                    @click="previewUrl = att.url"
                   />
                 </template>
                 <template v-else>
@@ -433,6 +435,11 @@ const renderedToolResult = computed(() => {
       </div>
     </template>
   </div>
+  <Teleport to="body">
+    <div v-if="previewUrl" class="image-preview-overlay" @click.self="previewUrl = null">
+      <img :src="previewUrl" class="image-preview-img" @click="previewUrl = null" />
+    </div>
+  </Teleport>
 </template>
 
 <style scoped lang="scss">
@@ -552,6 +559,7 @@ const renderedToolResult = computed(() => {
   max-width: 200px;
   max-height: 160px;
   object-fit: contain;
+  cursor: pointer;
 }
 
 .msg-attachment-file {
@@ -778,6 +786,36 @@ const renderedToolResult = computed(() => {
   }
 }
 
+@keyframes pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.image-preview-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
 @media (max-width: $breakpoint-mobile) {
   .message.user .msg-body {
     max-width: 100%;
