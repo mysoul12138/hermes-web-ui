@@ -121,6 +121,15 @@ function stringifyToolPayload(value: unknown): string | undefined {
   }
 }
 
+function commandFromToolPayload(value: unknown): string | undefined {
+  if (value == null) return undefined
+  if (typeof value === 'string') return value.trim() ? value.trim() : undefined
+  if (typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  const command = record.command ?? record.cmd
+  return typeof command === 'string' && command.trim() ? command.trim() : undefined
+}
+
 function pickToolArgs(evt: RunEvent): string | undefined {
   return stringifyToolPayload(
     evt.arguments ??
@@ -129,6 +138,18 @@ function pickToolArgs(evt: RunEvent): string | undefined {
     evt.input ??
     evt.command,
   )
+}
+
+function pickToolPreview(evt: RunEvent): string | undefined {
+  return commandFromToolPayload(evt.command) ||
+    commandFromToolPayload(evt.arguments) ||
+    commandFromToolPayload(evt.args) ||
+    commandFromToolPayload(evt.parameters) ||
+    commandFromToolPayload(evt.input) ||
+    stringifyToolPayload(evt.command) ||
+    stringifyToolPayload(evt.preview) ||
+    stringifyToolPayload(evt.tool_preview) ||
+    stringifyToolPayload(evt.context)
 }
 
 function pickToolResult(evt: RunEvent): string | undefined {
@@ -197,6 +218,20 @@ function mergeToolResult(previous: string | undefined, next: string | undefined)
   if (!previous) return next
   if (previous.includes(next)) return previous
   return `${previous}\n\n${next}`
+}
+
+function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number } | null | undefined) {
+  if (!session || !usage) return
+  const currentInput = session.inputTokens ?? 0
+  const currentOutput = session.outputTokens ?? 0
+  const currentTotal = currentInput + currentOutput
+  const nextInput = usage.input_tokens ?? 0
+  const nextOutput = usage.output_tokens ?? 0
+  const nextTotal = nextInput + nextOutput
+  if (nextTotal > 0 && (currentTotal === 0 || nextTotal >= currentTotal)) {
+    session.inputTokens = nextInput
+    session.outputTokens = nextOutput
+  }
 }
 
 function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
@@ -1180,6 +1215,7 @@ export const useChatStore = defineStore('chat', () => {
         target.messages = withLocalSteeredMessages(mapped, target.messages)
         persistActiveMessages()
       }
+      applySessionUsage(target, detail)
       void refreshSessionBranches(sid)
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, target.messages)
@@ -1382,7 +1418,7 @@ export const useChatStore = defineStore('chat', () => {
               content: '',
               timestamp: Date.now(),
               toolName: evt.tool || evt.name || evt.tool_name,
-              toolPreview: evt.preview || evt.tool_preview,
+              toolPreview: pickToolPreview(evt),
               toolArgs: pickToolArgs(evt),
               toolStatus: 'running',
             }
@@ -1400,7 +1436,7 @@ export const useChatStore = defineStore('chat', () => {
             if (toolMsgs.length > 0) {
               const last = toolMsgs[toolMsgs.length - 1]
               updateMessage(sid, last.id, {
-                toolPreview: last.toolPreview || evt.preview || evt.tool_preview,
+                toolPreview: last.toolPreview || pickToolPreview(evt),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
               })
             }
@@ -1419,7 +1455,7 @@ export const useChatStore = defineStore('chat', () => {
               const last = toolMsgs[toolMsgs.length - 1]
               updateMessage(sid, last.id, {
                 toolStatus: 'done',
-                toolPreview: last.toolPreview || evt.preview || evt.tool_preview,
+                toolPreview: last.toolPreview || pickToolPreview(evt),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
               })
             }
@@ -1438,10 +1474,7 @@ export const useChatStore = defineStore('chat', () => {
             }
             if (evt.usage) {
               const target = sessions.value.find(s => s.id === sid)
-              if (target) {
-                target.inputTokens = evt.usage.input_tokens
-                target.outputTokens = evt.usage.output_tokens
-              }
+              applySessionUsage(target, evt.usage)
             }
             const finalOutput = typeof evt.output === 'string' ? evt.output : ''
             const finalOutputTrimmed = finalOutput.trim()
@@ -1639,8 +1672,7 @@ export const useChatStore = defineStore('chat', () => {
             activeSession.value.title = t + (firstUser.content.length > 40 ? '...' : '')
           }
         }
-        activeSession.value.inputTokens = detail.input_tokens
-        activeSession.value.outputTokens = detail.output_tokens
+        applySessionUsage(activeSession.value, detail)
         persistActiveMessages()
       }
     } catch (err) {
@@ -1661,12 +1693,7 @@ export const useChatStore = defineStore('chat', () => {
     // Fetch token usage for this session from web-ui DB
     try {
       const usage = await fetchSessionUsageSingle(sessionId)
-      const currentTotal = (activeSession.value.inputTokens ?? 0) + (activeSession.value.outputTokens ?? 0)
-      const usageTotal = (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)
-      if (usage && (usageTotal > 0 || currentTotal === 0)) {
-        activeSession.value.inputTokens = usage.input_tokens
-        activeSession.value.outputTokens = usage.output_tokens
-      }
+      applySessionUsage(activeSession.value, usage)
     } catch { /* non-critical */ }
   }
 

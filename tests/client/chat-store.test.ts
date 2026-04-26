@@ -351,10 +351,25 @@ describe('Chat Store', () => {
       event: 'tool.started',
       tool: 'terminal',
       preview: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
+      arguments: {
+        command: "python3 - <<'PY'\nimport subprocess\nstatus = subprocess.check_output(['git','status','--short'])\nprint(status.decode())\nPY",
+      },
+    })
+
+    let latestToolMessage = store.messages.filter(m => m.role === 'tool').at(-1)
+    expect(latestToolMessage?.toolPreview).toBe(
+      "python3 - <<'PY'\nimport subprocess\nstatus = subprocess.check_output(['git','status','--short'])\nprint(status.decode())\nPY",
+    )
+    expect(latestToolMessage?.toolArgs).toContain("git','status','--short")
+
+    onEvent({
+      event: 'tool.started',
+      tool: 'terminal',
+      preview: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
       context: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
     })
 
-    const latestToolMessage = store.messages.filter(m => m.role === 'tool').at(-1)
+    latestToolMessage = store.messages.filter(m => m.role === 'tool').at(-1)
     expect(latestToolMessage?.toolPreview).toContain('python3')
     expect(latestToolMessage?.toolArgs).toBeUndefined()
   })
@@ -390,6 +405,49 @@ describe('Chat Store', () => {
 
     expect(store.activeSession?.inputTokens).toBe(12345)
     expect(store.activeSession?.outputTokens).toBe(678)
+  })
+
+  it('does not replace cumulative session usage with single-run usage while streaming', async () => {
+    let onEvent!: (event: any) => void
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    const initialDetail = {
+      ...makeDetail('session-with-live-usage', []),
+      input_tokens: 12345,
+      output_tokens: 678,
+    }
+    const refreshedDetail = {
+      ...initialDetail,
+      input_tokens: 13000,
+      output_tokens: 700,
+    }
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([initialDetail])
+    mockSessionsApi.fetchSession.mockResolvedValueOnce(initialDetail).mockResolvedValue(refreshedDetail)
+    mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue({ input_tokens: 0, output_tokens: 0 })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('continue')
+    await flushPromises()
+
+    onEvent({
+      event: 'run.completed',
+      usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+    })
+
+    expect(store.activeSession?.inputTokens).toBe(12345)
+    expect(store.activeSession?.outputTokens).toBe(678)
+
+    await flushPromises()
+
+    expect(store.activeSession?.inputTokens).toBe(13000)
+    expect(store.activeSession?.outputTokens).toBe(700)
   })
 
   it('queues busy input and sends it after the current run completes', async () => {
