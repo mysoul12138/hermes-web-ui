@@ -75,9 +75,41 @@ async function readProfileJobDefaults(profile: string): Promise<JobDefaults> {
   }
 }
 
+export function applyResolvedJobDefaults<T extends JobBody>(job: T, defaults: JobDefaults): T {
+  return {
+    ...job,
+    model: normalizeOptionalString(job.model) ?? defaults.model,
+    provider: normalizeOptionalString(job.provider) ?? defaults.provider,
+    base_url: normalizeOptionalString(job.base_url) ?? defaults.base_url,
+  }
+}
+
+async function adaptJobResponse(data: any, profile: string): Promise<any> {
+  const defaults = await readProfileJobDefaults(profile)
+  if (Array.isArray(data?.jobs)) {
+    return {
+      ...data,
+      jobs: data.jobs.map((job: any) => applyResolvedJobDefaults(job, defaults)),
+    }
+  }
+  if (data?.job && typeof data.job === 'object') {
+    return {
+      ...data,
+      job: applyResolvedJobDefaults(data.job, defaults),
+    }
+  }
+  return data
+}
+
 const TIMEOUT_MS = 30_000
 
-async function proxyRequest(ctx: Context, upstreamPath: string, method?: string, bodyOverride?: Record<string, any>): Promise<void> {
+async function proxyRequest(
+  ctx: Context,
+  upstreamPath: string,
+  method?: string,
+  bodyOverride?: Record<string, any>,
+  transformResponse?: (data: any, profile: string) => Promise<any>,
+): Promise<void> {
   const profile = resolveProfile(ctx)
   const upstream = getUpstream(profile)
   const params = new URLSearchParams(ctx.search || '')
@@ -106,15 +138,16 @@ async function proxyRequest(ctx: Context, upstreamPath: string, method?: string,
 
   ctx.status = res.status
   ctx.set('Content-Type', res.headers.get('content-type') || 'application/json')
-  ctx.body = await res.json()
+  const data = await res.json()
+  ctx.body = transformResponse ? await transformResponse(data, profile) : data
 }
 
 export async function list(ctx: Context) {
-  await proxyRequest(ctx, '/api/jobs')
+  await proxyRequest(ctx, '/api/jobs', undefined, undefined, adaptJobResponse)
 }
 
 export async function get(ctx: Context) {
-  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}`)
+  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}`, undefined, undefined, adaptJobResponse)
 }
 
 export async function create(ctx: Context) {
@@ -125,7 +158,7 @@ export async function create(ctx: Context) {
     model: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.model) ?? defaults.model,
     provider: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.provider) ?? defaults.provider,
     base_url: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.base_url) ?? defaults.base_url,
-  })
+  }, adaptJobResponse)
 }
 
 export async function update(ctx: Context) {
@@ -136,7 +169,7 @@ export async function update(ctx: Context) {
     model: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.model) ?? defaults.model,
     provider: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.provider) ?? defaults.provider,
     base_url: normalizeOptionalString((ctx.request.body as JobBody | undefined)?.base_url) ?? defaults.base_url,
-  })
+  }, adaptJobResponse)
 }
 
 export async function remove(ctx: Context) {
@@ -144,13 +177,13 @@ export async function remove(ctx: Context) {
 }
 
 export async function pause(ctx: Context) {
-  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/pause`)
+  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/pause`, undefined, undefined, adaptJobResponse)
 }
 
 export async function resume(ctx: Context) {
-  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/resume`)
+  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/resume`, undefined, undefined, adaptJobResponse)
 }
 
 export async function run(ctx: Context) {
-  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/run`)
+  await proxyRequest(ctx, `/api/jobs/${ctx.params.id}/run`, undefined, undefined, adaptJobResponse)
 }

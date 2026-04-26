@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyJobModelDefaults } from '../../packages/server/src/controllers/hermes/jobs'
+import { applyJobModelDefaults, applyResolvedJobDefaults } from '../../packages/server/src/controllers/hermes/jobs'
 
 describe('jobs controller defaults', () => {
   it('fills missing model/provider from config.yaml model section', () => {
@@ -56,6 +56,26 @@ describe('jobs controller defaults', () => {
     })
 
     expect(resolved).toMatchObject({
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: 'custom:llm.mathmodel.tech',
+      base_url: null,
+    })
+  })
+
+  it('hydrates legacy jobs with missing model/provider for WebUI responses', () => {
+    const resolved = applyResolvedJobDefaults({
+      id: 'job-1',
+      model: null,
+      provider: '',
+      base_url: null,
+    }, {
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: 'custom:llm.mathmodel.tech',
+      base_url: null,
+    })
+
+    expect(resolved).toMatchObject({
+      id: 'job-1',
       model: 'deepseek-ai/DeepSeek-V4-Pro',
       provider: 'custom:llm.mathmodel.tech',
       base_url: null,
