@@ -530,20 +530,22 @@ const renderedToolResult = computed(() => {
             </div>
           </div>
           <div class="message-meta">
-            <button
-              v-if="copyableContent"
-              class="copy-bubble-btn"
-              @click="copyBubbleContent"
-              :title="t('chat.copyBubble')"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-              </svg>
-            </button>
             <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
             <span v-else-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
-            <span class="message-time">{{ timeStr }}</span>
+            <div class="message-meta-hover">
+              <button
+                v-if="copyableContent"
+                class="copy-bubble-btn"
+                @click="copyBubbleContent"
+                :title="t('chat.copyBubble')"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+              <span class="message-time">{{ timeStr }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -918,6 +920,12 @@ const renderedToolResult = computed(() => {
   gap: 6px;
   margin-top: 4px;
   padding: 0 4px;
+}
+
+.message-meta-hover {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   transition: opacity 0.15s ease;
 
