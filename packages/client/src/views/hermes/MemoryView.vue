@@ -13,12 +13,13 @@ const editingSection = ref<'memory' | 'user' | 'soul' | null>(null)
 const editContent = ref('')
 const saving = ref(false)
 
-onMounted(loadMemory)
+onMounted(() => loadMemory())
 
-async function loadMemory() {
+async function loadMemory(options: { showSuccess?: boolean } = {}) {
   loading.value = true
   try {
     data.value = await fetchMemory()
+    if (options.showSuccess) message.success(t('memory.refreshSuccess'))
   } catch (err: any) {
     console.error('Failed to load memory:', err)
     message.error(t('memory.loadFailed'))
@@ -76,7 +77,7 @@ const displaySoul = computed(() => (data.value?.soul || '').replace(/§/g, '\n\n
   <div class="memory-view">
     <header class="page-header">
       <h2 class="header-title">{{ t('memory.title') }}</h2>
-      <NButton size="small" quaternary @click="loadMemory">
+      <NButton size="small" quaternary :loading="loading" @click="loadMemory({ showSuccess: true })">
         <template #icon>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="23 4 23 10 17 10" />

@@ -221,6 +221,7 @@ export default {
   memory: {
     title: '메모리',
     refresh: '새로고침',
+    refreshSuccess: '메모리를 새로고침했습니다',
     loadFailed: '메모리를 불러오지 못했습니다',
     myNotes: '내 메모',
     noNotes: '메모가 없습니다.',

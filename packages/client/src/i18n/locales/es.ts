@@ -221,6 +221,7 @@ export default {
   memory: {
     title: 'Memoria',
     refresh: 'Actualizar',
+    refreshSuccess: 'Memoria actualizada',
     loadFailed: 'Error al cargar la memoria',
     myNotes: 'Mis notas',
     noNotes: 'Sin notas aun.',

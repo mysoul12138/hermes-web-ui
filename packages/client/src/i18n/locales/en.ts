@@ -262,6 +262,7 @@ export default {
   memory: {
     title: 'Memory',
     refresh: 'Refresh',
+    refreshSuccess: 'Memory refreshed',
     loadFailed: 'Failed to load memory',
     myNotes: 'My Notes',
     noNotes: 'No notes yet.',

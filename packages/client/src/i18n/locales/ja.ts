@@ -221,6 +221,7 @@ export default {
   memory: {
     title: 'メモリ',
     refresh: '更新',
+    refreshSuccess: 'メモリを更新しました',
     loadFailed: 'メモリの読み込みに失敗しました',
     myNotes: 'メモ',
     noNotes: 'メモはまだありません。',

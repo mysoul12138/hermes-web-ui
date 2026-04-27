@@ -221,6 +221,7 @@ export default {
   memory: {
     title: 'Gedachtnis',
     refresh: 'Aktualisieren',
+    refreshSuccess: 'Gedachtnis aktualisiert',
     loadFailed: 'Laden des Gedachtnisses fehlgeschlagen',
     myNotes: 'Meine Notizen',
     noNotes: 'Noch keine Notizen.',

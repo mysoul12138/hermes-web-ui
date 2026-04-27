@@ -262,6 +262,7 @@ export default {
   memory: {
     title: '记忆',
     refresh: '刷新',
+    refreshSuccess: '记忆已刷新',
     loadFailed: '加载记忆失败',
     myNotes: '我的笔记',
     noNotes: '暂无笔记。',
