@@ -32,6 +32,7 @@ export interface Message {
   toolPreview?: string
   toolArgs?: string
   toolResult?: string
+  toolCallId?: string
   toolStatus?: 'running' | 'done' | 'error'
   isStreaming?: boolean
   queued?: boolean
@@ -128,6 +129,50 @@ function commandFromToolPayload(value: unknown): string | undefined {
   const record = value as Record<string, unknown>
   const command = record.command ?? record.cmd
   return typeof command === 'string' && command.trim() ? command.trim() : undefined
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    if (value == null) continue
+    const text = String(value).trim()
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    result.push(text)
+  }
+  return result
+}
+
+function toolCallKeys(toolCall: Record<string, any>): string[] {
+  return uniqueStrings([
+    toolCall.call_id,
+    toolCall.tool_call_id,
+    toolCall.id,
+    toolCall.response_item_id,
+    toolCall.item_id,
+  ])
+}
+
+function toolCallName(toolCall: Record<string, any>): string | undefined {
+  const name = toolCall.function?.name ?? toolCall.name ?? toolCall.tool_name
+  return typeof name === 'string' && name.trim() ? name.trim() : undefined
+}
+
+function toolCallArgs(toolCall: Record<string, any>): string | undefined {
+  const args = toolCall.function?.arguments ?? toolCall.arguments ?? toolCall.args ?? toolCall.input
+  return stringifyToolPayload(args)
+}
+
+function previewFromToolResult(content?: string | null): string | undefined {
+  if (!content?.trim()) return undefined
+  const parsed = tryParseJson(content)
+  if (!parsed) return content.slice(0, 240)
+  for (const key of ['command', 'output', 'stdout', 'stderr', 'result', 'content', 'message', 'summary', 'preview', 'title', 'url']) {
+    const preview = stringifyToolPayload(parsed[key])
+    if (preview) return preview.slice(0, 240)
+  }
+  return stringifyToolPayload(parsed)?.slice(0, 240)
 }
 
 function pickToolArgs(evt: RunEvent): string | undefined {
@@ -295,9 +340,12 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
   for (const msg of msgs) {
     if (msg.role === 'assistant' && msg.tool_calls) {
       for (const tc of msg.tool_calls) {
-        if (tc.id) {
-          if (tc.function?.name) toolNameMap.set(tc.id, tc.function.name)
-          if (tc.function?.arguments) toolArgsMap.set(tc.id, tc.function.arguments)
+        const keys = toolCallKeys(tc)
+        const name = toolCallName(tc)
+        const args = toolCallArgs(tc)
+        for (const key of keys) {
+          if (name) toolNameMap.set(key, name)
+          if (args) toolArgsMap.set(key, args)
         }
       }
     }
@@ -308,14 +356,20 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
     // Skip assistant messages that only contain tool_calls (no meaningful content)
     if (msg.role === 'assistant' && msg.tool_calls?.length && !msg.content?.trim()) {
       // Emit a tool.started message for each tool call
-      for (const tc of msg.tool_calls) {
+      for (const [idx, tc] of msg.tool_calls.entries()) {
+        const keys = toolCallKeys(tc)
+        const primaryKey = keys[0] || `${msg.id}_${idx}`
+        const args = toolCallArgs(tc)
+        const preview = extractApprovalCommandFromArgs(args) || commandFromToolPayload(tryParseJson(args) || args)
         result.push({
-          id: String(msg.id) + '_' + tc.id,
+          id: String(msg.id) + '_' + primaryKey,
           role: 'tool',
           content: '',
           timestamp: Math.round(msg.timestamp * 1000),
-          toolName: tc.function?.name || 'tool',
-          toolArgs: tc.function?.arguments || undefined,
+          toolName: toolCallName(tc) || 'tool',
+          toolArgs: args,
+          toolPreview: preview?.slice(0, 240),
+          toolCallId: primaryKey,
           toolStatus: 'done',
         })
       }
@@ -327,19 +381,17 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
       const tcId = msg.tool_call_id || ''
       const toolName = msg.tool_name || toolNameMap.get(tcId) || 'tool'
       const toolArgs = toolArgsMap.get(tcId) || undefined
-      // Extract a short preview from the content
-      let preview = ''
-      if (msg.content) {
-        try {
-          const parsed = JSON.parse(msg.content)
-          preview = parsed.url || parsed.title || parsed.preview || parsed.summary || ''
-        } catch {
-          preview = msg.content.slice(0, 80)
-        }
-      }
+      const preview = previewFromToolResult(msg.content)
+        || extractApprovalCommandFromArgs(toolArgs)
+        || commandFromToolPayload(tryParseJson(toolArgs) || toolArgs)
       // Find and remove the matching placeholder from tool_calls above
       const placeholderIdx = result.findIndex(
-        m => m.role === 'tool' && m.toolName === toolName && !m.toolResult && m.id.includes('_' + tcId)
+        m => m.role === 'tool'
+          && !m.toolResult
+          && (
+            (!!tcId && (m.toolCallId === tcId || m.id.includes('_' + tcId)))
+            || (m.toolName === toolName && !tcId)
+          )
       )
       if (placeholderIdx !== -1) {
         result.splice(placeholderIdx, 1)
@@ -351,8 +403,9 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
         timestamp: Math.round(msg.timestamp * 1000),
         toolName,
         toolArgs,
-        toolPreview: typeof preview === 'string' ? preview.slice(0, 100) || undefined : undefined,
+        toolPreview: preview?.slice(0, 240),
         toolResult: msg.content || undefined,
+        toolCallId: tcId || undefined,
         toolStatus: 'done',
       })
       continue
@@ -1021,6 +1074,41 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     }
   }
 
+  function toolDetailScore(message: Message): number {
+    if (message.role !== 'tool') return 0
+    let score = 0
+    if (message.toolName && message.toolName !== 'tool') score += 1
+    if (message.toolPreview) score += 1
+    if (message.toolArgs) score += 3
+    if (message.toolResult) score += 4
+    if (message.toolCallId) score += 1
+    return score
+  }
+
+  function serverHasBetterToolDetails(local: Message[], server: Message[]): boolean {
+    const localTools = local.filter(m => m.role === 'tool')
+    const serverTools = server.filter(m => m.role === 'tool')
+    if (!serverTools.length) return false
+
+    for (const [idx, serverTool] of serverTools.entries()) {
+      const localTool = localTools.find(m =>
+        (!!serverTool.toolCallId && m.toolCallId === serverTool.toolCallId)
+        || (!!serverTool.id && m.id === serverTool.id)
+      ) || localTools[idx]
+
+      if (!localTool) {
+        if (serverTool.toolArgs || serverTool.toolResult || serverTool.toolPreview) return true
+        continue
+      }
+
+      if (toolDetailScore(serverTool) > toolDetailScore(localTool)) return true
+      if (localTool.toolResult && serverTool.toolResult && localTool.toolResult.length < serverTool.toolResult.length) return true
+      if (localTool.toolArgs && serverTool.toolArgs && localTool.toolArgs.length < serverTool.toolArgs.length) return true
+    }
+
+    return false
+  }
+
   function stopPolling(sid: string) {
     const t = pollTimers.get(sid)
     if (t) {
@@ -1060,7 +1148,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         // after the current user turn has caught up.
         const local = target.messages
         const { serverIsAhead, serverIsCaughtUp } = compareServerMessages(local, mapped)
-        if (serverIsAhead) {
+        if (serverIsAhead || serverHasBetterToolDetails(local, mapped)) {
           target.messages = withLocalSteeredMessages(mapped, target.messages)
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
@@ -1219,7 +1307,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
       const { serverIsAhead } = compareServerMessages(target.messages, mapped)
-      if (serverIsAhead) {
+      if (serverIsAhead || serverHasBetterToolDetails(target.messages, mapped)) {
         target.messages = withLocalSteeredMessages(mapped, target.messages)
         persistActiveMessages()
       }
@@ -1653,7 +1741,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         // has caught up.
         const local = activeSession.value.messages
         const { serverIsAhead } = compareServerMessages(local, mapped)
-        if (serverIsAhead) {
+        if (serverIsAhead || serverHasBetterToolDetails(local, mapped)) {
           activeSession.value.messages = withLocalSteeredMessages(mapped, activeSession.value.messages)
         }
         void refreshSessionBranches(sessionId)

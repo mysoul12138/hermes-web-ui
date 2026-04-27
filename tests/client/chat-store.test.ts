@@ -619,6 +619,98 @@ describe('Chat Store', () => {
     expect(window.localStorage.getItem(`hermes_bridge_persistent_session_v1_default_${localBridgeSessionId}`)).toBe(persistentSessionId)
   })
 
+  it('rehydrates cached tool cards with full historical arguments and results', async () => {
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, 'sess-tool-detail')
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: 'sess-tool-detail',
+          title: 'Tool detail',
+          source: 'api_server',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ]),
+    )
+    window.localStorage.setItem(
+      sessionMessagesKey('sess-tool-detail'),
+      JSON.stringify([
+        { id: 'u1', role: 'user', content: 'check status', timestamp: 1 },
+        { id: 'old-tool', role: 'tool', content: '', timestamp: 2, toolName: 'tool', toolStatus: 'done' },
+      ]),
+    )
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([makeSummary('sess-tool-detail', 'Tool detail')])
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail('sess-tool-detail', [
+      {
+        id: 1,
+        session_id: 'sess-tool-detail',
+        role: 'user',
+        content: 'check status',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000000,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 2,
+        session_id: 'sess-tool-detail',
+        role: 'assistant',
+        content: '',
+        tool_call_id: null,
+        tool_calls: [
+          {
+            id: 'item_1',
+            call_id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'terminal',
+              arguments: JSON.stringify({
+                command: "python3 - <<'PY'\nimport subprocess\nstatus = subprocess.check_output(['git','status','--short'])\nprint(status.decode())\nPY",
+              }),
+            },
+          },
+        ],
+        tool_name: null,
+        timestamp: 1710000001,
+        token_count: null,
+        finish_reason: 'tool_calls',
+        reasoning: null,
+      },
+      {
+        id: 3,
+        session_id: 'sess-tool-detail',
+        role: 'tool',
+        content: JSON.stringify({ output: ' M packages/client/src/stores/hermes/chat.ts\n', exit_code: 0, error: null }),
+        tool_call_id: 'call_1',
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000002,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+    ]))
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    const toolMessage = store.messages.find(message => message.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolCallId: 'call_1',
+      toolStatus: 'done',
+    })
+    expect(toolMessage?.toolArgs).toContain("git','status','--short")
+    expect(toolMessage?.toolResult).toContain('packages/client/src/stores/hermes/chat.ts')
+    expect(toolMessage?.toolPreview).toContain('packages/client/src/stores/hermes/chat.ts')
+  })
+
   it('does not mark server sessions live from last_active alone', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-22T19:00:00.000Z'))
