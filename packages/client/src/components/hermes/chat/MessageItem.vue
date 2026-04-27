@@ -161,16 +161,11 @@ function formatDuration(ms: number): string {
   return r === 0 ? `${m}m` : `${m}m ${r}s`;
 }
 
-const timeStr = computed(() => {
-  const d = new Date(props.message.timestamp);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-});
-
 const showMessageHeader = computed(() => props.message.role === "assistant");
 const messageHeadTitle = computed(() => (props.message.role === "assistant" ? "Hermes" : ""));
 const messageHeadStatus = computed(() => {
   if (props.message.role !== "assistant") return "";
-  return props.message.isStreaming ? t("chat.thinkingInProgress") : timeStr.value;
+  return props.message.isStreaming ? t("chat.thinkingInProgress") : "";
 });
 
 const toolStatusLabel = computed(() => {
@@ -543,7 +538,6 @@ const renderedToolResult = computed(() => {
             </button>
             <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
             <span v-else-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
-            <span class="message-time">{{ timeStr }}</span>
           </div>
         </div>
       </div>
@@ -952,16 +946,6 @@ const renderedToolResult = computed(() => {
       color: #cccccc;
       background: rgba(255, 255, 255, 0.08);
     }
-  }
-}
-
-.message-time {
-  font-size: 11px;
-  color: $text-muted;
-  user-select: none;
-
-  .dark & {
-    color: #999999;
   }
 }
 
