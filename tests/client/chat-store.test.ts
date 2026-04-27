@@ -17,6 +17,11 @@ const mockSessionsApi = vi.hoisted(() => ({
   renameSession: vi.fn(),
 }))
 
+const mockConversationsApi = vi.hoisted(() => ({
+  fetchConversationSummaries: vi.fn(),
+  fetchConversationDetail: vi.fn(),
+}))
+
 const mockApprovalApi = vi.hoisted(() => ({
   getPendingApproval: vi.fn(),
   respondApproval: vi.fn(),
@@ -24,6 +29,7 @@ const mockApprovalApi = vi.hoisted(() => ({
 
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
+vi.mock('@/api/hermes/conversations', () => mockConversationsApi)
 vi.mock('@/api/hermes/approval', () => mockApprovalApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
@@ -83,6 +89,8 @@ describe('Chat Store', () => {
     mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue(null)
     mockSessionsApi.deleteSession.mockResolvedValue(true)
     mockSessionsApi.renameSession.mockResolvedValue(true)
+    mockConversationsApi.fetchConversationSummaries.mockRejectedValue(new Error('conversation summaries unavailable'))
+    mockConversationsApi.fetchConversationDetail.mockRejectedValue(new Error('conversation detail unavailable'))
     mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
     mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
@@ -921,5 +929,58 @@ describe('Chat Store', () => {
     expect(store.messages.some(m => m.role === 'assistant' && m.content === 'final answer')).toBe(true)
     expect(store.isRunActive).toBe(false)
     expect(window.localStorage.getItem(inFlightKey('sess-1'))).toBeNull()
+  })
+
+  it('updates an open subagent branch while the parent run is still streaming', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('review the branch')
+    const rootId = store.activeSessionId!
+
+    onEvent?.({
+      event: 'subagent.start',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Starting review',
+      depth: 1,
+    })
+    await store.switchBranchSession(rootId, 'subagent-1')
+
+    expect(store.activeSessionId).toBe('subagent-1')
+    expect(store.messages.map(m => m.content)).toContain('[start] Starting review')
+    expect(store.isRunActive).toBe(true)
+
+    onEvent?.({
+      event: 'subagent.progress',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Inspecting files',
+      depth: 1,
+    })
+
+    expect(store.messages.map(m => m.content)).toContain('[progress] Inspecting files')
+
+    onEvent?.({
+      event: 'subagent.complete',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      summary: 'Review complete',
+      output_tail: [{ role: 'assistant', content: 'No issues found' }],
+      depth: 1,
+    })
+
+    expect(store.messages.some(m => m.content.includes('No issues found'))).toBe(true)
+    expect(store.isSessionLive('subagent-1')).toBe(false)
   })
 })

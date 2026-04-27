@@ -676,7 +676,7 @@ export const useChatStore = defineStore('chat', () => {
   const resumingRuns = ref<Set<string>>(new Set())
   const isRunActive = computed(() =>
     isStreaming.value
-    || (activeSessionId.value != null && resumingRuns.value.has(activeSessionId.value))
+    || (activeSessionId.value != null && isSessionLive(activeSessionId.value))
   )
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
@@ -691,8 +691,7 @@ export const useChatStore = defineStore('chat', () => {
   const activeBranches = computed<ConversationBranch[]>(() => {
     const sid = activeSessionId.value
     if (!sid) return []
-    const persisted = dbBranchesBySession.value[sid] || []
-    return persisted.length ? persisted : (liveBranchesBySession.value[sid] || [])
+    return mergedSessionBranches(sid)
   })
   const displayMessages = computed<Message[]>(() => messages.value)
   const activeApproval = computed<ApprovalState | null>(() => {
@@ -702,7 +701,12 @@ export const useChatStore = defineStore('chat', () => {
   })
 
   function isSessionLive(sessionId: string): boolean {
-    return streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)
+    return streamStates.value.has(sessionId)
+      || resumingRuns.value.has(sessionId)
+      || Object.values(liveBranchesBySession.value).some(branches => {
+        const branch = findBranchById(branches, sessionId)
+        return !!branch?.is_active
+      })
   }
 
   function countBranchTree(branches: ConversationBranch[]): number {
@@ -718,9 +722,50 @@ export const useChatStore = defineStore('chat', () => {
     return null
   }
 
+  function mergeConversationMessages(persisted: ConversationMessage[] = [], live: ConversationMessage[] = []): ConversationMessage[] {
+    const byId = new Map<string, ConversationMessage>()
+    for (const message of persisted) byId.set(String(message.id), message)
+    for (const message of live) byId.set(String(message.id), message)
+    return [...byId.values()].sort((a, b) => a.timestamp - b.timestamp)
+  }
+
+  function mergeBranchLists(persisted: ConversationBranch[] = [], live: ConversationBranch[] = []): ConversationBranch[] {
+    const liveById = new Map(live.map(branch => [branch.session_id, branch]))
+    const usedLiveIds = new Set<string>()
+    const merged = persisted.map(branch => {
+      const liveBranch = liveById.get(branch.session_id)
+      if (!liveBranch) return branch
+      usedLiveIds.add(liveBranch.session_id)
+      const lastActive = Math.max(branch.last_active || 0, liveBranch.last_active || 0)
+      const liveIsNewer = (liveBranch.last_active || 0) >= (branch.last_active || 0)
+      return {
+        ...branch,
+        source: liveBranch.source || branch.source,
+        model: liveBranch.model || branch.model,
+        title: liveBranch.title || branch.title,
+        ended_at: liveBranch.is_active ? null : (liveIsNewer ? liveBranch.ended_at : branch.ended_at),
+        last_active: lastActive,
+        is_active: liveBranch.is_active || branch.is_active,
+        messages: mergeConversationMessages(branch.messages, liveBranch.messages),
+        visible_count: Math.max(branch.visible_count || 0, liveBranch.visible_count || 0),
+        thread_session_count: Math.max(branch.thread_session_count || 0, liveBranch.thread_session_count || 0),
+        input_tokens: liveBranch.input_tokens ?? branch.input_tokens,
+        output_tokens: liveBranch.output_tokens ?? branch.output_tokens,
+        branches: mergeBranchLists(branch.branches || [], liveBranch.branches || []),
+      }
+    })
+    for (const branch of live) {
+      if (!usedLiveIds.has(branch.session_id)) merged.push(branch)
+    }
+    return merged
+  }
+
+  function mergedSessionBranches(sessionId: string): ConversationBranch[] {
+    return mergeBranchLists(dbBranchesBySession.value[sessionId] || [], liveBranchesBySession.value[sessionId] || [])
+  }
+
   function sessionBranches(sessionId: string): ConversationBranch[] {
-    const persisted = dbBranchesBySession.value[sessionId] || []
-    return persisted.length ? persisted : (liveBranchesBySession.value[sessionId] || [])
+    return mergedSessionBranches(sessionId)
   }
 
   function sessionBranchCount(sessionId: string): number {
@@ -757,6 +802,38 @@ export const useChatStore = defineStore('chat', () => {
       rootSessionId,
       isBranchSession: true,
     }
+  }
+
+  function syncBranchSessionFromBranch(rootSessionId: string, branch: ConversationBranch) {
+    const existing = sessions.value.find(session => session.id === branch.session_id)
+    if (!existing) return
+
+    const nextSession = branchToSession(branch, rootSessionId)
+    existing.title = nextSession.title
+    existing.source = nextSession.source
+    existing.model = nextSession.model
+    existing.messages = nextSession.messages
+    existing.createdAt = nextSession.createdAt
+    existing.updatedAt = nextSession.updatedAt
+    existing.messageCount = nextSession.messageCount
+    existing.inputTokens = nextSession.inputTokens
+    existing.outputTokens = nextSession.outputTokens
+    existing.endedAt = nextSession.endedAt
+    existing.lastActiveAt = nextSession.lastActiveAt
+    existing.branchSessionCount = nextSession.branchSessionCount
+    existing.parentSessionId = nextSession.parentSessionId
+    existing.rootSessionId = nextSession.rootSessionId
+    existing.isBranchSession = true
+  }
+
+  function syncBranchSessions(rootSessionId: string) {
+    const sync = (branches: ConversationBranch[]) => {
+      for (const branch of branches) {
+        syncBranchSessionFromBranch(rootSessionId, branch)
+        sync(branch.branches || [])
+      }
+    }
+    sync(sessionBranches(rootSessionId))
   }
 
   async function switchBranchSession(rootSessionId: string, branchId: string) {
@@ -2010,6 +2087,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         ...dbBranchesBySession.value,
         [sid]: detail.branches || [],
       }
+      syncBranchSessions(sid)
+      if (activeSession.value?.rootSessionId === sid) persistActiveMessages()
     } catch {
       // Branch detail is best-effort; normal chat streaming must not depend on it.
     }
@@ -2059,6 +2138,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         ? existingBranches.map(item => item.session_id === subagentId ? branch : item)
         : [...existingBranches, branch],
     }
+    syncBranchSessionFromBranch(sessionId, findBranchById(sessionBranches(sessionId), subagentId) || branch)
+    if (activeSessionId.value === subagentId) persistActiveMessages()
     void refreshSessionBranches(sessionId)
   }
 
