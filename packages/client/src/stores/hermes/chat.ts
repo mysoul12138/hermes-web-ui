@@ -2064,6 +2064,19 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   async function submitMessage(sid: string, content: string, attachments?: Attachment[], existingUserMessageId?: string) {
     let userMessageId = existingUserMessageId
+    // Build conversation history before adding/unqueueing the current message,
+    // so the current input is not duplicated in conversation_history.
+    const sessionMsgs = getSessionMsgs(sid)
+    const history: ChatMessage[] = sessionMsgs
+      .filter(m =>
+        m.id !== existingUserMessageId
+        && !m.queued
+        && !m.steered
+        && (m.role === 'user' || m.role === 'assistant')
+        && m.content.trim()
+      )
+      .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
+
     if (existingUserMessageId) {
       updateMessage(sid, existingUserMessageId, { queued: false, timestamp: Date.now() })
     } else {
@@ -2087,11 +2100,6 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     }
 
     try {
-      // Build conversation history from past messages
-      const sessionMsgs = getSessionMsgs(sid)
-      const history: ChatMessage[] = sessionMsgs
-        .filter(m => !m.queued && !m.steered && (m.role === 'user' || m.role === 'assistant') && m.content.trim())
-        .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
 
       // Upload attachments and build input with file paths
       let inputText = content.trim()
