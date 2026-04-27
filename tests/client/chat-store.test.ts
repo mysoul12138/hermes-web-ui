@@ -374,6 +374,94 @@ describe('Chat Store', () => {
     expect(latestToolMessage?.toolArgs).toBeUndefined()
   })
 
+  it('backfills live tool details from session polling without replacing streamed text', async () => {
+    vi.useFakeTimers()
+
+    const store = useChatStore()
+    await store.sendMessage('inspect working tree')
+    await flushPromises()
+
+    const sid = store.activeSessionId
+    expect(sid).toBeTruthy()
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    expect(typeof onEvent).toBe('function')
+
+    onEvent({
+      event: 'tool.started',
+      tool: 'terminal',
+      call_id: 'call_1',
+      preview: "python3 - <<'PY' import subprocess status = subprocess.check_output(['git','s...",
+    })
+    onEvent({ event: 'message.delta', delta: 'local streamed answer' })
+
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(sid!, [
+      {
+        id: 1,
+        session_id: sid,
+        role: 'user',
+        content: 'inspect working tree',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000000,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 2,
+        session_id: sid,
+        role: 'assistant',
+        content: '',
+        tool_call_id: null,
+        tool_calls: [
+          {
+            id: 'item_1',
+            call_id: 'call_1',
+            function: {
+              name: 'terminal',
+              arguments: JSON.stringify({
+                command: "python3 - <<'PY'\nimport subprocess\nstatus = subprocess.check_output(['git','status','--short'])\nprint(status.decode())\nPY",
+              }),
+            },
+          },
+        ],
+        tool_name: null,
+        timestamp: 1710000001,
+        token_count: null,
+        finish_reason: 'tool_calls',
+        reasoning: null,
+      },
+      {
+        id: 3,
+        session_id: sid,
+        role: 'tool',
+        content: JSON.stringify({ output: ' M packages/client/src/stores/hermes/chat.ts\n', exit_code: 0, error: null }),
+        tool_call_id: 'call_1',
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000002,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+    ]))
+
+    await vi.advanceTimersByTimeAsync(2100)
+    await flushPromises()
+
+    const toolMessage = store.messages.find(message => message.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolCallId: 'call_1',
+      toolStatus: 'done',
+    })
+    expect(toolMessage?.toolArgs).toContain("git','status','--short")
+    expect(toolMessage?.toolResult).toContain('packages/client/src/stores/hermes/chat.ts')
+    expect(store.messages.find(message => message.role === 'assistant')?.content).toBe('local streamed answer')
+  })
+
   it('keeps Hermes DB token usage when the WebUI usage cache is empty', async () => {
     const detail = {
       ...makeDetail('session-with-usage', [

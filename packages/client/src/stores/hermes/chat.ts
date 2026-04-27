@@ -124,11 +124,20 @@ function stringifyToolPayload(value: unknown): string | undefined {
 
 function commandFromToolPayload(value: unknown): string | undefined {
   if (value == null) return undefined
-  if (typeof value === 'string') return value.trim() ? value.trim() : undefined
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return undefined
+    const parsed = tryParseJson(trimmed)
+    return parsed ? (commandFromToolPayload(parsed) || trimmed) : trimmed
+  }
   if (typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
   const command = record.command ?? record.cmd
   return typeof command === 'string' && command.trim() ? command.trim() : undefined
+}
+
+function firstPresent(...values: unknown[]): unknown {
+  return values.find(value => value != null)
 }
 
 function uniqueStrings(values: unknown[]): string[] {
@@ -176,13 +185,18 @@ function previewFromToolResult(content?: string | null): string | undefined {
 }
 
 function pickToolArgs(evt: RunEvent): string | undefined {
-  return stringifyToolPayload(
+  const payload = firstPresent(
     evt.arguments ??
     evt.args ??
     evt.parameters ??
     evt.input ??
+    (evt.tool_call as Record<string, any> | undefined)?.function?.arguments ??
+    (evt.tool_call as Record<string, any> | undefined)?.arguments ??
+    (evt.function as Record<string, any> | undefined)?.arguments ??
+    (evt.payload as Record<string, any> | undefined)?.arguments ??
     evt.command,
   )
+  return stringifyToolPayload(payload)
 }
 
 function pickToolPreview(evt: RunEvent): string | undefined {
@@ -191,10 +205,34 @@ function pickToolPreview(evt: RunEvent): string | undefined {
     commandFromToolPayload(evt.args) ||
     commandFromToolPayload(evt.parameters) ||
     commandFromToolPayload(evt.input) ||
+    commandFromToolPayload((evt.tool_call as Record<string, any> | undefined)?.function?.arguments) ||
+    commandFromToolPayload((evt.tool_call as Record<string, any> | undefined)?.arguments) ||
+    commandFromToolPayload((evt.function as Record<string, any> | undefined)?.arguments) ||
+    commandFromToolPayload((evt.payload as Record<string, any> | undefined)?.arguments) ||
     stringifyToolPayload(evt.command) ||
     stringifyToolPayload(evt.preview) ||
     stringifyToolPayload(evt.tool_preview) ||
     stringifyToolPayload(evt.context)
+}
+
+function pickToolCallId(evt: RunEvent): string | undefined {
+  return uniqueStrings([
+    evt.call_id,
+    evt.tool_call_id,
+    (evt.tool_call as Record<string, any> | undefined)?.call_id,
+    (evt.tool_call as Record<string, any> | undefined)?.id,
+    evt.id,
+    evt.item_id,
+    evt.response_item_id,
+  ])[0]
+}
+
+function betterToolText(current: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return current
+  if (!current) return next
+  if (current === next) return current
+  if (current.includes('...') && next.length > current.length) return next
+  return next.length > current.length ? next : current
 }
 
 function pickToolResult(evt: RunEvent): string | undefined {
@@ -1109,6 +1147,47 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return false
   }
 
+  function mergeToolMessageDetails(local: Message, server: Message): Message {
+    return {
+      ...local,
+      toolName: local.toolName && local.toolName !== 'tool' ? local.toolName : server.toolName,
+      toolPreview: betterToolText(local.toolPreview, server.toolPreview),
+      toolArgs: betterToolText(local.toolArgs, server.toolArgs),
+      toolResult: mergeToolResult(local.toolResult, server.toolResult),
+      toolCallId: local.toolCallId || server.toolCallId,
+      toolStatus: server.toolResult ? (server.toolStatus || 'done') : (local.toolStatus || server.toolStatus),
+    }
+  }
+
+  function mergeServerToolDetails(local: Message[], server: Message[]): Message[] {
+    const serverTools = server.filter(m => m.role === 'tool')
+    if (!serverTools.length) return local
+
+    const usedServerIndexes = new Set<number>()
+    const next = local.map((message) => {
+      if (message.role !== 'tool') return message
+      const byId = serverTools.findIndex((tool, idx) =>
+        !usedServerIndexes.has(idx)
+        && (
+          (!!message.toolCallId && message.toolCallId === tool.toolCallId)
+          || (!!message.id && message.id === tool.id)
+        )
+      )
+      const fallback = byId >= 0
+        ? byId
+        : serverTools.findIndex((_, idx) => !usedServerIndexes.has(idx))
+      if (fallback < 0) return message
+      usedServerIndexes.add(fallback)
+      return mergeToolMessageDetails(message, serverTools[fallback])
+    })
+
+    for (const [idx, tool] of serverTools.entries()) {
+      if (!usedServerIndexes.has(idx)) next.push(tool)
+    }
+
+    return next
+  }
+
   function stopPolling(sid: string) {
     const t = pollTimers.get(sid)
     if (t) {
@@ -1126,11 +1205,6 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (pollTimers.has(sid)) return
     resumingRuns.value = new Set([...resumingRuns.value, sid])
     const timer = setInterval(async () => {
-      // If a fresh SSE stream started for this session, polling is redundant.
-      if (streamStates.value.has(sid)) {
-        stopPolling(sid)
-        return
-      }
       const inFlight = readInFlight(sid)
       if (!inFlight) {
         stopPolling(sid)
@@ -1148,13 +1222,24 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         // after the current user turn has caught up.
         const local = target.messages
         const { serverIsAhead, serverIsCaughtUp } = compareServerMessages(local, mapped)
-        if (serverIsAhead || serverHasBetterToolDetails(local, mapped)) {
+        const hasBetterToolDetails = serverHasBetterToolDetails(local, mapped)
+        if (serverIsAhead) {
           target.messages = withLocalSteeredMessages(mapped, target.messages)
+          if (detail.title && !target.title) target.title = detail.title
+          if (sid === activeSessionId.value) persistActiveMessages()
+        } else if (hasBetterToolDetails) {
+          target.messages = mergeServerToolDetails(target.messages, mapped)
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         }
         void refreshSessionBranches(sid)
         syncApprovalFromMessages(sid, target.messages)
+        // During a live SSE stream this poll is only a detail backfill. Do not
+        // let a stable DB snapshot conclude the run before run.completed arrives.
+        if (streamStates.value.has(sid)) {
+          pollSignatures.delete(sid)
+          return
+        }
         // Stability detection ONLY matters when the server has at least as
         // many user turns as we do. Otherwise the server is still catching
         // up (e.g. the new turn we just sent hasn't been flushed server-side
@@ -1174,6 +1259,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               // retreating local state; otherwise commit the server view.
               if (serverIsAhead) {
                 target.messages = withLocalSteeredMessages(mapped, target.messages)
+                if (detail.title) target.title = detail.title
+                if (sid === activeSessionId.value) persistActiveMessages()
+              } else if (hasBetterToolDetails) {
+                target.messages = mergeServerToolDetails(target.messages, mapped)
                 if (detail.title) target.title = detail.title
                 if (sid === activeSessionId.value) persistActiveMessages()
               }
@@ -1307,8 +1396,11 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
       const { serverIsAhead } = compareServerMessages(target.messages, mapped)
-      if (serverIsAhead || serverHasBetterToolDetails(target.messages, mapped)) {
+      if (serverIsAhead) {
         target.messages = withLocalSteeredMessages(mapped, target.messages)
+        persistActiveMessages()
+      } else if (serverHasBetterToolDetails(target.messages, mapped)) {
+        target.messages = mergeServerToolDetails(target.messages, mapped)
         persistActiveMessages()
       }
       applySessionUsage(target, detail)
@@ -1347,6 +1439,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // not only after the round finishes and we later rehydrate from history.
     void pollApprovalOnce(sid)
     startApprovalPolling(sid)
+    startPolling(sid)
 
     const cleanup = () => {
       streamStates.value.delete(sid)
@@ -1516,6 +1609,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               toolName: evt.tool || evt.name || evt.tool_name,
               toolPreview: pickToolPreview(evt),
               toolArgs: pickToolArgs(evt),
+              toolCallId: pickToolCallId(evt),
               toolStatus: 'running',
             }
             addMessage(sid, toolMessage)
@@ -1530,10 +1624,14 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               m => m.role === 'tool' && m.toolStatus === 'running',
             )
             if (toolMsgs.length > 0) {
-              const last = toolMsgs[toolMsgs.length - 1]
+              const eventToolCallId = pickToolCallId(evt)
+              const last = (eventToolCallId && toolMsgs.find(m => m.toolCallId === eventToolCallId))
+                || toolMsgs[toolMsgs.length - 1]
               updateMessage(sid, last.id, {
-                toolPreview: last.toolPreview || pickToolPreview(evt),
+                toolPreview: betterToolText(last.toolPreview, pickToolPreview(evt)),
+                toolArgs: betterToolText(last.toolArgs, pickToolArgs(evt)),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+                toolCallId: last.toolCallId || eventToolCallId,
               })
             }
             schedulePersist()
@@ -1548,11 +1646,15 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               m => m.role === 'tool' && m.toolStatus === 'running',
             )
             if (toolMsgs.length > 0) {
-              const last = toolMsgs[toolMsgs.length - 1]
+              const eventToolCallId = pickToolCallId(evt)
+              const last = (eventToolCallId && toolMsgs.find(m => m.toolCallId === eventToolCallId))
+                || toolMsgs[toolMsgs.length - 1]
               updateMessage(sid, last.id, {
                 toolStatus: 'done',
-                toolPreview: last.toolPreview || pickToolPreview(evt),
+                toolPreview: betterToolText(last.toolPreview, pickToolPreview(evt)),
+                toolArgs: betterToolText(last.toolArgs, pickToolArgs(evt)),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+                toolCallId: last.toolCallId || eventToolCallId,
               })
             }
             if (approvalsBySession.value[sid]?.pending?._optimistic) {
@@ -1741,8 +1843,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         // has caught up.
         const local = activeSession.value.messages
         const { serverIsAhead } = compareServerMessages(local, mapped)
-        if (serverIsAhead || serverHasBetterToolDetails(local, mapped)) {
+        if (serverIsAhead) {
           activeSession.value.messages = withLocalSteeredMessages(mapped, activeSession.value.messages)
+        } else if (serverHasBetterToolDetails(local, mapped)) {
+          activeSession.value.messages = mergeServerToolDetails(activeSession.value.messages, mapped)
         }
         void refreshSessionBranches(sessionId)
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {
