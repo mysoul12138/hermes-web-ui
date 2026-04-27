@@ -70,6 +70,9 @@ export interface RunEvent {
   pattern_key?: string
   pattern_keys?: string[]
   pending_count?: number
+  request_id?: string
+  question?: string
+  choices?: string[]
   subagent_id?: string
   parent_id?: string
   depth?: number
@@ -119,6 +122,7 @@ function emitParsedEvent(eventName: string, raw: string, onEvent: (event: RunEve
 
 const NAMED_RUN_EVENTS = [
   'approval',
+  'clarify',
   'message.delta',
   'message.complete',
   'reasoning.delta',

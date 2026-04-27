@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Attachment } from '@/stores/hermes/chat'
 import ApprovalPrompt from './ApprovalPrompt.vue'
+import ClarifyPrompt from './ClarifyPrompt.vue'
 import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
@@ -213,6 +214,13 @@ function isImage(type: string): boolean {
       :pending-count="chatStore.activeApproval.pendingCount"
       :submitting="chatStore.activeApproval.submitting"
       @approve="chatStore.respondApproval"
+    />
+    <ClarifyPrompt
+      v-if="chatStore.activeClarify?.pending"
+      class="approval-slot"
+      :pending="chatStore.activeClarify.pending"
+      :submitting="chatStore.activeClarify.submitting"
+      @respond="chatStore.respondClarify"
     />
 
     <!-- Top bar: attach + context info -->

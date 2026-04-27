@@ -7,7 +7,10 @@ import YAML from 'js-yaml'
 import {
   clearLivePendingApproval,
   clearLivePendingApprovalForRun,
+  clearLivePendingClarify,
+  clearLivePendingClarifyForRun,
   setLivePendingApprovalForRun,
+  setLivePendingClarifyForRun,
   setRunSession,
 } from './run-state'
 import { getActiveConfigPath } from './hermes-profile'
@@ -44,6 +47,9 @@ export interface BridgeRunEvent {
   pattern_key?: string
   pattern_keys?: string[]
   pending_count?: number
+  request_id?: string
+  question?: string
+  choices?: string[]
   subagent_id?: string
   parent_id?: string
   depth?: number
@@ -89,6 +95,7 @@ interface RunState {
   idleTimer?: ReturnType<typeof setTimeout>
   completeTimer?: ReturnType<typeof setTimeout>
   pendingApproval?: boolean
+  pendingClarify?: boolean
 }
 
 interface BridgeSessionRef {
@@ -419,6 +426,24 @@ export class TuiBridgeService {
     return { ok: true, choice, bridge: true, result }
   }
 
+  async respondClarify(webSessionId: string, requestId: string, answer: string) {
+    const bridgeSessionId = this.bridgeSessionsByWebSession.get(webSessionId)
+    if (!bridgeSessionId) return null
+    const result = await this.client.request('clarify.respond', {
+      session_id: bridgeSessionId,
+      request_id: requestId,
+      answer,
+    })
+    clearLivePendingClarify(webSessionId)
+    const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
+    if (runId) {
+      const state = this.runs.get(runId)
+      if (state) state.pendingClarify = false
+      this.scheduleIdleHeartbeat(runId)
+    }
+    return { ok: true, answer, bridge: true, result }
+  }
+
   async steer(webSessionId: string, text: string) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
     const bridgeSessionId = this.bridgeSessionsByWebSession.get(webSessionId)
@@ -478,6 +503,9 @@ export class TuiBridgeService {
     state.pendingApproval = false
     clearLivePendingApproval(state.webSessionId)
     clearLivePendingApprovalForRun(runId)
+    state.pendingClarify = false
+    clearLivePendingClarify(state.webSessionId)
+    clearLivePendingClarifyForRun(runId)
 
     const result = await this.client.request('session.interrupt', {
       session_id: state.bridgeSessionId,
@@ -673,6 +701,29 @@ export class TuiBridgeService {
           pending_count: payload.pending_count || 1,
         })
         break
+      case 'clarify.request':
+        {
+          const state = this.runs.get(runId)
+          if (state) {
+            state.pendingClarify = true
+          }
+          this.scheduleIdleHeartbeat(runId)
+        }
+        setLivePendingClarifyForRun(runId, {
+          request_id: typeof payload.request_id === 'string' ? payload.request_id : '',
+          question: typeof payload.question === 'string' ? payload.question : '',
+          choices: Array.isArray(payload.choices) ? payload.choices.map((item: unknown) => String(item)) : [],
+          requested_at: timestamp,
+        })
+        this.push(runId, {
+          event: 'clarify',
+          run_id: runId,
+          timestamp,
+          request_id: payload.request_id,
+          question: payload.question,
+          choices: Array.isArray(payload.choices) ? payload.choices.map((item: unknown) => String(item)) : [],
+        })
+        break
       case 'message.delta':
         this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payload.text || '' })
         this.scheduleIdleHeartbeat(runId)
@@ -713,6 +764,7 @@ export class TuiBridgeService {
         break
       case 'error':
         clearLivePendingApprovalForRun(runId)
+        clearLivePendingClarifyForRun(runId)
         this.push(runId, { event: 'run.failed', run_id: runId, timestamp, error: payload.message || 'Bridge run failed' })
         this.closeRun(runId)
         break
@@ -807,6 +859,7 @@ export class TuiBridgeService {
     this.clearIdleTimer(state)
     this.clearCompleteTimer(state)
     clearLivePendingApprovalForRun(runId)
+    clearLivePendingClarifyForRun(runId)
     this.activeRunsByBridgeSession.delete(state.bridgeSessionId)
     for (const waiter of state.waiters.splice(0)) waiter(null)
   }

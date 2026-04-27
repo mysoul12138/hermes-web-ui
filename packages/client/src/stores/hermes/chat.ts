@@ -5,6 +5,11 @@ import {
   type ApprovalChoice,
   type PendingApproval,
 } from '@/api/hermes/approval'
+import {
+  getPendingClarify,
+  respondClarify as respondClarifyApi,
+  type PendingClarify,
+} from '@/api/hermes/clarify'
 import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionDetail, type SessionSummary } from '@/api/hermes/sessions'
 import { fetchConversationDetail, fetchConversationSummaries, type ConversationBranch, type ConversationMessage, type ConversationSummary } from '@/api/hermes/conversations'
 import { getApiKey } from '@/api/client'
@@ -534,6 +539,13 @@ interface ApprovalState {
   submitting: boolean
 }
 
+interface ClarifyState {
+  pending: PendingClarify | null
+  visibleSince: number
+  signature: string
+  submitting: boolean
+}
+
 function loadJson<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key)
@@ -681,9 +693,11 @@ export const useChatStore = defineStore('chat', () => {
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
   const approvalsBySession = ref<Record<string, ApprovalState>>({})
+  const clarifiesBySession = ref<Record<string, ClarifyState>>({})
   const dbBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const liveBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
+  const clarifyPollers = new Map<string, ReturnType<typeof setInterval>>()
   const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
 
   const activeSession = ref<Session | null>(null)
@@ -698,6 +712,13 @@ export const useChatStore = defineStore('chat', () => {
     const sid = activeSessionId.value
     if (!sid) return null
     return approvalsBySession.value[sid] || null
+  })
+  const activeClarify = computed<ClarifyState | null>(() => {
+    const sid = activeSessionId.value
+    if (!sid) return null
+    return clarifiesBySession.value[sid]
+      || (activeSession.value?.rootSessionId ? clarifiesBySession.value[activeSession.value.rootSessionId] : null)
+      || null
   })
 
   function isSessionLive(sessionId: string): boolean {
@@ -933,6 +954,41 @@ export const useChatStore = defineStore('chat', () => {
     approvalsBySession.value = next
   }
 
+  function buildClarifySignature(sessionId: string, pending: PendingClarify | null) {
+    if (!pending) return ''
+    return JSON.stringify({
+      sid: sessionId,
+      id: pending.request_id || '',
+      question: pending.question || '',
+      choices: pending.choices || [],
+    })
+  }
+
+  function setClarifyPending(sessionId: string, pending: PendingClarify | null) {
+    if (!pending) {
+      clearClarify(sessionId)
+      return
+    }
+
+    const prev = clarifiesBySession.value[sessionId]
+    const signature = buildClarifySignature(sessionId, pending)
+    clarifiesBySession.value = {
+      ...clarifiesBySession.value,
+      [sessionId]: {
+        pending: { ...pending, _session_id: pending._session_id || sessionId },
+        visibleSince: prev?.signature === signature ? prev.visibleSince : Date.now(),
+        signature,
+        submitting: false,
+      },
+    }
+  }
+
+  function clearClarify(sessionId: string) {
+    const next = { ...clarifiesBySession.value }
+    delete next[sessionId]
+    clarifiesBySession.value = next
+  }
+
   function shouldPreserveLiveApproval(sessionId: string) {
     const pending = approvalsBySession.value[sessionId]?.pending
     return !!pending && !pending._optimistic && (isSessionLive(sessionId) || !!readInFlight(sessionId))
@@ -986,6 +1042,44 @@ export const useChatStore = defineStore('chat', () => {
       void pollApprovalOnce(sessionId)
     }, 1500)
     approvalPollers.set(sessionId, timer)
+  }
+
+  function shouldPreserveLiveClarify(sessionId: string) {
+    const pending = clarifiesBySession.value[sessionId]?.pending
+    return !!pending && (isSessionLive(sessionId) || !!readInFlight(sessionId))
+  }
+
+  async function pollClarifyOnce(sessionId: string) {
+    try {
+      const data = await getPendingClarify(sessionId)
+      if (data.pending) {
+        setClarifyPending(sessionId, data.pending)
+      } else if (!shouldPreserveLiveClarify(sessionId)) {
+        clearClarify(sessionId)
+      }
+    } catch {
+      // ignore transient polling errors
+    }
+  }
+
+  function stopClarifyPolling(sessionId: string) {
+    const timer = clarifyPollers.get(sessionId)
+    if (timer) {
+      clearInterval(timer)
+      clarifyPollers.delete(sessionId)
+    }
+  }
+
+  function startClarifyPolling(sessionId: string) {
+    if (clarifyPollers.has(sessionId)) return
+    const timer = setInterval(() => {
+      if (!isSessionLive(sessionId) && !readInFlight(sessionId)) {
+        stopClarifyPolling(sessionId)
+        return
+      }
+      void pollClarifyOnce(sessionId)
+    }, 1500)
+    clarifyPollers.set(sessionId, timer)
   }
 
   async function respondApproval(choice: ApprovalChoice) {
@@ -1484,6 +1578,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       void refreshSessionBranches(sid)
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, target.messages)
+        void pollClarifyOnce(sid)
+        startClarifyPolling(sid)
       } else {
         const pendingState = await getPendingApproval(sid)
         if (pendingState.pending) {
@@ -1494,6 +1590,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         } else {
           clearApproval(sid)
         }
+        clearClarify(sid)
       }
       if (detail.title) target.title = detail.title
       return true
@@ -1508,7 +1605,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     markInFlight(sid, runId)
     stopPolling(sid)
     stopApprovalPolling(sid)
+    stopClarifyPolling(sid)
     clearApproval(sid)
+    clearClarify(sid)
 
     // Proactively poll approval state even during the live SSE run. This covers
     // gateways/upstreams that delay or omit a named `approval` SSE event; the UI
@@ -1516,6 +1615,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // not only after the round finishes and we later rehydrate from history.
     void pollApprovalOnce(sid)
     startApprovalPolling(sid)
+    void pollClarifyOnce(sid)
+    startClarifyPolling(sid)
     startPolling(sid)
 
     const cleanup = () => {
@@ -1584,6 +1685,18 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               _session_id: sid,
             }, evt.pending_count || 1)
             startApprovalPolling(sid)
+            break
+          }
+
+          case 'clarify': {
+            setClarifyPending(sid, {
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : '',
+              question: typeof evt.question === 'string' ? evt.question : '',
+              choices: Array.isArray(evt.choices) ? evt.choices.map(String) : [],
+              requested_at: typeof evt.timestamp === 'number' ? evt.timestamp : undefined,
+              _session_id: sid,
+            })
+            startClarifyPolling(sid)
             break
           }
 
@@ -1777,7 +1890,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             clearInFlight(sid)
             stopPolling(sid)
             stopApprovalPolling(sid)
+            stopClarifyPolling(sid)
             clearApproval(sid)
+            clearClarify(sid)
             if (sid === activeSessionId.value) {
               void refreshActiveSession().finally(() => {
                 void refreshSessionBranches(sid)
@@ -1818,7 +1933,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             clearInFlight(sid)
             stopPolling(sid)
             stopApprovalPolling(sid)
+            stopClarifyPolling(sid)
             clearApproval(sid)
+            clearClarify(sid)
             break
           }
         }
@@ -1834,7 +1951,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         clearInFlight(sid)
         stopPolling(sid)
         stopApprovalPolling(sid)
+        stopClarifyPolling(sid)
         clearApproval(sid)
+        clearClarify(sid)
         if (sid === activeSessionId.value) persistActiveMessages()
         void submitNextQueuedMessage(sid)
       },
@@ -1858,6 +1977,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           startPolling(sid)
           void pollApprovalOnce(sid)
           startApprovalPolling(sid)
+          void pollClarifyOnce(sid)
+          startClarifyPolling(sid)
         }
       },
     )
@@ -1928,6 +2049,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         void refreshSessionBranches(sessionId)
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {
           syncApprovalFromMessages(sessionId, activeSession.value.messages)
+          void pollClarifyOnce(sessionId)
+          startClarifyPolling(sessionId)
         } else {
           const pendingState = await getPendingApproval(sessionId)
           if (pendingState.pending) {
@@ -1938,6 +2061,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           } else {
             clearApproval(sessionId)
           }
+          clearClarify(sessionId)
         }
         // Update title: use Hermes title, or fallback to first user message
         if (detail.title) {
@@ -1965,6 +2089,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       resumeInFlightRun(sessionId)
       void pollApprovalOnce(sessionId)
       startApprovalPolling(sessionId)
+      void pollClarifyOnce(sessionId)
+      startClarifyPolling(sessionId)
     }
 
     // Fetch token usage for this session from web-ui DB
@@ -2002,7 +2128,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     clearBridgeLocalSession(sessionId)
     stopPolling(sessionId)
     stopApprovalPolling(sessionId)
+    stopClarifyPolling(sessionId)
     clearApproval(sessionId)
+    clearClarify(sessionId)
     persistSessionsList()
     if (activeSessionId.value === sessionId) {
       if (sessions.value.length > 0) {
@@ -2143,6 +2271,41 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     void refreshSessionBranches(sessionId)
   }
 
+  async function respondClarify(answer: string) {
+    const sid = activeSessionId.value
+    if (!sid) return
+    const state = activeClarify.value
+    if (!state?.pending || !answer.trim()) return
+    const targetSessionId = state.pending._session_id || sid
+
+    clarifiesBySession.value = {
+      ...clarifiesBySession.value,
+      [targetSessionId]: {
+        ...state,
+        submitting: true,
+      },
+    }
+
+    try {
+      await respondClarifyApi({
+        session_id: targetSessionId,
+        request_id: state.pending.request_id,
+        answer: answer.trim(),
+      })
+      clearClarify(targetSessionId)
+      await pollClarifyOnce(targetSessionId)
+    } catch (error) {
+      clarifiesBySession.value = {
+        ...clarifiesBySession.value,
+        [targetSessionId]: {
+          ...state,
+          submitting: false,
+        },
+      }
+      throw error
+    }
+  }
+
   async function submitMessage(sid: string, content: string, attachments?: Attachment[], existingUserMessageId?: string) {
     let userMessageId = existingUserMessageId
     // Build conversation history before adding/unqueueing the current message,
@@ -2276,13 +2439,17 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       streamStates.value.delete(sid)
       stopPolling(sid)
       stopApprovalPolling(sid)
+      stopClarifyPolling(sid)
       clearApproval(sid)
+      clearClarify(sid)
       if (sid === activeSessionId.value) persistActiveMessages()
       persistSessionsList()
     } else {
       stopPolling(sid)
       stopApprovalPolling(sid)
+      stopClarifyPolling(sid)
       clearApproval(sid)
+      clearClarify(sid)
       if (sid === activeSessionId.value) persistActiveMessages()
       persistSessionsList()
     }
@@ -2311,6 +2478,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           resumeInFlightRun(activeSessionId.value)
           void pollApprovalOnce(activeSessionId.value)
           startApprovalPolling(activeSessionId.value)
+          void pollClarifyOnce(activeSessionId.value)
+          startClarifyPolling(activeSessionId.value)
         }
       }
     })
@@ -2381,6 +2550,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     activeSessionId,
     activeSession,
     activeApproval,
+    activeClarify,
     focusMessageId,
     messages,
     displayMessages,
@@ -2402,6 +2572,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     deleteSession,
     sendMessage,
     respondApproval,
+    respondClarify,
     stopStreaming,
     loadSessions,
     refreshSessionBranches,

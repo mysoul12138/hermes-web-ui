@@ -7,10 +7,18 @@ export interface LivePendingApproval {
   pending_count?: number
 }
 
+export interface LivePendingClarify {
+  request_id: string
+  question: string
+  choices: string[]
+  requested_at?: number
+}
+
 const RUN_TTL_MS = 30 * 60 * 1000
 
 const runSessionMap = new Map<string, string>()
 const liveApprovalsBySession = new Map<string, LivePendingApproval>()
+const liveClarifiesBySession = new Map<string, LivePendingClarify>()
 const cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function resetRunTimer(runId: string) {
@@ -20,7 +28,10 @@ function resetRunTimer(runId: string) {
     cleanupTimers.delete(runId)
     const sessionId = runSessionMap.get(runId)
     runSessionMap.delete(runId)
-    if (sessionId) liveApprovalsBySession.delete(sessionId)
+    if (sessionId) {
+      liveApprovalsBySession.delete(sessionId)
+      liveClarifiesBySession.delete(sessionId)
+    }
   }, RUN_TTL_MS))
 }
 
@@ -45,10 +56,30 @@ export function clearLivePendingApprovalForRun(runId: string): void {
   if (sessionId) liveApprovalsBySession.delete(sessionId)
 }
 
+export function setLivePendingClarifyForRun(runId: string, pending: LivePendingClarify): void {
+  const sessionId = runSessionMap.get(runId)
+  if (!sessionId) return
+  liveClarifiesBySession.set(sessionId, pending)
+  resetRunTimer(runId)
+}
+
+export function clearLivePendingClarifyForRun(runId: string): void {
+  const sessionId = runSessionMap.get(runId)
+  if (sessionId) liveClarifiesBySession.delete(sessionId)
+}
+
 export function getLivePendingApproval(sessionId: string): LivePendingApproval | null {
   return liveApprovalsBySession.get(sessionId) || null
 }
 
 export function clearLivePendingApproval(sessionId: string): void {
   liveApprovalsBySession.delete(sessionId)
+}
+
+export function getLivePendingClarify(sessionId: string): LivePendingClarify | null {
+  return liveClarifiesBySession.get(sessionId) || null
+}
+
+export function clearLivePendingClarify(sessionId: string): void {
+  liveClarifiesBySession.delete(sessionId)
 }

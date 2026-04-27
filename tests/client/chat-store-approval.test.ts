@@ -20,9 +20,15 @@ const mockApprovalApi = vi.hoisted(() => ({
   respondApproval: vi.fn(),
 }))
 
+const mockClarifyApi = vi.hoisted(() => ({
+  getPendingClarify: vi.fn(),
+  respondClarify: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
 vi.mock('@/api/hermes/approval', () => mockApprovalApi)
+vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
 
@@ -45,6 +51,8 @@ describe('Chat Store approvals', () => {
     mockSessionsApi.deleteSession.mockResolvedValue(true)
     mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
     mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
+    mockClarifyApi.getPendingClarify.mockResolvedValue({ pending: null, pending_count: 0 })
+    mockClarifyApi.respondClarify.mockResolvedValue({ ok: true, answer: 'ok' })
   })
 
   it('tracks the active approval and responds with approval_id', async () => {

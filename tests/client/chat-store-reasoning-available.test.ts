@@ -16,8 +16,20 @@ const mockSessionsApi = vi.hoisted(() => ({
   fetchSessionUsageSingle: vi.fn(),
 }))
 
+const mockApprovalApi = vi.hoisted(() => ({
+  getPendingApproval: vi.fn(),
+  respondApproval: vi.fn(),
+}))
+
+const mockClarifyApi = vi.hoisted(() => ({
+  getPendingClarify: vi.fn(),
+  respondClarify: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
+vi.mock('@/api/hermes/approval', () => mockApprovalApi)
+vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
 
@@ -51,6 +63,8 @@ describe('chat store — reasoning.available should not clobber content', () => 
     mockSessionsApi.fetchSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.fetchSessionUsageSingle?.mockResolvedValue?.(null)
+    mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
+    mockClarifyApi.getPendingClarify.mockResolvedValue({ pending: null, pending_count: 0 })
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued' })
   })

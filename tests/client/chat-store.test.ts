@@ -27,10 +27,16 @@ const mockApprovalApi = vi.hoisted(() => ({
   respondApproval: vi.fn(),
 }))
 
+const mockClarifyApi = vi.hoisted(() => ({
+  getPendingClarify: vi.fn(),
+  respondClarify: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
 vi.mock('@/api/hermes/conversations', () => mockConversationsApi)
 vi.mock('@/api/hermes/approval', () => mockApprovalApi)
+vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
 import { useSettingsStore } from '@/stores/hermes/settings'
@@ -93,6 +99,8 @@ describe('Chat Store', () => {
     mockConversationsApi.fetchConversationDetail.mockRejectedValue(new Error('conversation detail unavailable'))
     mockApprovalApi.getPendingApproval.mockResolvedValue({ pending: null, pending_count: 0 })
     mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
+    mockClarifyApi.getPendingClarify.mockResolvedValue({ pending: null, pending_count: 0 })
+    mockClarifyApi.respondClarify.mockResolvedValue({ ok: true, answer: 'ok' })
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
     mockChatApi.cancelRun.mockResolvedValue(undefined)
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
@@ -982,5 +990,40 @@ describe('Chat Store', () => {
 
     expect(store.messages.some(m => m.content.includes('No issues found'))).toBe(true)
     expect(store.isSessionLive('subagent-1')).toBe(false)
+  })
+
+  it('shows and responds to live clarify prompts', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('clean disk')
+    const sid = store.activeSessionId!
+
+    onEvent?.({
+      event: 'clarify',
+      request_id: 'clarify-1',
+      question: 'Continue cleanup?',
+      choices: ['stop', 'delete cache'],
+      timestamp: 1710000100,
+    })
+
+    expect(store.activeClarify?.pending?.question).toBe('Continue cleanup?')
+    expect(store.activeClarify?.pending?.choices).toEqual(['stop', 'delete cache'])
+
+    await store.respondClarify('delete cache')
+
+    expect(mockClarifyApi.respondClarify).toHaveBeenCalledWith({
+      session_id: sid,
+      request_id: 'clarify-1',
+      answer: 'delete cache',
+    })
+    expect(store.activeClarify).toBeNull()
   })
 })

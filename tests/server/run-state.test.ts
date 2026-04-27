@@ -56,4 +56,29 @@ describe('run-state module', () => {
 
     expect(getLivePendingApproval('session-4')).toBeNull()
   })
+
+  it('stores and clears live clarify prompts by session', async () => {
+    const {
+      setRunSession,
+      setLivePendingClarifyForRun,
+      getLivePendingClarify,
+      clearLivePendingClarify,
+    } = await import('../../packages/server/src/services/hermes/run-state')
+    setRunSession('run-5', 'session-5')
+    setLivePendingClarifyForRun('run-5', {
+      request_id: 'clarify-1',
+      question: 'Pick one',
+      choices: ['a', 'b'],
+    })
+
+    expect(getLivePendingClarify('session-5')).toEqual({
+      request_id: 'clarify-1',
+      question: 'Pick one',
+      choices: ['a', 'b'],
+    })
+
+    clearLivePendingClarify('session-5')
+
+    expect(getLivePendingClarify('session-5')).toBeNull()
+  })
 })
