@@ -92,6 +92,138 @@ describe('conversations service', () => {
     ])
   })
 
+  it('aggregates an orphan continuation that starts immediately after compression', async () => {
+    exportSessionsRawMock.mockResolvedValue([
+      {
+        id: 'root',
+        parent_session_id: null,
+        source: 'cli',
+        model: 'openai/gpt-5.4',
+        title: 'Root',
+        started_at: 100,
+        ended_at: 110,
+        end_reason: 'compression',
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 5,
+        output_tokens: 8,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 1, session_id: 'root', role: 'user', content: 'Start here', timestamp: 101 },
+        ],
+      },
+      {
+        id: 'orphan-cont',
+        parent_session_id: null,
+        source: 'cli',
+        model: 'openai/gpt-5.4',
+        title: 'Continuation',
+        started_at: 111,
+        ended_at: 112,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 3,
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 2, session_id: 'orphan-cont', role: 'assistant', content: 'Continued answer', timestamp: 112 },
+        ],
+      },
+    ])
+
+    const mod = await import('../../packages/server/src/services/hermes/conversations')
+    const summaries = await mod.listConversationSummaries({ humanOnly: true })
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      id: 'root',
+      thread_session_count: 2,
+      input_tokens: 3,
+      output_tokens: 4,
+    })
+
+    const detail = await mod.getConversationDetail('root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'orphan-cont'])
+  })
+
+  it('aggregates a delayed orphan continuation when the visible content is duplicated', async () => {
+    exportSessionsRawMock.mockResolvedValue([
+      {
+        id: 'root',
+        parent_session_id: null,
+        source: 'cli',
+        model: 'openai/gpt-5.4',
+        title: 'Duplicated chat',
+        started_at: 100,
+        ended_at: 110,
+        end_reason: 'compression',
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 5,
+        output_tokens: 8,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 1, session_id: 'root', role: 'user', content: 'same visible conversation', timestamp: 101 },
+        ],
+      },
+      {
+        id: 'duplicate-cont',
+        parent_session_id: null,
+        source: 'cli',
+        model: 'openai/gpt-5.4',
+        title: 'Duplicated chat',
+        started_at: 200,
+        ended_at: 201,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 3,
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 2, session_id: 'duplicate-cont', role: 'user', content: 'same visible conversation', timestamp: 200 },
+        ],
+      },
+    ])
+
+    const mod = await import('../../packages/server/src/services/hermes/conversations')
+    const summaries = await mod.listConversationSummaries({ humanOnly: true })
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      id: 'root',
+      thread_session_count: 2,
+    })
+
+    const detail = await mod.getConversationDetail('root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'duplicate-cont'])
+  })
+
   it('treats branched children as their own visible conversations', async () => {
     exportSessionsRawMock.mockResolvedValue([
       {

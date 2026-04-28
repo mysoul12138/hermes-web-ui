@@ -2,6 +2,7 @@ import { exportSessionsRaw, type HermesSessionFull } from './hermes-cli'
 import { listLiveTuiSessionKeys } from './tui-live'
 
 const LINEAGE_TOLERANCE_SECONDS = 3
+const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const LIVE_WINDOW_SECONDS = 300
 const EXPORT_CACHE_TTL_MS = 30000
 const DEFAULT_CONVERSATION_LIMIT = 200
@@ -249,6 +250,50 @@ function timingMatchesParent(parent: ConversationSession | undefined, child: Con
   return Math.abs(Number(child.started_at || 0) - Number(parent.ended_at || 0)) <= LINEAGE_TOLERANCE_SECONDS
 }
 
+function isCompressionEndReason(reason: unknown): boolean {
+  return reason === 'compression' || reason === 'compressed'
+}
+
+function isLikelyOrphanContinuation(parent: ConversationSession, child: ConversationSession): boolean {
+  if (child.id === parent.id || child.source !== parent.source || child.source === 'tool') return false
+  if (parent.ended_at == null) return false
+  const delta = Number(child.started_at || 0) - Number(parent.ended_at || 0)
+  if (delta < 0) return false
+  if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
+  if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
+
+  const parentPreview = normalizeText(parent.preview)
+  const childPreview = normalizeText(child.preview)
+  if (parentPreview && childPreview && parentPreview === childPreview) return true
+
+  const parentTitle = normalizeText(parent.title)
+  const childTitle = normalizeText(child.title)
+  return !!parentTitle && !!childTitle && parentTitle === childTitle
+}
+
+function linkOrphanCompressionContinuations(sessions: ConversationSession[]) {
+  const parentless = sessions.filter(session => session.parent_session_id == null && session.source !== 'tool')
+  const assignments = new Map<string, string | null>()
+
+  for (const parent of sessions) {
+    if (!isCompressionEndReason(parent.end_reason) || parent.ended_at == null) continue
+    const candidates = parentless.filter(child => {
+      return isLikelyOrphanContinuation(parent, child)
+    })
+    if (candidates.length !== 1) continue
+
+    const child = candidates[0]
+    const previous = assignments.get(child.id)
+    assignments.set(child.id, previous == null ? parent.id : null)
+  }
+
+  for (const [childId, parentId] of assignments) {
+    if (!parentId) continue
+    const child = sessions.find(session => session.id === childId)
+    if (child && child.parent_session_id == null) child.parent_session_id = parentId
+  }
+}
+
 function isBranchRoot(session: ConversationSession | undefined, byId: Map<string, ConversationSession>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
@@ -267,7 +312,7 @@ function continuationCandidates(parent: ConversationSession, byId: Map<string, C
     .filter((child): child is ConversationSession => !!child)
     .filter(child => allowTool || child.source !== 'tool')
     .filter(child => child.source === parent.source)
-    .filter(child => timingMatchesParent(parent, child))
+    .filter(child => isLikelyOrphanContinuation(parent, child))
     .sort((a, b) => {
       const aDelta = Math.abs(Number(a.started_at || 0) - Number(parent.ended_at || 0))
       const bDelta = Math.abs(Number(b.started_at || 0) - Number(parent.ended_at || 0))
@@ -277,7 +322,7 @@ function continuationCandidates(parent: ConversationSession, byId: Map<string, C
 }
 
 function nextContinuationChild(parent: ConversationSession, byId: Map<string, ConversationSession>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSession | null {
-  if (parent.end_reason !== 'compression') return null
+  if (!isCompressionEndReason(parent.end_reason)) return null
   const candidates = continuationCandidates(parent, byId, childrenByParent, allowTool)
   if (candidates.length === 1) return candidates[0]
 
@@ -457,11 +502,11 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSession>
     branch_session_count: branchSessionCount,
     message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
     tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
-    input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
-    output_tokens: chain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
-    cache_read_tokens: chain.reduce((sum, session) => sum + Number(session.cache_read_tokens || 0), 0),
-    cache_write_tokens: chain.reduce((sum, session) => sum + Number(session.cache_write_tokens || 0), 0),
-    reasoning_tokens: chain.reduce((sum, session) => sum + Number(session.reasoning_tokens || 0), 0),
+    input_tokens: Number(last.input_tokens || 0),
+    output_tokens: Number(last.output_tokens || 0),
+    cache_read_tokens: Number(last.cache_read_tokens || 0),
+    cache_write_tokens: Number(last.cache_write_tokens || 0),
+    reasoning_tokens: Number(last.reasoning_tokens || 0),
     estimated_cost_usd: chain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
     actual_cost_usd: chain.reduce<number | null>((sum, session) => {
       const actual = session.actual_cost_usd
@@ -489,6 +534,7 @@ async function loadSessions(source?: string): Promise<ConversationSession[]> {
   const nowSeconds = nowMs / 1000
   const liveTuiSessionKeys = await listLiveTuiSessionKeys()
   const sessions = raws.map(raw => enrichSession(raw, nowSeconds, liveTuiSessionKeys))
+  linkOrphanCompressionContinuations(sessions)
   if (source && source !== 'tui') return sessions
 
   const knownIds = new Set(sessions.map(session => session.id))

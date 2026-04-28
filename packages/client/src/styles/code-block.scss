@@ -44,12 +44,20 @@
 
   code.hljs {
     display: block;
+    max-width: 100%;
     padding: 12px;
     font-family: $font-code;
     font-size: 13px;
     line-height: 1.5;
     overflow-x: auto;
   }
+}
+
+.message.user .hljs-code-block code.hljs,
+.message.system .hljs-code-block code.hljs {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 // highlight.js theme override — higher-contrast, still calm

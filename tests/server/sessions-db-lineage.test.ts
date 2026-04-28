@@ -182,6 +182,71 @@ describe('session DB compression lineage', () => {
     })
   })
 
+  it('merges an orphan session that starts immediately after compression', async () => {
+    insertSession(db!, {
+      id: 'root',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 1,
+    })
+    insertSession(db!, {
+      id: 'orphan-cont',
+      parent_session_id: null,
+      title: 'Continuation without parent',
+      started_at: 201,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+    })
+    insertMessage(db!, { id: 21, session_id: 'root', content: 'before compression', timestamp: 101 })
+    insertMessage(db!, { id: 22, session_id: 'orphan-cont', content: 'after compression', timestamp: 202 })
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const rows = await mod.listSessionSummaries(undefined, 20)
+
+    expect(rows.map((row: any) => row.id)).toEqual(['orphan-cont'])
+
+    const detail = await mod.getSessionDetailFromDb('root')
+    expect(detail).toMatchObject({
+      id: 'root',
+      thread_session_count: 2,
+      message_count: 2,
+    })
+    expect(detail?.messages.map(message => message.session_id)).toEqual(['root', 'orphan-cont'])
+  })
+
+  it('merges a delayed orphan continuation when the visible content is duplicated', async () => {
+    insertSession(db!, {
+      id: 'root',
+      title: 'Duplicated chat',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 1,
+    })
+    insertSession(db!, {
+      id: 'duplicate-cont',
+      parent_session_id: null,
+      title: 'Duplicated chat',
+      started_at: 260,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+    })
+    insertMessage(db!, { id: 31, session_id: 'root', content: 'same visible conversation', timestamp: 101 })
+    insertMessage(db!, { id: 32, session_id: 'duplicate-cont', content: 'same visible conversation', timestamp: 261 })
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const rows = await mod.listSessionSummaries(undefined, 20)
+
+    expect(rows.map((row: any) => row.id)).toEqual(['duplicate-cont'])
+
+    const detail = await mod.getSessionDetailFromDb('duplicate-cont')
+    expect(detail?.thread_session_count).toBe(2)
+    expect(detail?.messages.map(message => message.session_id)).toEqual(['root', 'duplicate-cont'])
+  })
+
   it('returns the projected logical session when search matches continuation content', async () => {
     seedCompressionChain(db!)
 

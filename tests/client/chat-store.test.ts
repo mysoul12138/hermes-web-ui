@@ -40,6 +40,7 @@ vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
 import { useSettingsStore } from '@/stores/hermes/settings'
+import { useAppStore } from '@/stores/hermes/app'
 
 function makeSummary(id: string, title = 'Session') {
   return {
@@ -552,6 +553,55 @@ describe('Chat Store', () => {
 
     expect(store.activeSession?.inputTokens).toBe(13000)
     expect(store.activeSession?.outputTokens).toBe(700)
+  })
+
+  it('sends the currently selected model instead of the model captured at session creation', async () => {
+    const appStore = useAppStore()
+    appStore.selectedModel = 'old-model'
+    appStore.selectedProvider = 'old-provider'
+
+    const store = useChatStore()
+    store.newChat()
+    expect(store.activeSession?.model).toBe('old-model')
+
+    appStore.selectedModel = 'new-model'
+    appStore.selectedProvider = 'new-provider'
+    await store.sendMessage('use the latest model')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'new-model',
+    }))
+    expect(store.activeSession?.model).toBe('new-model')
+    expect(store.activeSession?.provider).toBe('new-provider')
+  })
+
+  it('persists streamed messages for a background session after switching away', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-22T19:00:00.000Z'))
+
+    let onEvent!: (event: any) => void
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([
+      makeSummary('sess-1', 'First'),
+      makeSummary('sess-2', 'Second'),
+    ])
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => makeDetail(id, []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.switchSession('sess-1')
+    await store.sendMessage('background run')
+    await store.switchSession('sess-2')
+
+    onEvent({ event: 'message.delta', delta: 'background answer' })
+    await vi.advanceTimersByTimeAsync(900)
+
+    const persisted = JSON.parse(window.localStorage.getItem(sessionMessagesKey('sess-1')) || '[]')
+    expect(persisted.some((message: any) => message.content === 'background answer')).toBe(true)
   })
 
   it('queues busy input and sends it after the current run completes', async () => {

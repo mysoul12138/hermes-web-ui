@@ -220,6 +220,138 @@ describe('conversation DB service', () => {
     )
   })
 
+  it('aggregates an orphan continuation without showing it as a separate conversation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'cli',
+      model: 'openai/gpt-5.4',
+      title: 'Root',
+      started_at: 100,
+      ended_at: 110,
+      end_reason: 'compression',
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 5,
+      output_tokens: 8,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'orphan-cont',
+      parent_session_id: null,
+      source: 'cli',
+      model: 'openai/gpt-5.4',
+      title: 'Continuation',
+      started_at: 111,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 11, session_id: 'root', role: 'user', content: 'Start here', timestamp: 101 })
+    insertMessage(db, { id: 12, session_id: 'orphan-cont', role: 'assistant', content: 'Continued answer', timestamp: 112 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['orphan-cont'])
+    expect(summaries[0]).toMatchObject({
+      started_at: 100,
+      thread_session_count: 2,
+      input_tokens: 3,
+      output_tokens: 4,
+    })
+
+    const detail = await mod.getConversationDetailFromDb('orphan-cont', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'orphan-cont'])
+  })
+
+  it('aggregates a delayed orphan continuation when the visible content is duplicated', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'cli',
+      model: 'openai/gpt-5.4',
+      title: 'Duplicated chat',
+      started_at: 100,
+      ended_at: 110,
+      end_reason: 'compression',
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 5,
+      output_tokens: 8,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'duplicate-cont',
+      parent_session_id: null,
+      source: 'cli',
+      model: 'openai/gpt-5.4',
+      title: 'Duplicated chat',
+      started_at: 200,
+      ended_at: 201,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 21, session_id: 'root', role: 'user', content: 'same visible conversation', timestamp: 101 })
+    insertMessage(db, { id: 22, session_id: 'duplicate-cont', role: 'user', content: 'same visible conversation', timestamp: 200 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['duplicate-cont'])
+    expect(summaries[0]).toMatchObject({
+      started_at: 100,
+      thread_session_count: 2,
+    })
+
+    const detail = await mod.getConversationDetailFromDb('duplicate-cont', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'duplicate-cont'])
+  })
+
   it('treats branched children as their own visible conversations', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')

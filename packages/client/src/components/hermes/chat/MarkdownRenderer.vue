@@ -296,6 +296,8 @@ function handleMarkdownClick(event: MouseEvent): void {
     font-family: $font-code;
     font-size: 13px;
     color: $accent-primary;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   table {

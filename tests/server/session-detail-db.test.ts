@@ -206,6 +206,8 @@ describe('session DB detail', () => {
     expect(detail?.id).toBe('root')
     expect(detail?.message_count).toBe(4)
     expect(detail?.tool_call_count).toBe(1)
+    expect(detail?.input_tokens).toBe(3)
+    expect(detail?.output_tokens).toBe(4)
     expect(detail?.ended_at).toBe(120)
     expect(detail?.cost_status).toBe('mixed')
     expect(detail?.actual_cost_usd).toBeCloseTo(0.3)

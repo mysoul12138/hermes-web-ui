@@ -308,7 +308,7 @@ function mergeToolResult(previous: string | undefined, next: string | undefined)
   return `${previous}\n\n${next}`
 }
 
-function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number } | null | undefined) {
+function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number } | null | undefined, options: { allowReset?: boolean } = {}) {
   if (!session || !usage) return
   const currentInput = session.inputTokens ?? 0
   const currentOutput = session.outputTokens ?? 0
@@ -316,10 +316,21 @@ function applySessionUsage(session: Session | undefined | null, usage: { input_t
   const nextInput = usage.input_tokens ?? 0
   const nextOutput = usage.output_tokens ?? 0
   const nextTotal = nextInput + nextOutput
-  if (nextTotal > 0 && (currentTotal === 0 || nextTotal >= currentTotal)) {
+  if (nextTotal > 0 && (options.allowReset || currentTotal === 0 || nextTotal >= currentTotal)) {
     session.inputTokens = nextInput
     session.outputTokens = nextOutput
   }
+}
+
+function applySessionDetail(session: Session | undefined | null, detail: Partial<SessionDetail> | null | undefined) {
+  if (!session || !detail) return
+  if (detail.source) session.source = detail.source
+  if (detail.model) session.model = detail.model
+  if (detail.billing_provider != null) session.provider = detail.billing_provider || ''
+  if (detail.message_count != null) session.messageCount = detail.message_count
+  if (detail.ended_at !== undefined) session.endedAt = detail.ended_at != null ? Math.round(detail.ended_at * 1000) : null
+  if (detail.last_active != null) session.lastActiveAt = Math.round(detail.last_active * 1000)
+  applySessionUsage(session, detail as { input_tokens: number; output_tokens: number }, { allowReset: true })
 }
 
 function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
@@ -1138,11 +1149,15 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
-  function persistActiveMessages() {
-    const sid = activeSessionId.value
+  function persistSessionMessages(sid: string) {
     if (!sid) return
     const s = sessions.value.find(sess => sess.id === sid)
     if (s) saveJsonWithLegacy(msgsCacheKey(sid), sanitizeForCache(s.messages), legacyMsgsCacheKey(sid))
+  }
+
+  function persistActiveMessages() {
+    const sid = activeSessionId.value
+    if (sid) persistSessionMessages(sid)
   }
 
 function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
@@ -1574,7 +1589,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         target.messages = mergeServerToolDetails(target.messages, mapped)
         persistActiveMessages()
       }
-      applySessionUsage(target, detail)
+      applySessionDetail(target, detail)
       void refreshSessionBranches(sid)
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, target.messages)
@@ -1636,10 +1651,11 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     let runProducedAssistantText = false
     let runHadToolActivity = false
     const schedulePersist = () => {
-      if (sid !== activeSessionId.value || persistTimer) return
+      if (persistTimer) return
       persistTimer = setTimeout(() => {
         persistTimer = null
-        persistActiveMessages()
+        persistSessionMessages(sid)
+        persistSessionsList()
       }, 800)
     }
 
@@ -1886,7 +1902,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             }
             cleanup()
             updateSessionTitle(sid)
-            if (sid === activeSessionId.value) persistActiveMessages()
+            persistSessionMessages(sid)
+            persistSessionsList()
             clearInFlight(sid)
             stopPolling(sid)
             stopApprovalPolling(sid)
@@ -1929,7 +1946,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               clearApproval(sid)
             }
             cleanup()
-            if (sid === activeSessionId.value) persistActiveMessages()
+            persistSessionMessages(sid)
+            persistSessionsList()
             clearInFlight(sid)
             stopPolling(sid)
             stopApprovalPolling(sid)
@@ -1954,7 +1972,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         stopClarifyPolling(sid)
         clearApproval(sid)
         clearClarify(sid)
-        if (sid === activeSessionId.value) persistActiveMessages()
+        persistSessionMessages(sid)
+        persistSessionsList()
         void submitNextQueuedMessage(sid)
       },
       (err) => {
@@ -1973,6 +1992,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         if (sid === activeSessionId.value) {
           void refreshActiveSession()
         }
+        persistSessionMessages(sid)
+        persistSessionsList()
         if (readInFlight(sid)) {
           startPolling(sid)
           void pollApprovalOnce(sid)
@@ -2073,7 +2094,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             activeSession.value.title = t + (firstUser.content.length > 40 ? '...' : '')
           }
         }
-        applySessionUsage(activeSession.value, detail)
+        applySessionDetail(activeSession.value, detail)
         persistActiveMessages()
       }
     } catch (err) {
@@ -2149,7 +2170,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   function addMessage(sessionId: string, msg: Message) {
     const s = sessions.value.find(s => s.id === sessionId)
-    if (s) s.messages.push(msg)
+    if (s) {
+      s.messages.push(msg)
+      s.updatedAt = Math.max(s.updatedAt || 0, msg.timestamp || Date.now())
+    }
   }
 
   function updateMessage(sessionId: string, id: string, update: Partial<Message>) {
@@ -2370,7 +2394,12 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
       const appStore = useAppStore()
       const target = sessions.value.find(s => s.id === sid)
-      const sessionModel = target?.model || activeSession.value?.model || appStore.selectedModel
+      const sessionModel = appStore.selectedModel || target?.model || activeSession.value?.model
+      const sessionProvider = appStore.selectedProvider || target?.provider || activeSession.value?.provider || ''
+      if (target) {
+        if (sessionModel) target.model = sessionModel
+        target.provider = sessionProvider
+      }
       const run = await startRun({
         input: inputText,
         conversation_history: history,

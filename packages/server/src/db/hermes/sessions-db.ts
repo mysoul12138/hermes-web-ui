@@ -5,6 +5,8 @@ const SQLITE_AVAILABLE = (() => {
   return major > 22 || (major === 22 && minor >= 5)
 })()
 
+const LINEAGE_TOLERANCE_SECONDS = 3
+const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const COMPRESSION_END_REASONS = new Set(['compression', 'compressed'])
 const SEARCH_CANDIDATE_MULTIPLIER = 20
 const SEARCH_CANDIDATE_MIN = 100
@@ -84,6 +86,10 @@ function normalizeNullableNumber(value: unknown): number | null {
 function normalizeNullableString(value: unknown): string | null {
   if (value == null || value === '') return null
   return String(value)
+}
+
+function normalizeText(value: unknown): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
 function mapRow(row: Record<string, unknown>): HermesSessionRow {
@@ -363,6 +369,46 @@ function isCompressionContinuation(parent: HermesSessionInternalRow | undefined,
   return child.source !== 'tool' && Number(child.started_at || 0) >= Number(parent.ended_at || 0)
 }
 
+function isLikelyOrphanContinuation(parent: HermesSessionInternalRow, child: HermesSessionInternalRow): boolean {
+  if (child.id === parent.id || child.source !== parent.source || child.source === 'tool') return false
+  if (parent.ended_at == null) return false
+  const delta = Number(child.started_at || 0) - Number(parent.ended_at || 0)
+  if (delta < 0) return false
+  if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
+  if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
+
+  const parentPreview = normalizeText(parent.preview)
+  const childPreview = normalizeText(child.preview)
+  if (parentPreview && childPreview && parentPreview === childPreview) return true
+
+  const parentTitle = normalizeText(parent.title)
+  const childTitle = normalizeText(child.title)
+  return !!parentTitle && !!childTitle && parentTitle === childTitle
+}
+
+function linkOrphanCompressionContinuations(sessions: HermesSessionInternalRow[]) {
+  const parentless = sessions.filter(session => session.parent_session_id == null && session.source !== 'tool')
+  const assignments = new Map<string, string | null>()
+
+  for (const parent of sessions) {
+    if (!isCompressionEnded(parent) || parent.ended_at == null) continue
+    const candidates = parentless.filter(child => {
+      return isLikelyOrphanContinuation(parent, child)
+    })
+    if (candidates.length !== 1) continue
+
+    const child = candidates[0]
+    const previous = assignments.get(child.id)
+    assignments.set(child.id, previous == null ? parent.id : null)
+  }
+
+  for (const [childId, parentId] of assignments) {
+    if (!parentId) continue
+    const child = sessions.find(session => session.id === childId)
+    if (child && child.parent_session_id == null) child.parent_session_id = parentId
+  }
+}
+
 function latestSessionInChain(chain: HermesSessionInternalRow[]): HermesSessionInternalRow {
   return chain.reduce((latest, session) => {
     const latestStarted = Number(latest.started_at || 0)
@@ -414,6 +460,7 @@ function loadAllSessions(db: { prepare: (sql: string) => { all: (...params: any[
     WHERE s.source != 'tool'
   `).all() as Record<string, unknown>[]
   const sessions = rows.map(mapInternalSessionRow)
+  linkOrphanCompressionContinuations(sessions)
   const byId = new Map(sessions.map(s => [s.id, s]))
   const childrenByParent = new Map<string, string[]>()
   for (const s of sessions) {
@@ -486,6 +533,20 @@ function collectSessionChain(
   idx: SessionIndex,
 ): HermesSessionInternalRow[] {
   return extendCompressionChain([root], idx)
+}
+
+function compressionChainRootId(sessionId: string, idx: SessionIndex): string | null {
+  let current = idx.byId.get(sessionId) || null
+  if (!current || current.source === 'tool') return null
+
+  const seen = new Set<string>()
+  while (current?.parent_session_id && !seen.has(current.id)) {
+    seen.add(current.id)
+    const parent = idx.byId.get(current.parent_session_id)
+    if (!parent || !isCompressionContinuation(parent, current)) break
+    current = parent
+  }
+  return current?.id || null
 }
 
 function messageSelect(columns: Set<string>): string {
@@ -572,11 +633,11 @@ function aggregateSessionDetail(
     last_active: Math.max(...chain.map(session => session.last_active || session.started_at || 0)),
     message_count: chain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
     tool_call_count: chain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
-    input_tokens: chain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
-    output_tokens: chain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
-    cache_read_tokens: chain.reduce((sum, session) => sum + Number(session.cache_read_tokens || 0), 0),
-    cache_write_tokens: chain.reduce((sum, session) => sum + Number(session.cache_write_tokens || 0), 0),
-    reasoning_tokens: chain.reduce((sum, session) => sum + Number(session.reasoning_tokens || 0), 0),
+    input_tokens: latest.input_tokens,
+    output_tokens: latest.output_tokens,
+    cache_read_tokens: latest.cache_read_tokens,
+    cache_write_tokens: latest.cache_write_tokens,
+    reasoning_tokens: latest.reasoning_tokens,
     billing_provider: latest.billing_provider ?? root.billing_provider,
     estimated_cost_usd: chain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
     actual_cost_usd: actualCosts.length ? actualCosts.reduce((sum, value) => sum + Number(value || 0), 0) : null,
@@ -655,6 +716,7 @@ export async function listSessionSummaries(source?: string, limit = 2000): Promi
 
     const idx = loadAllSessions(db)
     return roots
+      .filter(root => compressionChainRootId(root.id, idx) === root.id)
       .map(root => projectSessionSummary(root, collectSessionChain(root, idx)))
       .sort((a, b) => Number(b.last_active || b.started_at || 0) - Number(a.last_active || a.started_at || 0))
       .slice(0, limit)
