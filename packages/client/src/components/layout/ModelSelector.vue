@@ -2,10 +2,12 @@
 import { ref, computed } from 'vue'
 import { NModal, NInput, NSelect } from 'naive-ui'
 import { useAppStore } from '@/stores/hermes/app'
+import { useChatStore } from '@/stores/hermes/chat'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const chatStore = useChatStore()
 
 const showModal = ref(false)
 const searchQuery = ref('')
@@ -56,10 +58,17 @@ function isGroupCollapsed(provider: string) {
   return !!collapsedGroups.value[provider]
 }
 
+async function applyModelSelection(model: string, provider: string) {
+  await appStore.switchModel(model, provider)
+  if (chatStore.activeSession && !chatStore.isRunActive) {
+    await chatStore.switchSessionModel(model, provider, { updateGlobal: false })
+  }
+}
+
 function handleSelect(model: string, provider: string) {
   const meta = appStore.modelGroups.find(g => g.provider === provider)?.model_meta?.[model]
   if (meta?.disabled) return
-  appStore.switchModel(model, provider)
+  void applyModelSelection(model, provider)
   showModal.value = false
   searchQuery.value = ''
 }
@@ -70,7 +79,7 @@ function handleCustomSubmit() {
   // 拦截 disabled 模型，避免 custom input 绕过列表里的灰显限制
   const meta = appStore.modelGroups.find(g => g.provider === customProvider.value)?.model_meta?.[model]
   if (meta?.disabled) return
-  appStore.switchModel(model, customProvider.value)
+  void applyModelSelection(model, customProvider.value)
   showModal.value = false
   searchQuery.value = ''
   customInput.value = ''

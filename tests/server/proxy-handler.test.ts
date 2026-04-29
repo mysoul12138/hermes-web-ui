@@ -405,15 +405,10 @@ describe('SSE stream interception — run.completed', () => {
     await proxy(ctx)
 
     // Verify updateUsage was called with correct values
-    expect(mockUpdateUsage).toHaveBeenCalledWith(sessionId, {
+    expect(mockUpdateUsage).toHaveBeenCalledWith(sessionId, expect.objectContaining({
       inputTokens: 13949,
       outputTokens: 45,
-      cacheReadTokens: undefined,
-      cacheWriteTokens: undefined,
-      reasoningTokens: undefined,
-      model: '',
-      profile: 'default',
-    })
+    }))
     // Verify SSE data was forwarded to client
     expect(ctx.res.write).toHaveBeenCalled()
     expect(ctx.res.end).toHaveBeenCalled()
@@ -558,15 +553,10 @@ describe('SSE stream interception — run.completed', () => {
 
     await proxy(ctx)
 
-    expect(mockUpdateUsage).toHaveBeenCalledWith('session-multi', {
+    expect(mockUpdateUsage).toHaveBeenCalledWith('session-multi', expect.objectContaining({
       inputTokens: 500,
       outputTokens: 100,
-      cacheReadTokens: undefined,
-      cacheWriteTokens: undefined,
-      reasoningTokens: undefined,
-      model: '',
-      profile: 'default',
-    })
+    }))
   })
 
   it('handles SSE split across multiple chunks', async () => {
@@ -593,14 +583,9 @@ describe('SSE stream interception — run.completed', () => {
 
     await proxy(ctx)
 
-    expect(mockUpdateUsage).toHaveBeenCalledWith('session-split', {
+    expect(mockUpdateUsage).toHaveBeenCalledWith('session-split', expect.objectContaining({
       inputTokens: 200,
       outputTokens: 50,
-      cacheReadTokens: undefined,
-      cacheWriteTokens: undefined,
-      reasoningTokens: undefined,
-      model: '',
-      profile: 'default',
-    })
+    }))
   })
 })

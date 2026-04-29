@@ -84,6 +84,7 @@ const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const bridgeLocalSessionKey = (sessionId: string) => `hermes_bridge_local_session_v1_${PROFILE}_${sessionId}`
 const bridgePersistentSessionKey = (sessionId: string) => `hermes_bridge_persistent_session_v1_${PROFILE}_${sessionId}`
 const branchSessionMetaKey = `hermes_branch_session_meta_v1_${PROFILE}`
+const sessionModelOverrideKey = (sessionId: string) => `hermes_session_model_override_v1_${PROFILE}_${sessionId}`
 const sessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${PROFILE}_${sessionId}_`
 const inFlightKey = (sessionId: string) => `hermes_in_flight_v1_${PROFILE}_${sessionId}`
 const legacySessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${sessionId}`
@@ -573,7 +574,32 @@ describe('Chat Store', () => {
 
     expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
       model: 'new-model',
+      provider: 'new-provider',
     }))
+    expect(store.activeSession?.model).toBe('new-model')
+    expect(store.activeSession?.provider).toBe('new-provider')
+  })
+
+  it('keeps the locally selected model when stale session detail still reports the old model', async () => {
+    window.localStorage.setItem(sessionModelOverrideKey('sess-model'), JSON.stringify({
+      model: 'new-model',
+      provider: 'new-provider',
+      updatedAt: Date.now(),
+    }))
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, 'sess-model')
+    mockSessionsApi.fetchSessions.mockResolvedValue([
+      { ...makeSummary('sess-model'), model: 'old-model', billing_provider: 'old-provider' },
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      ...makeDetail('sess-model', []),
+      model: 'old-model',
+      billing_provider: 'old-provider',
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
     expect(store.activeSession?.model).toBe('new-model')
     expect(store.activeSession?.provider).toBe('new-provider')
   })

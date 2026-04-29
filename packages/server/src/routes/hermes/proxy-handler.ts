@@ -225,7 +225,10 @@ export async function proxy(ctx: Context) {
             ? String(parsed.input.at(-1)?.content || '')
             : ''
         if (sessionId && input) {
-          const run = await tuiBridge.startRun(input, sessionId, Array.isArray(parsed.conversation_history) ? parsed.conversation_history : [])
+          const run = await tuiBridge.startRun(input, sessionId, Array.isArray(parsed.conversation_history) ? parsed.conversation_history : [], {
+            model: typeof parsed.model === 'string' ? parsed.model : undefined,
+            provider: typeof parsed.provider === 'string' ? parsed.provider : undefined,
+          })
           ctx.status = 200
           ctx.set('Content-Type', 'application/json')
           ctx.body = run

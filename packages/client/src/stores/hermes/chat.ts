@@ -333,6 +333,7 @@ function applySessionDetail(session: Session | undefined | null, detail: Partial
   if (detail.ended_at !== undefined) session.endedAt = detail.ended_at != null ? Math.round(detail.ended_at * 1000) : null
   if (detail.last_active != null) session.lastActiveAt = Math.round(detail.last_active * 1000)
   applySessionUsage(session, detail as { input_tokens: number; output_tokens: number }, { allowReset: true })
+  applySessionModelOverride(session)
 }
 
 function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
@@ -508,6 +509,7 @@ const BRIDGE_LOCAL_SESSION_KEY_PREFIX = 'hermes_bridge_local_session_v1_'
 const BRIDGE_PERSISTENT_SESSION_KEY_PREFIX = 'hermes_bridge_persistent_session_v1_'
 const BRIDGE_SEEN_KEY_PREFIX = 'hermes_bridge_seen_v1_'
 const BRANCH_SESSION_META_KEY_PREFIX = 'hermes_branch_session_meta_v1_'
+const SESSION_MODEL_OVERRIDE_KEY_PREFIX = 'hermes_session_model_override_v1_'
 const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
@@ -534,6 +536,7 @@ function bridgeLocalSessionKey(sid: string): string { return `${BRIDGE_LOCAL_SES
 function bridgePersistentSessionKey(sid: string): string { return `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
 function bridgeSeenKey(): string { return BRIDGE_SEEN_KEY_PREFIX + getProfileName() }
 function branchSessionMetaKey(): string { return BRANCH_SESSION_META_KEY_PREFIX + getProfileName() }
+function sessionModelOverrideKey(sid: string): string { return `${SESSION_MODEL_OVERRIDE_KEY_PREFIX}${getProfileName()}_${sid}` }
 function msgsCacheKey(sid: string): string { return `hermes_session_msgs_v1_${getProfileName()}_${sid}_` }
 function inFlightKey(sid: string): string { return `hermes_in_flight_v1_${getProfileName()}_${sid}` }
 function legacyStorageKey(): string | null { return getProfileName() === 'default' ? LEGACY_STORAGE_KEY : null }
@@ -567,6 +570,12 @@ interface BranchSessionMeta {
   branchSessionCount?: number
 }
 
+interface SessionModelOverride {
+  model: string
+  provider?: string
+  updatedAt: number
+}
+
 function loadJson<T>(key: string): T | null {
   try {
     const raw = localStorage.getItem(key)
@@ -590,6 +599,7 @@ function recoverStorageQuota() {
       `hermes_in_flight_v1_${getProfileName()}_`,
       `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_`,
       `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_`,
+      `${SESSION_MODEL_OVERRIDE_KEY_PREFIX}${getProfileName()}_`,
     ]
     const legacySessions = legacySessionsCacheKey()
     if (legacySessions) prefixes.push(legacySessions)
@@ -660,6 +670,42 @@ function saveJsonWithLegacy(key: string, value: unknown, legacyKey?: string | nu
 function removeItemWithLegacy(key: string, legacyKey?: string | null) {
   removeItem(key)
   if (legacyKey) removeItem(legacyKey)
+}
+
+function readSessionModelOverride(sid: string | undefined): SessionModelOverride | null {
+  if (!sid) return null
+  const override = loadJson<SessionModelOverride>(sessionModelOverrideKey(sid))
+  if (!override?.model?.trim()) return null
+  return override
+}
+
+function writeSessionModelOverride(sid: string, model: string, provider?: string) {
+  const modelValue = model.trim()
+  if (!sid || !modelValue) return
+  saveJson(sessionModelOverrideKey(sid), {
+    model: modelValue,
+    provider: provider?.trim() || '',
+    updatedAt: Date.now(),
+  } as SessionModelOverride)
+}
+
+function clearSessionModelOverride(sid: string) {
+  removeItem(sessionModelOverrideKey(sid))
+}
+
+function copySessionModelOverride(fromSid: string, toSid: string) {
+  if (!fromSid || !toSid || fromSid === toSid) return
+  const override = readSessionModelOverride(fromSid)
+  if (!override) return
+  writeSessionModelOverride(toSid, override.model, override.provider)
+}
+
+function applySessionModelOverride(session: Session | undefined | null) {
+  if (!session) return
+  const override = readSessionModelOverride(session.id)
+  if (!override) return
+  session.model = override.model
+  session.provider = override.provider || ''
 }
 
 // Strip the circular `file: File` reference from attachments before caching —
@@ -1421,6 +1467,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     markBridgeModeSeen()
     if (persistentSessionId && persistentSessionId !== sid) {
       setItemBestEffort(bridgePersistentSessionKey(sid), persistentSessionId)
+      copySessionModelOverride(sid, persistentSessionId)
     }
   }
 
@@ -1688,7 +1735,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       const cachedSessions = loadJsonWithFallback<Session[]>(sessionsCacheKey(), legacySessionsCacheKey())
       const cachedBranchMetaIndex = loadBranchSessionMetaIndex()
       if (cachedSessions?.length) {
-        cachedSessions.forEach(session => applyBranchMeta(session, cachedBranchMetaIndex[session.id]))
+        cachedSessions.forEach(session => {
+          applyBranchMeta(session, cachedBranchMetaIndex[session.id])
+          applySessionModelOverride(session)
+        })
         sessions.value = cachedSessions
         const savedId = localStorage.getItem(storageKey()) || (legacyStorageKey() ? localStorage.getItem(legacyStorageKey()!) : null)
         if (savedId) {
@@ -1709,6 +1759,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         list = await fetchSessions()
       }
       const freshRaw = list.map(mapHermesSession)
+      freshRaw.forEach(applySessionModelOverride)
       const freshRawIds = new Set(freshRaw.map(s => s.id))
       const branchMetaIndex = loadBranchSessionMetaIndex()
       // Preserve already-loaded messages for sessions that are still present,
@@ -1750,6 +1801,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           || (localBridge ? branchMetaByIdBefore.get(localBridge.id) : undefined)
           || (localBridge ? branchMetaIndex[localBridge.id] : undefined)
         applyBranchMeta(s, branchMeta)
+        if (localBridge) copySessionModelOverride(localBridge.id, s.id)
+        applySessionModelOverride(s)
       }
       // Preserve local-only sessions the server hasn't seen yet — e.g. a chat
       // that was just created and whose first run is still in-flight. Without
@@ -1768,6 +1821,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           }
           removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
           removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
+          clearSessionModelOverride(s.id)
           clearBridgeLocalSession(s.id)
           return false
         }
@@ -1777,6 +1831,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         // Session no longer exists on server and no active run — clean up cache
         removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
         removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
+        clearSessionModelOverride(s.id)
         clearBridgeLocalSession(s.id)
         return false
       })
@@ -2362,15 +2417,19 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // Inherit current global model
     const appStore = useAppStore()
     session.model = appStore.selectedModel || undefined
+    session.provider = appStore.selectedProvider || ''
+    if (session.model) writeSessionModelOverride(session.id, session.model, session.provider)
     switchSession(session.id)
   }
 
-  async function switchSessionModel(modelId: string, provider?: string) {
+  async function switchSessionModel(modelId: string, provider?: string, options: { updateGlobal?: boolean } = {}) {
     if (!activeSession.value) return
     activeSession.value.model = modelId
     activeSession.value.provider = provider || ''
+    writeSessionModelOverride(activeSession.value.id, modelId, provider)
+    persistSessionsList()
     // If provider changed, update global config too (Hermes requires it)
-    if (provider) {
+    if (provider && options.updateGlobal !== false) {
       const { useAppStore } = await import('./app')
       await useAppStore().switchModel(modelId, provider)
     }
@@ -2380,6 +2439,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     await deleteSessionApi(sessionId)
     sessions.value = sessions.value.filter(s => s.id !== sessionId)
     removeItemWithLegacy(msgsCacheKey(sessionId), legacyMsgsCacheKey(sessionId))
+    clearSessionModelOverride(sessionId)
     clearInFlight(sessionId)
     clearBridgeLocalSession(sessionId)
     stopPolling(sessionId)
@@ -2805,12 +2865,15 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       if (target) {
         if (sessionModel) target.model = sessionModel
         target.provider = sessionProvider
+        if (sessionModel) writeSessionModelOverride(target.id, sessionModel, sessionProvider)
+        persistSessionsList()
       }
       const run = await startRun({
         input: inputText,
         conversation_history: history,
         session_id: sid,
         model: sessionModel || undefined,
+        provider: sessionProvider || undefined,
       })
 
       const runId = (run as any).run_id || (run as any).id
@@ -3000,6 +3063,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       if ((s.provider || '').toLowerCase() === target) {
         s.model = undefined
         s.provider = ''
+        clearSessionModelOverride(s.id)
         dirty = true
       }
     }

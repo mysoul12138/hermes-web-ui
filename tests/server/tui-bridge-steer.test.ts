@@ -9,6 +9,8 @@ class FakeGatewayClient extends EventEmitter {
     this.requests.push({ method, params })
     if (method === 'session.steer') throw new Error('unknown method: session.steer')
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
+    if (method === 'prompt.submit') return { ok: true } as T
+    if (method === 'config.set') return { value: params.value } as T
     return { status: 'ok' } as T
   }
 }
@@ -41,6 +43,44 @@ describe('TuiBridgeService steer compatibility', () => {
       { method: 'command.dispatch', params: { session_id: 'tui-session', command: '/steer adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
+  })
+
+  it('syncs the requested model globally and into the active bridge session before prompt submit', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await bridge.startRun('hello', 'web-session', [], {
+      model: 'gpt-5.5',
+      provider: 'openai-codex',
+    })
+
+    expect(result).toMatchObject({
+      bridge: true,
+      session_id: 'persistent-session',
+    })
+    expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
+      'config.set',
+      'prompt.submit',
+    ])
+    expect(client.requests[0].params).toMatchObject({
+      key: 'model',
+      value: 'gpt-5.5 --provider openai-codex',
+    })
+    expect(client.requests[1].params).toMatchObject({
+      key: 'model',
+      session_id: 'tui-session',
+      value: 'gpt-5.5 --provider openai-codex',
+    })
+    expect(client.requests[2].params).toMatchObject({
+      session_id: 'tui-session',
+      text: 'hello',
+    })
+    ;(bridge as any).closeRun(result.run_id)
   })
 
   it('forwards tool arguments, progress, and result payloads to WebUI events', () => {

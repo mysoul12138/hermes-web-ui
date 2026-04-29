@@ -104,6 +104,11 @@ interface BridgeSessionRef {
   persistentSessionId?: string
 }
 
+interface BridgeRunOptions {
+  model?: string
+  provider?: string
+}
+
 interface TuiSessionListItem {
   id?: string
   source?: string
@@ -356,11 +361,24 @@ export class TuiBridgeService {
     return this.persistentSessionsByWebSession.get(webSessionId) || null
   }
 
-  async startRun(input: string, webSessionId: string, conversationHistory: Array<{ role: string, content: string }> = []) {
+  async startRun(
+    input: string,
+    webSessionId: string,
+    conversationHistory: Array<{ role: string, content: string }> = [],
+    options: BridgeRunOptions = {},
+  ) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
+    const requestedModel = options.model?.trim()
+    const requestedProvider = options.provider?.trim()
+    if (requestedModel) {
+      await this.syncModel(requestedModel, requestedProvider)
+    }
     let bridgeSession = await this.ensureBridgeSession(webSessionId)
     let bridgeSessionId = bridgeSession.id
     let persistentSessionId = bridgeSession.persistentSessionId
+    if (requestedModel) {
+      await this.syncModel(requestedModel, requestedProvider, bridgeSessionId)
+    }
     const runId = `bridge_run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const state: RunState = {
       runId,
@@ -397,6 +415,9 @@ export class TuiBridgeService {
       persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
+      if (requestedModel) {
+        await this.syncModel(requestedModel, requestedProvider, bridgeSessionId)
+      }
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
     return {
@@ -406,6 +427,21 @@ export class TuiBridgeService {
       session_id: persistentSessionId,
       bridge_session_id: bridgeSessionId,
     }
+  }
+
+  private formatModelSwitch(model: string, provider?: string): string {
+    const value = model.trim()
+    const providerValue = provider?.trim()
+    return providerValue ? `${value} --provider ${providerValue}` : value
+  }
+
+  private async syncModel(model: string, provider?: string, bridgeSessionId?: string) {
+    const params: Record<string, string> = {
+      key: 'model',
+      value: this.formatModelSwitch(model, provider),
+    }
+    if (bridgeSessionId) params.session_id = bridgeSessionId
+    await this.client.request('config.set', params)
   }
 
   async respondApproval(webSessionId: string, choice: string) {

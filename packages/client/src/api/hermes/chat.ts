@@ -11,6 +11,7 @@ export interface StartRunRequest {
   conversation_history?: ChatMessage[]
   session_id?: string
   model?: string
+  provider?: string
 }
 
 export interface StartRunResponse {
