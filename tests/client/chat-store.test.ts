@@ -1014,7 +1014,8 @@ describe('Chat Store', () => {
     await store.switchBranchSession(rootId, 'subagent-1')
 
     expect(store.activeSessionId).toBe('subagent-1')
-    expect(store.messages.map(m => m.content)).toContain('[start] Starting review')
+    expect(store.messages.some(m => m.content.includes('#### Progress'))).toBe(true)
+    expect(store.messages.some(m => m.content.includes('Starting review'))).toBe(true)
     expect(store.isRunActive).toBe(true)
 
     onEvent?.({
@@ -1026,7 +1027,7 @@ describe('Chat Store', () => {
       depth: 1,
     })
 
-    expect(store.messages.map(m => m.content)).toContain('[progress] Inspecting files')
+    expect(store.messages.some(m => m.content.includes('Inspecting files'))).toBe(true)
 
     onEvent?.({
       event: 'subagent.complete',
@@ -1040,6 +1041,91 @@ describe('Chat Store', () => {
 
     expect(store.messages.some(m => m.content.includes('No issues found'))).toBe(true)
     expect(store.isSessionLive('subagent-1')).toBe(false)
+  })
+
+  it('merges a live subagent placeholder into its persisted tui branch', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('review the branch')
+    const rootId = store.activeSessionId!
+
+    mockConversationsApi.fetchConversationDetail.mockRejectedValueOnce(new Error('not ready'))
+
+    onEvent?.({
+      event: 'subagent.start',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Starting review',
+      depth: 1,
+    })
+    await store.switchBranchSession(rootId, 'subagent-1')
+    expect(store.activeSessionId).toBe('subagent-1')
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: 'tui-branch-1',
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Review branch',
+        started_at: Date.now() / 1000,
+        ended_at: null,
+        last_active: Date.now() / 1000,
+        is_active: true,
+        visible_count: 0,
+        thread_session_count: 1,
+        messages: [],
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id !== 'tui-branch-1') return null
+      return makeDetail('tui-branch-1', [
+        { id: 1, session_id: 'tui-branch-1', role: 'user', content: 'Review branch', timestamp: 1710000100 },
+        { id: 2, session_id: 'tui-branch-1', role: 'assistant', content: 'Full hydrated markdown **rendered** answer', timestamp: 1710000101 },
+      ])
+    })
+
+    onEvent?.({
+      event: 'subagent.progress',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Inspecting files',
+      depth: 1,
+    })
+    await flushPromises()
+
+    expect(store.sessionBranches(rootId).map(branch => branch.session_id)).toEqual(['tui-branch-1'])
+    expect(store.activeSessionId).toBe('tui-branch-1')
+    expect(store.isSessionLive('tui-branch-1')).toBe(true)
+    expect(store.messages.map(m => m.content)).toEqual([
+      'Review branch',
+      'Full hydrated markdown **rendered** answer',
+    ])
+
+    onEvent?.({ event: 'run.completed', output: '' })
+    await flushPromises()
+
+    expect(store.isSessionLive('tui-branch-1')).toBe(false)
+    expect(store.messages.map(m => m.content)).toEqual([
+      'Review branch',
+      'Full hydrated markdown **rendered** answer',
+    ])
   })
 
   it('shows and responds to live clarify prompts', async () => {

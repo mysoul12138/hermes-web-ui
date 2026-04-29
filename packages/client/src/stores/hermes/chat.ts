@@ -707,6 +707,7 @@ export const useChatStore = defineStore('chat', () => {
   const clarifiesBySession = ref<Record<string, ClarifyState>>({})
   const dbBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const liveBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
+  const subagentActivityBySession = ref<Record<string, Record<string, ConversationMessage[]>>>({})
   const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
   const clarifyPollers = new Map<string, ReturnType<typeof setInterval>>()
   const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
@@ -739,6 +740,10 @@ export const useChatStore = defineStore('chat', () => {
         const branch = findBranchById(branches, sessionId)
         return !!branch?.is_active
       })
+      || Object.keys({
+        ...dbBranchesBySession.value,
+        ...liveBranchesBySession.value,
+      }).some(rootId => !!findBranchById(sessionBranches(rootId), sessionId)?.is_active)
   }
 
   function countBranchTree(branches: ConversationBranch[]): number {
@@ -754,6 +759,10 @@ export const useChatStore = defineStore('chat', () => {
     return null
   }
 
+  function flattenBranchTree(branches: ConversationBranch[]): ConversationBranch[] {
+    return branches.flatMap(branch => [branch, ...flattenBranchTree(branch.branches || [])])
+  }
+
   function mergeConversationMessages(persisted: ConversationMessage[] = [], live: ConversationMessage[] = []): ConversationMessage[] {
     const byId = new Map<string, ConversationMessage>()
     for (const message of persisted) byId.set(String(message.id), message)
@@ -761,30 +770,111 @@ export const useChatStore = defineStore('chat', () => {
     return [...byId.values()].sort((a, b) => a.timestamp - b.timestamp)
   }
 
+  function isSubagentStatusText(text: string): boolean {
+    return !text.trim() || /^\[(?:start|progress|tool|thinking|status|complete|error)\]\s/i.test(text.trim())
+  }
+
+  function isSubagentTranscriptText(text: string): boolean {
+    return /^###\s+Subagent\b/i.test(text.trim())
+  }
+
+  function hasRealBranchMessageContent(messages: Array<{ role?: string; content: string }>): boolean {
+    return messages.some(message => {
+      if (message.role === 'user') return false
+      return !isSubagentStatusText(message.content) && !isSubagentTranscriptText(message.content)
+    })
+  }
+
+  function normalizedBranchText(value: string | null | undefined): string {
+    return (value || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .trim()
+  }
+
+  function branchTextKey(branch: ConversationBranch): string {
+    return normalizedBranchText(
+      branch.title
+        || branch.messages.find(message => message.role === 'user' && message.content.trim())?.content
+        || branch.messages.find(message => message.content.trim())?.content
+        || '',
+    )
+  }
+
+  function branchParentMatches(persisted: ConversationBranch, live: ConversationBranch): boolean {
+    const persistedParent = persisted.parent_session_id || ''
+    const liveParent = live.parent_session_id || ''
+    if (!persistedParent || !liveParent) return true
+    return persistedParent === liveParent
+      || persistedParent === sessionFetchId(liveParent)
+      || sessionFetchId(persistedParent) === liveParent
+  }
+
+  function branchesRepresentSameSubagent(persisted: ConversationBranch, live: ConversationBranch): boolean {
+    if (live.source !== 'subagent') return false
+    if (persisted.source !== 'tui' && persisted.source !== 'api_server') return false
+    if (!branchParentMatches(persisted, live)) return false
+
+    const persistedKey = branchTextKey(persisted)
+    const liveKey = branchTextKey(live)
+    const hasTextMatch = !!persistedKey && !!liveKey && (
+      persistedKey === liveKey
+      || persistedKey.includes(liveKey)
+      || liveKey.includes(persistedKey)
+    )
+    const startedDelta = Math.abs((persisted.started_at || 0) - (live.started_at || 0))
+    const recentDelta = Math.abs((persisted.last_active || persisted.started_at || 0) - (live.last_active || live.started_at || 0))
+
+    return hasTextMatch || startedDelta <= 120 || (live.is_active && recentDelta <= 300)
+  }
+
+  function findLiveBranchMatch(persisted: ConversationBranch, live: ConversationBranch[], usedLiveIds: Set<string>): ConversationBranch | undefined {
+    return live.find(branch => !usedLiveIds.has(branch.session_id) && branchesRepresentSameSubagent(persisted, branch))
+  }
+
+  function mergePersistedAndLiveBranch(persisted: ConversationBranch, liveBranch: ConversationBranch): ConversationBranch {
+    const persistedMessagesAreOnlySubagentStatus = (persisted.messages || []).every(message => isSubagentStatusText(message.content))
+    const hasRealPersistedMessages = (persisted.messages || []).length > 0 && !persistedMessagesAreOnlySubagentStatus
+    const messages = hasRealPersistedMessages
+      ? persisted.messages
+      : (liveBranch.messages.length > 0
+          ? liveBranch.messages
+          : mergeConversationMessages(persisted.messages, liveBranch.messages))
+    const lastActive = Math.max(persisted.last_active || 0, liveBranch.last_active || 0)
+    const liveIsNewer = (liveBranch.last_active || 0) >= (persisted.last_active || 0)
+    const mergedIsActive = liveBranch.source === 'subagent'
+      ? liveBranch.is_active
+      : liveBranch.is_active || persisted.is_active
+    return {
+      ...persisted,
+      model: persisted.model || liveBranch.model,
+      title: persisted.title || liveBranch.title,
+      ended_at: mergedIsActive
+        ? null
+        : (liveBranch.source === 'subagent'
+            ? (liveBranch.ended_at ?? persisted.ended_at)
+            : (liveIsNewer ? liveBranch.ended_at : persisted.ended_at)),
+      last_active: lastActive,
+      is_active: mergedIsActive,
+      messages,
+      visible_count: Math.max(persisted.visible_count || 0, messages.length, liveBranch.visible_count || 0),
+      thread_session_count: Math.max(persisted.thread_session_count || 0, liveBranch.thread_session_count || 0),
+      input_tokens: persisted.input_tokens ?? liveBranch.input_tokens,
+      output_tokens: persisted.output_tokens ?? liveBranch.output_tokens,
+      branches: mergeBranchLists(persisted.branches || [], liveBranch.branches || []),
+    }
+  }
+
   function mergeBranchLists(persisted: ConversationBranch[] = [], live: ConversationBranch[] = []): ConversationBranch[] {
     const liveById = new Map(live.map(branch => [branch.session_id, branch]))
     const usedLiveIds = new Set<string>()
     const merged = persisted.map(branch => {
       const liveBranch = liveById.get(branch.session_id)
+        || findLiveBranchMatch(branch, live, usedLiveIds)
       if (!liveBranch) return branch
       usedLiveIds.add(liveBranch.session_id)
-      const lastActive = Math.max(branch.last_active || 0, liveBranch.last_active || 0)
-      const liveIsNewer = (liveBranch.last_active || 0) >= (branch.last_active || 0)
-      return {
-        ...branch,
-        source: liveBranch.source || branch.source,
-        model: liveBranch.model || branch.model,
-        title: liveBranch.title || branch.title,
-        ended_at: liveBranch.is_active ? null : (liveIsNewer ? liveBranch.ended_at : branch.ended_at),
-        last_active: lastActive,
-        is_active: liveBranch.is_active || branch.is_active,
-        messages: mergeConversationMessages(branch.messages, liveBranch.messages),
-        visible_count: Math.max(branch.visible_count || 0, liveBranch.visible_count || 0),
-        thread_session_count: Math.max(branch.thread_session_count || 0, liveBranch.thread_session_count || 0),
-        input_tokens: liveBranch.input_tokens ?? branch.input_tokens,
-        output_tokens: liveBranch.output_tokens ?? branch.output_tokens,
-        branches: mergeBranchLists(branch.branches || [], liveBranch.branches || []),
-      }
+      return mergePersistedAndLiveBranch(branch, liveBranch)
     })
     for (const branch of live) {
       if (!usedLiveIds.has(branch.session_id)) merged.push(branch)
@@ -794,6 +884,18 @@ export const useChatStore = defineStore('chat', () => {
 
   function mergedSessionBranches(sessionId: string): ConversationBranch[] {
     return mergeBranchLists(dbBranchesBySession.value[sessionId] || [], liveBranchesBySession.value[sessionId] || [])
+  }
+
+  function subagentBranchAliases(sessionId: string): Map<string, string> {
+    const aliases = new Map<string, string>()
+    const persisted = flattenBranchTree(dbBranchesBySession.value[sessionId] || [])
+    const live = flattenBranchTree(liveBranchesBySession.value[sessionId] || [])
+      .filter(branch => branch.source === 'subagent')
+    for (const liveBranch of live) {
+      const match = persisted.find(branch => branchesRepresentSameSubagent(branch, liveBranch))
+      if (match) aliases.set(liveBranch.session_id, match.session_id)
+    }
+    return aliases
   }
 
   function sessionBranches(sessionId: string): ConversationBranch[] {
@@ -807,12 +909,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function branchMessagesToMessages(branch: ConversationBranch): Message[] {
-    return branch.messages.map(message => ({
+    const mapped: Message[] = branch.messages.map(message => ({
       id: String(message.id),
       role: message.role,
       content: message.content,
       timestamp: Math.round(message.timestamp * 1000),
     }))
+    if (branch.source === 'subagent' && branch.is_active) {
+      const lastAssistant = [...mapped].reverse().find(message => message.role === 'assistant')
+      if (lastAssistant) lastAssistant.isStreaming = true
+    }
+    return mapped
   }
 
   function branchToSession(branch: ConversationBranch, rootSessionId: string): Session {
@@ -841,13 +948,17 @@ export const useChatStore = defineStore('chat', () => {
     if (!existing) return
 
     const nextSession = branchToSession(branch, rootSessionId)
+    const preserveHydratedMessages = hasRealBranchMessageContent(existing.messages)
+      && !hasRealBranchMessageContent(nextSession.messages)
     existing.title = nextSession.title
     existing.source = nextSession.source
     existing.model = nextSession.model
-    existing.messages = nextSession.messages
+    if (!preserveHydratedMessages) {
+      existing.messages = nextSession.messages
+    }
     existing.createdAt = nextSession.createdAt
     existing.updatedAt = nextSession.updatedAt
-    existing.messageCount = nextSession.messageCount
+    existing.messageCount = preserveHydratedMessages ? existing.messages.length : nextSession.messageCount
     existing.inputTokens = nextSession.inputTokens
     existing.outputTokens = nextSession.outputTokens
     existing.endedAt = nextSession.endedAt
@@ -866,6 +977,67 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
     sync(sessionBranches(rootSessionId))
+  }
+
+  function upsertBranchSession(rootSessionId: string, branch: ConversationBranch): Session {
+    const nextSession = branchToSession(branch, rootSessionId)
+    const existing = sessions.value.find(session => session.id === nextSession.id)
+    if (existing) {
+      Object.assign(existing, nextSession)
+      return existing
+    }
+    sessions.value.push(nextSession)
+    return nextSession
+  }
+
+  function promoteMergedSubagentBranchSessions(rootSessionId: string) {
+    const aliases = subagentBranchAliases(rootSessionId)
+    if (!aliases.size) return
+    let changed = false
+    for (const [liveId, persistedId] of aliases) {
+      const branch = findBranchById(sessionBranches(rootSessionId), persistedId)
+      if (!branch) continue
+      const target = upsertBranchSession(rootSessionId, branch)
+      if (activeSessionId.value === liveId) {
+        activeSessionId.value = persistedId
+        activeSession.value = target
+        setItemBestEffort(storageKey(), persistedId)
+        changed = true
+      }
+      const before = sessions.value.length
+      sessions.value = sessions.value.filter(session => session.id !== liveId)
+      if (sessions.value.length !== before) {
+        removeItemWithLegacy(msgsCacheKey(liveId), legacyMsgsCacheKey(liveId))
+        changed = true
+      }
+    }
+    if (changed) persistSessionsList()
+  }
+
+  async function hydrateActiveBranchSession(rootSessionId: string) {
+    const branchId = activeSessionId.value
+    if (!branchId || branchId === rootSessionId) return
+    const target = sessions.value.find(session => session.id === branchId)
+    if (!target?.isBranchSession || target.rootSessionId !== rootSessionId) return
+    const branch = findBranchById(sessionBranches(rootSessionId), branchId)
+    if (!branch || (branch.source !== 'tui' && branch.source !== 'api_server')) return
+
+    try {
+      const detail = await fetchResolvedSessionDetail(branchId)
+      if (!detail || isBridgeFallbackSession(detail)) return
+      const mapped = mapHermesMessages(detail.messages || [])
+      const mappedOnlySubagentStatus = mapped.length > 0 && mapped.every(message => isSubagentStatusText(message.content))
+      if (branch.is_active && mappedOnlySubagentStatus) return
+      if (mapped.length > 0) {
+        target.messages = withLocalSteeredMessages(mapped, target.messages)
+        target.messageCount = mapped.length
+        if (branchId === activeSessionId.value) persistActiveMessages()
+      }
+      applySessionDetail(target, detail)
+      if (detail.title) target.title = detail.title
+    } catch {
+      // Active branch hydration is best-effort; the parent run stream continues.
+    }
   }
 
   async function switchBranchSession(rootSessionId: string, branchId: string) {
@@ -1900,6 +2072,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
                 timestamp: Date.now(),
               })
             }
+            finishLiveSubagentBranches(sid, 'complete')
             cleanup()
             updateSessionTitle(sid)
             persistSessionMessages(sid)
@@ -1945,6 +2118,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             if (approvalsBySession.value[sid]?.pending?._optimistic) {
               clearApproval(sid)
             }
+            finishLiveSubagentBranches(sid, 'error')
             cleanup()
             persistSessionMessages(sid)
             persistSessionsList()
@@ -1964,6 +2138,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         if (last?.isStreaming) {
           updateMessage(sid, last.id, { isStreaming: false })
         }
+        finishLiveSubagentBranches(sid, 'complete')
         cleanup()
         updateSessionTitle(sid)
         clearInFlight(sid)
@@ -2230,6 +2405,147 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return lines.join('\n\n') || undefined
   }
 
+  function appendUniqueLine(lines: string[], line: string) {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    if (lines[lines.length - 1] === trimmed) return
+    lines.push(trimmed)
+  }
+
+  function parseSubagentStatus(content: string): { kind: string; text: string } {
+    const trimmed = content.trim()
+    const match = trimmed.match(/^\[([^\]]+)\]\s*(.*)$/)
+    if (!match) return { kind: 'result', text: trimmed }
+    return {
+      kind: match[1].toLowerCase(),
+      text: (match[2] || '').trim(),
+    }
+  }
+
+  function pushSubagentSection(lines: string[], title: string, items: string[]) {
+    const unique = [...new Set(items.map(item => item.trim()).filter(Boolean))]
+    if (!unique.length) return
+    lines.push('')
+    lines.push(`#### ${title}`)
+    for (const item of unique) appendUniqueLine(lines, `- ${item}`)
+  }
+
+  function formatSubagentLiveTranscript(events: ConversationMessage[], goal: string, isActive: boolean): string {
+    const lines: string[] = []
+    const buckets = {
+      progress: [] as string[],
+      tools: [] as string[],
+      thinking: [] as string[],
+      result: [] as string[],
+      status: [] as string[],
+      errors: [] as string[],
+    }
+
+    for (const event of events) {
+      const parsed = parseSubagentStatus(event.content)
+      if (!parsed.text) continue
+      if (parsed.kind === 'tool') buckets.tools.push(parsed.text)
+      else if (parsed.kind === 'thinking') buckets.thinking.push(parsed.text)
+      else if (parsed.kind === 'progress' || parsed.kind === 'start') buckets.progress.push(parsed.text)
+      else if (parsed.kind === 'complete' || parsed.kind === 'result') buckets.result.push(parsed.text)
+      else if (parsed.kind === 'error') buckets.errors.push(parsed.text)
+      else buckets.status.push(parsed.text)
+    }
+
+    lines.push(`### ${isActive ? 'Subagent live transcript' : 'Subagent transcript'}`)
+    if (goal.trim()) {
+      lines.push('')
+      lines.push(`**Task:** ${goal.trim()}`)
+    }
+    lines.push('')
+    lines.push(`**State:** ${isActive ? 'running' : 'completed'}`)
+
+    pushSubagentSection(lines, 'Progress', buckets.progress)
+    pushSubagentSection(lines, 'Tools', buckets.tools)
+    pushSubagentSection(lines, 'Thinking', buckets.thinking)
+    pushSubagentSection(lines, 'Status', buckets.status)
+    pushSubagentSection(lines, 'Result', buckets.result)
+    pushSubagentSection(lines, 'Errors', buckets.errors)
+
+    if (!Object.values(buckets).some(items => items.length > 0)) {
+      lines.push('')
+      lines.push('#### Status')
+      lines.push('- Waiting for live activity...')
+    }
+    return lines.join('\n')
+  }
+
+  function finishLiveSubagentBranches(rootSessionId: string, fallbackStatus: 'complete' | 'error') {
+    const branches = liveBranchesBySession.value[rootSessionId] || []
+    if (!branches.some(branch => branch.source === 'subagent' && branch.is_active)) return
+
+    const now = Date.now() / 1000
+    const activitiesForRoot = subagentActivityBySession.value[rootSessionId] || {}
+    const nextActivities: Record<string, ConversationMessage[]> = { ...activitiesForRoot }
+    const nextBranches = branches.map(branch => {
+      if (branch.source !== 'subagent' || !branch.is_active) return branch
+
+      const goal = branch.messages.find(message => message.role === 'user')?.content
+        || branch.title
+        || 'Subagent'
+      const existingEvents = nextActivities[branch.session_id] || []
+      const hasTerminalEvent = existingEvents.some(message => {
+        const { kind } = parseSubagentStatus(message.content)
+        return kind === 'complete' || kind === 'error' || kind === 'result'
+      })
+      const events = hasTerminalEvent
+        ? existingEvents
+        : [
+            ...existingEvents,
+            {
+              id: `subagent.${fallbackStatus}:parent`,
+              session_id: branch.session_id,
+              role: 'assistant' as const,
+              content: fallbackStatus === 'complete'
+                ? '[complete] Parent run completed'
+                : '[error] Parent run failed',
+              timestamp: now,
+            },
+          ]
+      nextActivities[branch.session_id] = events
+
+      const messages: ConversationMessage[] = [
+        {
+          id: `${branch.session_id}:task`,
+          session_id: branch.session_id,
+          role: 'user',
+          content: goal,
+          timestamp: branch.started_at || now,
+        },
+        {
+          id: `${branch.session_id}:live`,
+          session_id: branch.session_id,
+          role: 'assistant',
+          content: formatSubagentLiveTranscript(events, goal, false),
+          timestamp: now,
+        },
+      ]
+      return {
+        ...branch,
+        is_active: false,
+        ended_at: branch.ended_at ?? now,
+        last_active: now,
+        messages,
+        visible_count: messages.length,
+      }
+    })
+
+    liveBranchesBySession.value = {
+      ...liveBranchesBySession.value,
+      [rootSessionId]: nextBranches,
+    }
+    subagentActivityBySession.value = {
+      ...subagentActivityBySession.value,
+      [rootSessionId]: nextActivities,
+    }
+    syncBranchSessions(rootSessionId)
+  }
+
   async function refreshSessionBranches(sid: string) {
     const fetchId = sessionFetchId(sid)
     if (!fetchId) return
@@ -2243,6 +2559,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       const session = sessions.value.find(item => item.id === sid)
       if (session) session.branchSessionCount = branchCount
       syncBranchSessions(sid)
+      promoteMergedSubagentBranchSessions(sid)
+      await hydrateActiveBranchSession(sid)
       if (activeSession.value?.rootSessionId === sid) persistActiveMessages()
     } catch {
       // Branch detail is best-effort; normal chat streaming must not depend on it.
@@ -2263,15 +2581,39 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     const eventMessage: ConversationMessage = {
       id: evt.event,
       session_id: subagentId,
-      role: evt.event === 'subagent.spawn_requested' || evt.event === 'subagent.start' ? 'user' : 'assistant',
+      role: 'assistant',
       content,
       timestamp: now,
     }
-    const previousMessages = existing?.messages || []
-    const messages = [
-      ...previousMessages.filter(message => message.id !== eventMessage.id),
+    const previousEvents = subagentActivityBySession.value[sessionId]?.[subagentId] || []
+    const events = [
+      ...previousEvents.filter(message => message.id !== eventMessage.id),
       eventMessage,
     ].sort((a, b) => a.timestamp - b.timestamp)
+    subagentActivityBySession.value = {
+      ...subagentActivityBySession.value,
+      [sessionId]: {
+        ...(subagentActivityBySession.value[sessionId] || {}),
+        [subagentId]: events,
+      },
+    }
+    const isActive = evt.event !== 'subagent.complete' && evt.event !== 'subagent.error'
+    const messages: ConversationMessage[] = [
+      {
+        id: `${subagentId}:task`,
+        session_id: subagentId,
+        role: 'user',
+        content: goal,
+        timestamp: existing?.started_at || now,
+      },
+      {
+        id: `${subagentId}:live`,
+        session_id: subagentId,
+        role: 'assistant',
+        content: formatSubagentLiveTranscript(events, goal, isActive),
+        timestamp: now,
+      },
+    ]
     const branch: ConversationBranch = {
       session_id: subagentId,
       parent_session_id: evt.parent_id || sessionFetchId(sessionId),
@@ -2279,9 +2621,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       model: evt.model || '',
       title: depth > 0 ? `Subagent L${depth}: ${goal}` : goal,
       started_at: existing?.started_at || now,
-      ended_at: evt.event === 'subagent.complete' || evt.event === 'subagent.error' ? now : null,
+      ended_at: isActive ? null : now,
       last_active: now,
-      is_active: evt.event !== 'subagent.complete' && evt.event !== 'subagent.error',
+      is_active: isActive,
       messages,
       visible_count: messages.length,
       thread_session_count: 1,
