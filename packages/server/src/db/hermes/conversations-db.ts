@@ -394,8 +394,8 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
   const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
 
   return {
-    ...toSummary(last),
-    title: last.title || root.title || firstPreview || null,
+    ...toSummary(root),
+    title: root.title || last.title || firstPreview || null,
     preview: last.preview || root.preview || firstPreview,
     started_at: Number(root.started_at || 0),
     ended_at: last?.ended_at ?? null,

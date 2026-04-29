@@ -165,7 +165,7 @@ describe('session DB compression lineage', () => {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it('projects compressed root summaries to the latest continuation tip', async () => {
+  it('keeps compressed root summaries keyed by the root session', async () => {
     seedCompressionChain(db!)
 
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
@@ -173,8 +173,8 @@ describe('session DB compression lineage', () => {
 
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
-      id: 'tip',
-      title: 'Mermaid fix #3',
+      id: 'root',
+      title: 'Mermaid fix',
       message_count: 4,
       end_reason: null,
       preview: 'tip lineageunique turn',
@@ -205,7 +205,7 @@ describe('session DB compression lineage', () => {
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
     const rows = await mod.listSessionSummaries(undefined, 20)
 
-    expect(rows.map((row: any) => row.id)).toEqual(['orphan-cont'])
+    expect(rows.map((row: any) => row.id)).toEqual(['root'])
 
     const detail = await mod.getSessionDetailFromDb('root')
     expect(detail).toMatchObject({
@@ -240,7 +240,7 @@ describe('session DB compression lineage', () => {
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
     const rows = await mod.listSessionSummaries(undefined, 20)
 
-    expect(rows.map((row: any) => row.id)).toEqual(['duplicate-cont'])
+    expect(rows.map((row: any) => row.id)).toEqual(['root'])
 
     const detail = await mod.getSessionDetailFromDb('duplicate-cont')
     expect(detail?.thread_session_count).toBe(2)
@@ -255,8 +255,8 @@ describe('session DB compression lineage', () => {
 
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
-      id: 'tip',
-      title: 'Mermaid fix #3',
+      id: 'root',
+      title: 'Mermaid fix',
       matched_message_id: 3,
     })
     expect(rows[0].snippet).toContain('lineageunique')

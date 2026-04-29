@@ -2235,10 +2235,13 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (!fetchId) return
     try {
       const detail = await fetchConversationDetail(fetchId, { humanOnly: true })
+      const branchCount = countBranchTree(detail.branches || [])
       dbBranchesBySession.value = {
         ...dbBranchesBySession.value,
         [sid]: detail.branches || [],
       }
+      const session = sessions.value.find(item => item.id === sid)
+      if (session) session.branchSessionCount = branchCount
       syncBranchSessions(sid)
       if (activeSession.value?.rootSessionId === sid) persistActiveMessages()
     } catch {

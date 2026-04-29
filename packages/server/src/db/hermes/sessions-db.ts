@@ -423,9 +423,9 @@ function projectSessionSummary(root: HermesSessionInternalRow, chain: HermesSess
   const { parent_session_id: _parentSessionId, ...rootRow } = root
   return {
     ...rootRow,
-    id: latest.id,
+    id: root.id,
     model: latest.model || root.model,
-    title: latest.title || root.title,
+    title: root.title || latest.title,
     ended_at: latest.ended_at,
     end_reason: latest.end_reason,
     message_count: latest.message_count,
