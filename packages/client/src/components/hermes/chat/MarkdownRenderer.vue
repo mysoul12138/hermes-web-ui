@@ -200,7 +200,9 @@ onBeforeUnmount(() => {
 })
 
 function handleMarkdownClick(event: MouseEvent): void {
-  void handleCodeBlockCopyClick(event)
+  void handleCodeBlockCopyClick(event).then(copied => {
+    if (copied) message.success(t('common.copied'))
+  })
 
   // Handle file path link clicks for download
   const target = event.target as HTMLElement

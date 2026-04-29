@@ -53,9 +53,11 @@ watch(() => props.pending.approval_id, focusPrimaryButton)
       <span v-if="counterText" class="approval-counter">{{ counterText }}</span>
     </div>
 
-    <div id="approval-desc" class="approval-desc">{{ mergedDescription }}</div>
-    <pre v-if="pending.command" class="approval-command">{{ pending.command }}</pre>
-    <div v-if="submitting" class="approval-status">{{ t('chat.approvalResponding') }}</div>
+    <div class="approval-scroll">
+      <div id="approval-desc" class="approval-desc">{{ mergedDescription }}</div>
+      <pre v-if="pending.command" class="approval-command">{{ pending.command }}</pre>
+      <div v-if="submitting" class="approval-status">{{ t('chat.approvalResponding') }}</div>
+    </div>
 
     <div class="approval-actions">
       <NButton
@@ -90,6 +92,10 @@ watch(() => props.pending.approval_id, focusPrimaryButton)
   border: 1px solid rgba(232, 93, 74, 0.35);
   border-radius: $radius-md;
   background: rgba(232, 93, 74, 0.08);
+  display: flex;
+  flex-direction: column;
+  max-height: min(360px, 42vh);
+  overflow: hidden;
 }
 
 .approval-header {
@@ -98,6 +104,7 @@ watch(() => props.pending.approval_id, focusPrimaryButton)
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+  flex: 0 0 auto;
 }
 
 .approval-title {
@@ -116,15 +123,23 @@ watch(() => props.pending.approval_id, focusPrimaryButton)
   margin-top: 8px;
 }
 
+.approval-scroll {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
 .approval-command {
   margin: 8px 0 0;
   padding: 10px;
   border-radius: $radius-sm;
-  overflow-x: auto;
+  overflow: auto;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   background: rgba(0, 0, 0, 0.18);
   font-size: 12px;
+  max-height: 240px;
 }
 
 .approval-actions {
@@ -132,5 +147,6 @@ watch(() => props.pending.approval_id, focusPrimaryButton)
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+  flex: 0 0 auto;
 }
 </style>

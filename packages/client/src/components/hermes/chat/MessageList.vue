@@ -29,6 +29,7 @@ function withAuthToken(url: string): string {
 const assistantAvatarUrl = computed(() =>
   withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"),
 );
+const assistantName = computed(() => settingsStore.display.assistant_name?.trim() || "Hermes");
 
 const streamingAssistantHasVisibleOutput = computed(() => {
   const streamingAssistant = [...displayMessages.value]
@@ -87,6 +88,7 @@ function handleScroll() {
 }
 
 onMounted(() => {
+  if (Object.keys(settingsStore.display).length === 0) void settingsStore.fetchSettings();
   nextTick(updateLatestState);
 });
 
@@ -159,7 +161,7 @@ watch(
           <span class="branch-view-meta">{{ t("chat.branchActiveHint") }}</span>
         </div>
         <div v-if="displayMessages.length === 0" class="empty-state">
-          <img src="/logo.png" alt="Hermes" class="empty-logo" />
+          <img src="/logo.png" :alt="assistantName" class="empty-logo" />
           <p>{{ t("chat.emptyState") }}</p>
         </div>
         <div v-else class="message-list-stack">
@@ -170,7 +172,7 @@ watch(
             :highlight="chatStore.focusMessageId === msg.id"
           />
           <div v-if="showRunPlaceholder" class="run-placeholder" aria-live="polite">
-            <img :src="assistantAvatarUrl" alt="Hermes" class="run-placeholder-avatar" />
+            <img :src="assistantAvatarUrl" :alt="assistantName" class="run-placeholder-avatar" />
             <div class="run-placeholder-content">
               <div class="run-placeholder-bubble">
                 <span class="run-placeholder-dots" aria-hidden="true">

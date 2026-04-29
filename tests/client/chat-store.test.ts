@@ -81,6 +81,9 @@ const ACTIVE_SESSION_KEY = `hermes_active_session_${PROFILE}`
 const SESSIONS_CACHE_KEY = `hermes_sessions_cache_v1_${PROFILE}`
 const LEGACY_ACTIVE_SESSION_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
+const bridgeLocalSessionKey = (sessionId: string) => `hermes_bridge_local_session_v1_${PROFILE}_${sessionId}`
+const bridgePersistentSessionKey = (sessionId: string) => `hermes_bridge_persistent_session_v1_${PROFILE}_${sessionId}`
+const branchSessionMetaKey = `hermes_branch_session_meta_v1_${PROFILE}`
 const sessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${PROFILE}_${sessionId}_`
 const inFlightKey = (sessionId: string) => `hermes_in_flight_v1_${PROFILE}_${sessionId}`
 const legacySessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${sessionId}`
@@ -771,6 +774,143 @@ describe('Chat Store', () => {
     expect(toolMessage?.toolArgs).toContain('"command":"echo \\"fix test\\""')
     expect(toolMessage?.toolResult).toContain('"output":"fix test 20:40:03"')
     expect(window.localStorage.getItem(`hermes_bridge_persistent_session_v1_default_${localBridgeSessionId}`)).toBe(persistentSessionId)
+  })
+
+  it('keeps a bridged branch session attached to its root after refresh', async () => {
+    const rootId = 'root-session'
+    const localBranchId = 'local-branch'
+    const persistentBranchId = 'tui-branch'
+    const cachedRoot = {
+      id: rootId,
+      title: 'Root',
+      source: 'tui',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2,
+      branchSessionCount: 1,
+    }
+    const cachedBranch = {
+      id: localBranchId,
+      title: 'Branch task',
+      source: 'tui',
+      messages: [],
+      createdAt: 2,
+      updatedAt: 3,
+      parentSessionId: rootId,
+      rootSessionId: rootId,
+      isBranchSession: true,
+    }
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, localBranchId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([cachedBranch, cachedRoot]))
+    window.localStorage.setItem(sessionMessagesKey(localBranchId), JSON.stringify([
+      { id: 'u1', role: 'user', content: 'Branch task', timestamp: 1 },
+      { id: 'a1', role: 'assistant', content: 'Local branch answer', timestamp: 2 },
+    ]))
+    window.localStorage.setItem(bridgeLocalSessionKey(localBranchId), '1')
+    window.localStorage.setItem(bridgePersistentSessionKey(localBranchId), persistentBranchId)
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+      { ...makeSummary(persistentBranchId, 'Branch task'), source: 'webui-bridge', started_at: 1710000002, last_active: 1710000003 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: persistentBranchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Branch task',
+        started_at: 1710000002,
+        ended_at: null,
+        last_active: 1710000003,
+        is_active: false,
+        messages: [
+          { id: 1, session_id: persistentBranchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+          { id: 2, session_id: persistentBranchId, role: 'assistant', content: 'Persisted branch answer', timestamp: 1710000003 },
+        ],
+        visible_count: 2,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      ...makeDetail(persistentBranchId, [
+      { id: 1, session_id: persistentBranchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+      { id: 2, session_id: persistentBranchId, role: 'assistant', content: 'Persisted branch answer', timestamp: 1710000003 },
+      ]),
+      source: 'tui',
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(persistentBranchId)
+    const branchSession = store.sessions.find(session => session.id === persistentBranchId)
+    expect(branchSession).toMatchObject({
+      isBranchSession: true,
+      rootSessionId: rootId,
+      parentSessionId: rootId,
+      source: 'tui',
+    })
+    expect(store.sessions.some(session => session.id === localBranchId)).toBe(false)
+  })
+
+  it('applies cached branch metadata before remote summaries resolve', async () => {
+    const rootId = 'root-session'
+    const branchId = 'tui-branch'
+    let resolveSummaries: (value: any[]) => void = () => {}
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([
+      {
+        id: branchId,
+        title: 'Branch task',
+        source: 'tui',
+        messages: [],
+        createdAt: 2,
+        updatedAt: 3,
+      },
+      {
+        id: rootId,
+        title: 'Root',
+        source: 'tui',
+        messages: [],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]))
+    window.localStorage.setItem(branchSessionMetaKey, JSON.stringify({
+      [branchId]: {
+        parentSessionId: rootId,
+        rootSessionId: rootId,
+        branchSessionCount: 0,
+      },
+    }))
+    mockConversationsApi.fetchConversationSummaries.mockReturnValue(new Promise(resolve => {
+      resolveSummaries = resolve
+    }))
+
+    const store = useChatStore()
+    const loading = store.loadSessions()
+
+    expect(store.sessions.find(session => session.id === branchId)).toMatchObject({
+      isBranchSession: true,
+      rootSessionId: rootId,
+      parentSessionId: rootId,
+    })
+
+    resolveSummaries([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+      { ...makeSummary(branchId, 'Branch task'), source: 'tui' },
+    ])
+    await loading
   })
 
   it('rehydrates cached tool cards with full historical arguments and results', async () => {

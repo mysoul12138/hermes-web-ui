@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { NButton, NSwitch, NSelect, useMessage } from 'naive-ui'
+import { computed, ref, watch } from 'vue'
+import { NButton, NSwitch, NSelect, NInput, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/hermes/settings'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
@@ -46,6 +46,19 @@ function withAuthToken(url: string): string {
 }
 
 const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || '/logo.png'))
+const assistantName = computed(() => settingsStore.display.assistant_name || 'Hermes')
+const assistantNameDraft = ref(assistantName.value)
+
+watch(assistantName, value => {
+  assistantNameDraft.value = value
+})
+
+function saveAssistantName() {
+  const next = assistantNameDraft.value.trim() || 'Hermes'
+  assistantNameDraft.value = next
+  if (next === assistantName.value) return
+  void save({ assistant_name: next })
+}
 
 function openAvatarPicker() {
   avatarInputRef.value?.click()
@@ -141,6 +154,16 @@ async function handleAvatarChange(event: Event) {
           {{ t('settings.display.resetAvatar') }}
         </NButton>
       </div>
+    </SettingRow>
+    <SettingRow :label="t('settings.display.assistantName')" :hint="t('settings.display.assistantNameHint')">
+      <NInput
+        v-model:value="assistantNameDraft"
+        size="small"
+        class="input-sm"
+        :placeholder="t('settings.display.assistantNamePlaceholder')"
+        @blur="saveAssistantName"
+        @keyup.enter="saveAssistantName"
+      />
     </SettingRow>
     <SettingRow :label="t('settings.display.showCost')" :hint="t('settings.display.showCostHint')">
       <NSwitch :value="settingsStore.display.show_cost" @update:value="v => save({ show_cost: v })" />

@@ -53,12 +53,12 @@ describe('chat store thinkingObservation', () => {
     expect(store.getThinkingObservation('m')).toBeUndefined()
   })
 
-  it('clears observations on clearThinkingObservationFor', () => {
+  it('keeps observations on clearThinkingObservationFor', () => {
     const store = useChatStore()
     store.noteThinkingDelta('m', '', '<think>hi</think>')
     expect(store.getThinkingObservation('m')).toBeDefined()
     store.clearThinkingObservationFor('any-session')
-    expect(store.getThinkingObservation('m')).toBeUndefined()
+    expect(store.getThinkingObservation('m')).toBeDefined()
   })
 
   it('noteReasoningStart records startedAt only once', () => {

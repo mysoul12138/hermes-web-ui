@@ -41,6 +41,7 @@ function withAuthToken(url: string): string {
 }
 
 const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"));
+const assistantName = computed(() => settingsStore.display.assistant_name?.trim() || "Hermes");
 
 // Copy entire bubble content
 const copyableContent = computed(() => {
@@ -167,7 +168,7 @@ const timeStr = computed(() => {
 });
 
 const showMessageHeader = computed(() => props.message.role === "assistant");
-const messageHeadTitle = computed(() => (props.message.role === "assistant" ? "Hermes" : ""));
+const messageHeadTitle = computed(() => (props.message.role === "assistant" ? assistantName.value : ""));
 const messageHeadStatus = computed(() => {
   if (props.message.role !== "assistant") return "";
   return props.message.isStreaming ? t("chat.thinkingInProgress") : "";
@@ -272,18 +273,23 @@ async function handleToolDetailClick(event: MouseEvent): Promise<void> {
   const source = button.closest<HTMLElement>("[data-copy-source]")?.dataset.copySource;
   if (source === "tool-args" && fullToolArgs.value) {
     await copyTextToClipboard(fullToolArgs.value);
+    toast.success(t("common.copied"));
     return;
   }
   if (source === "tool-preview" && fullToolPreview.value) {
     await copyTextToClipboard(fullToolPreview.value);
+    toast.success(t("common.copied"));
     return;
   }
   if (source === "tool-result" && fullToolResult.value) {
     await copyTextToClipboard(fullToolResult.value);
+    toast.success(t("common.copied"));
     return;
   }
 
-  await handleCodeBlockCopyClick(event);
+  if (await handleCodeBlockCopyClick(event)) {
+    toast.success(t("common.copied"));
+  }
 }
 
 const hasAttachments = computed(
@@ -425,7 +431,7 @@ const renderedToolResult = computed(() => {
         <img
           v-if="message.role === 'assistant'"
           :src="assistantAvatarUrl"
-          alt="Hermes"
+          :alt="assistantName"
           class="msg-avatar"
         />
         <div class="msg-content" :class="[message.role, { 'msg-content--outbound': message.role === 'user' }]">

@@ -50,6 +50,8 @@ export interface Message {
   //   2) 流式：由 reasoning.delta / thinking.delta / reasoning.available 事件累加
   // 不含 <think> 包裹标签；内容自身可以为多段纯文本。
   reasoning?: string
+  thinkingStartedAt?: number
+  thinkingEndedAt?: number
 }
 
 export interface Session {
@@ -324,7 +326,7 @@ function applySessionUsage(session: Session | undefined | null, usage: { input_t
 
 function applySessionDetail(session: Session | undefined | null, detail: Partial<SessionDetail> | null | undefined) {
   if (!session || !detail) return
-  if (detail.source) session.source = detail.source
+  if (detail.source) session.source = detail.source === 'webui-bridge' ? 'tui' : detail.source
   if (detail.model) session.model = detail.model
   if (detail.billing_provider != null) session.provider = detail.billing_provider || ''
   if (detail.message_count != null) session.messageCount = detail.message_count
@@ -481,7 +483,7 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
   return {
     id: s.id,
     title: s.title || '',
-    source: s.source || undefined,
+    source: s.source === 'webui-bridge' ? 'tui' : (s.source || undefined),
     messages: [],
     createdAt: Math.round(s.started_at * 1000),
     updatedAt: Math.round((s.last_active || s.ended_at || s.started_at) * 1000),
@@ -505,6 +507,7 @@ const SESSIONS_CACHE_KEY_PREFIX = 'hermes_sessions_cache_v1_'
 const BRIDGE_LOCAL_SESSION_KEY_PREFIX = 'hermes_bridge_local_session_v1_'
 const BRIDGE_PERSISTENT_SESSION_KEY_PREFIX = 'hermes_bridge_persistent_session_v1_'
 const BRIDGE_SEEN_KEY_PREFIX = 'hermes_bridge_seen_v1_'
+const BRANCH_SESSION_META_KEY_PREFIX = 'hermes_branch_session_meta_v1_'
 const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
@@ -530,6 +533,7 @@ function sessionsCacheKey(): string { return SESSIONS_CACHE_KEY_PREFIX + getProf
 function bridgeLocalSessionKey(sid: string): string { return `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
 function bridgePersistentSessionKey(sid: string): string { return `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
 function bridgeSeenKey(): string { return BRIDGE_SEEN_KEY_PREFIX + getProfileName() }
+function branchSessionMetaKey(): string { return BRANCH_SESSION_META_KEY_PREFIX + getProfileName() }
 function msgsCacheKey(sid: string): string { return `hermes_session_msgs_v1_${getProfileName()}_${sid}_` }
 function inFlightKey(sid: string): string { return `hermes_in_flight_v1_${getProfileName()}_${sid}` }
 function legacyStorageKey(): string | null { return getProfileName() === 'default' ? LEGACY_STORAGE_KEY : null }
@@ -555,6 +559,12 @@ interface ClarifyState {
   visibleSince: number
   signature: string
   submitting: boolean
+}
+
+interface BranchSessionMeta {
+  parentSessionId: string | null
+  rootSessionId: string
+  branchSessionCount?: number
 }
 
 function loadJson<T>(key: string): T | null {
@@ -750,6 +760,35 @@ export const useChatStore = defineStore('chat', () => {
     return branches.reduce((sum, branch) => sum + 1 + countBranchTree(branch.branches || []), 0)
   }
 
+  function loadBranchSessionMetaIndex(): Record<string, BranchSessionMeta> {
+    return loadJson<Record<string, BranchSessionMeta>>(branchSessionMetaKey()) || {}
+  }
+
+  function applyBranchMeta(session: Session, meta: BranchSessionMeta | undefined) {
+    if (!meta?.rootSessionId) return
+    session.isBranchSession = true
+    session.parentSessionId = meta.parentSessionId
+    session.rootSessionId = meta.rootSessionId
+    session.branchSessionCount = meta.branchSessionCount ?? session.branchSessionCount
+  }
+
+  function persistBranchSessionMeta(rootSessionId: string, branches: ConversationBranch[]) {
+    if (!rootSessionId) return
+    const next = { ...loadBranchSessionMetaIndex() }
+    const visit = (items: ConversationBranch[]) => {
+      for (const branch of items) {
+        next[branch.session_id] = {
+          parentSessionId: branch.parent_session_id ?? rootSessionId,
+          rootSessionId,
+          branchSessionCount: countBranchTree(branch.branches || []),
+        }
+        visit(branch.branches || [])
+      }
+    }
+    visit(branches)
+    saveJson(branchSessionMetaKey(), next)
+  }
+
   function findBranchById(branches: ConversationBranch[], branchId: string): ConversationBranch | null {
     for (const branch of branches) {
       if (branch.session_id === branchId) return branch
@@ -813,7 +852,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function branchesRepresentSameSubagent(persisted: ConversationBranch, live: ConversationBranch): boolean {
     if (live.source !== 'subagent') return false
-    if (persisted.source !== 'tui' && persisted.source !== 'api_server') return false
+    if (persisted.source !== 'tui' && persisted.source !== 'api_server' && persisted.source !== 'webui-bridge') return false
     if (!branchParentMatches(persisted, live)) return false
 
     const persistedKey = branchTextKey(persisted)
@@ -926,7 +965,7 @@ export const useChatStore = defineStore('chat', () => {
     return {
       id: branch.session_id,
       title: branch.title || branch.messages.find(message => message.content.trim())?.content.slice(0, 40) || branch.session_id,
-      source: branch.source || undefined,
+      source: branch.source === 'webui-bridge' ? 'tui' : (branch.source || undefined),
       messages: branchMessagesToMessages(branch),
       createdAt: Math.round(branch.started_at * 1000),
       updatedAt: Math.round((branch.last_active || branch.ended_at || branch.started_at) * 1000),
@@ -1416,6 +1455,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return readBridgePersistentSessionId(sid) || sid
   }
 
+  function rootSessionIdFor(sid: string): string {
+    return sessions.value.find(session => session.id === sid)?.rootSessionId || sid
+  }
+
   async function fetchResolvedSessionDetail(sid: string): Promise<SessionDetail | null> {
     const initial = await fetchSession(sessionFetchId(sid))
     if (initial && initial.id && initial.id !== sid && isBridgeLocalSession(sid)) {
@@ -1590,7 +1633,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         }
-        void refreshSessionBranches(sid)
+        void refreshSessionBranches(rootSessionIdFor(sid))
         syncApprovalFromMessages(sid, target.messages)
         // During a live SSE stream this poll is only a detail backfill. Do not
         // let a stable DB snapshot conclude the run before run.completed arrives.
@@ -1643,7 +1686,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     try {
       // 从 profile 对应的缓存中恢复，实现 instant render
       const cachedSessions = loadJsonWithFallback<Session[]>(sessionsCacheKey(), legacySessionsCacheKey())
+      const cachedBranchMetaIndex = loadBranchSessionMetaIndex()
       if (cachedSessions?.length) {
+        cachedSessions.forEach(session => applyBranchMeta(session, cachedBranchMetaIndex[session.id]))
         sessions.value = cachedSessions
         const savedId = localStorage.getItem(storageKey()) || (legacyStorageKey() ? localStorage.getItem(legacyStorageKey()!) : null)
         if (savedId) {
@@ -1665,9 +1710,19 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       }
       const freshRaw = list.map(mapHermesSession)
       const freshRawIds = new Set(freshRaw.map(s => s.id))
+      const branchMetaIndex = loadBranchSessionMetaIndex()
       // Preserve already-loaded messages for sessions that are still present,
       // so we don't blow away the active session's messages on refresh.
       const msgsByIdBefore = new Map(sessions.value.map(s => [s.id, s.messages]))
+      const branchMetaByIdBefore = new Map(
+        sessions.value
+          .filter(s => s.isBranchSession && !!s.rootSessionId)
+          .map(s => [s.id, {
+            parentSessionId: s.parentSessionId ?? null,
+            rootSessionId: s.rootSessionId as string,
+            branchSessionCount: s.branchSessionCount,
+          }]),
+      )
       const bridgeLocalByPersistent = new Map<string, Session>()
       for (const s of sessions.value) {
         const persistentId = readBridgePersistentSessionId(s.id)
@@ -1690,6 +1745,11 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           s.messages = localBridgeMessages
           saveJsonWithLegacy(msgsCacheKey(s.id), sanitizeForCache(localBridgeMessages), legacyMsgsCacheKey(s.id))
         }
+        const branchMeta = branchMetaByIdBefore.get(s.id)
+          || branchMetaIndex[s.id]
+          || (localBridge ? branchMetaByIdBefore.get(localBridge.id) : undefined)
+          || (localBridge ? branchMetaIndex[localBridge.id] : undefined)
+        applyBranchMeta(s, branchMeta)
       }
       // Preserve local-only sessions the server hasn't seen yet — e.g. a chat
       // that was just created and whose first run is still in-flight. Without
@@ -1762,7 +1822,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         persistActiveMessages()
       }
       applySessionDetail(target, detail)
-      void refreshSessionBranches(sid)
+      void refreshSessionBranches(rootSessionIdFor(sid))
       if (isSessionLive(sid) || readInFlight(sid)) {
         syncApprovalFromMessages(sid, target.messages)
         void pollClarifyOnce(sid)
@@ -1832,9 +1892,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     }
 
     if (runId.startsWith('bridge_run_')) {
-      void refreshSessionBranches(sid)
+      void refreshSessionBranches(rootSessionIdFor(sid))
       branchRefreshTimer = setInterval(() => {
-        void refreshSessionBranches(sid)
+        void refreshSessionBranches(rootSessionIdFor(sid))
       }, 3000)
     }
 
@@ -1958,7 +2018,6 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             } else {
               const newId = uid()
               const nextContent = evt.delta || ''
-              noteThinkingDelta(newId, '', nextContent)
               addMessage(sid, {
                 id: newId,
                 role: 'assistant',
@@ -1966,6 +2025,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
                 timestamp: Date.now(),
                 isStreaming: true,
               })
+              noteThinkingDelta(newId, '', nextContent)
             }
             schedulePersist()
             break
@@ -2085,10 +2145,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             clearClarify(sid)
             if (sid === activeSessionId.value) {
               void refreshActiveSession().finally(() => {
-                void refreshSessionBranches(sid)
+                void refreshSessionBranches(rootSessionIdFor(sid))
               })
             } else {
-              void refreshSessionBranches(sid)
+              void refreshSessionBranches(rootSessionIdFor(sid))
             }
             break
           }
@@ -2242,7 +2302,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         } else if (serverHasBetterToolDetails(local, mapped)) {
           activeSession.value.messages = mergeServerToolDetails(activeSession.value.messages, mapped)
         }
-        void refreshSessionBranches(sessionId)
+        void refreshSessionBranches(rootSessionIdFor(sessionId))
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {
           syncApprovalFromMessages(sessionId, activeSession.value.messages)
           void pollClarifyOnce(sessionId)
@@ -2556,6 +2616,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         ...dbBranchesBySession.value,
         [sid]: detail.branches || [],
       }
+      persistBranchSessionMeta(sid, detail.branches || [])
       const session = sessions.value.find(item => item.id === sid)
       if (session) session.branchSessionCount = branchCount
       syncBranchSessions(sid)
@@ -2637,7 +2698,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     }
     syncBranchSessionFromBranch(sessionId, findBranchById(sessionBranches(sessionId), subagentId) || branch)
     if (activeSessionId.value === subagentId) persistActiveMessages()
-    void refreshSessionBranches(sessionId)
+    void refreshSessionBranches(rootSessionIdFor(sessionId))
   }
 
   async function respondClarify(answer: string) {
@@ -2860,11 +2921,40 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   }
 
   // Transient observation of <think> boundaries during active streaming.
-  // Not persisted; cleared on session switch. See spec §5.3.
+  // Mirrored onto Message so the observed duration survives tab refreshes and
+  // session switches.
   const thinkingObservation = new Map<string, { startedAt?: number; endedAt?: number }>()
 
+  function findMessageById(messageId: string): Message | undefined {
+    for (const session of sessions.value) {
+      const match = session.messages.find(message => message.id === messageId)
+      if (match) return match
+    }
+    return undefined
+  }
+
   function getThinkingObservation(messageId: string) {
-    return thinkingObservation.get(messageId)
+    const cached = thinkingObservation.get(messageId)
+    const message = findMessageById(messageId)
+    if (!message?.thinkingStartedAt && !message?.thinkingEndedAt) return cached
+    return {
+      startedAt: cached?.startedAt ?? message.thinkingStartedAt,
+      endedAt: cached?.endedAt ?? message.thinkingEndedAt,
+    }
+  }
+
+  function persistThinkingObservation(messageId: string, observation: { startedAt?: number; endedAt?: number }) {
+    for (const session of sessions.value) {
+      const idx = session.messages.findIndex(message => message.id === messageId)
+      if (idx === -1) continue
+      session.messages[idx] = {
+        ...session.messages[idx],
+        thinkingStartedAt: observation.startedAt ?? session.messages[idx].thinkingStartedAt,
+        thinkingEndedAt: observation.endedAt ?? session.messages[idx].thinkingEndedAt,
+      }
+      persistSessionMessages(session.id)
+      return
+    }
   }
 
   function noteThinkingDelta(messageId: string, prevContent: string, nextContent: string) {
@@ -2878,6 +2968,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       existing.endedAt = Date.now()
     }
     thinkingObservation.set(messageId, existing)
+    persistThinkingObservation(messageId, existing)
   }
 
   /** 第一次见到某条消息的 reasoning 文本时，标记 startedAt。 */
@@ -2886,6 +2977,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (existing.startedAt === undefined) {
       existing.startedAt = Date.now()
       thinkingObservation.set(messageId, existing)
+      persistThinkingObservation(messageId, existing)
     }
   }
 
@@ -2896,6 +2988,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (existing.endedAt === undefined) {
       existing.endedAt = Date.now()
       thinkingObservation.set(messageId, existing)
+      persistThinkingObservation(messageId, existing)
     }
   }
 
@@ -2914,9 +3007,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   }
 
   function clearThinkingObservationFor(_sessionId: string) {
-    // messageId 与 sessionId 的关联未单独持有；方案是切会话时一律清空。
-    // 这符合 spec 定义：observation 是"当前会话范围内"的 transient 状态。
-    thinkingObservation.clear()
+    // Keep observations in memory and on messages; switching sessions should
+    // not make the displayed "observed x seconds" metadata disappear.
   }
 
   return {

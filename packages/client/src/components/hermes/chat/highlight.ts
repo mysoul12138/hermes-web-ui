@@ -88,19 +88,20 @@ export async function copyTextToClipboard(text: string): Promise<void> {
   }
 }
 
-export async function handleCodeBlockCopyClick(event: MouseEvent): Promise<void> {
+export async function handleCodeBlockCopyClick(event: MouseEvent): Promise<boolean> {
   const target = event.target
-  if (!(target instanceof HTMLElement)) return
+  if (!(target instanceof HTMLElement)) return false
 
   const button = target.closest<HTMLElement>('[data-copy-code="true"]')
-  if (!button) return
+  if (!button) return false
 
   event.preventDefault()
 
   const block = button.closest('.hljs-code-block')
   const code = block?.querySelector('code')
   const text = code?.textContent ?? ''
-  if (!text) return
+  if (!text) return false
 
   await copyTextToClipboard(text)
+  return true
 }

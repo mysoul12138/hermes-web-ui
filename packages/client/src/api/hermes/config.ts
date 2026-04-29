@@ -12,6 +12,7 @@ export interface DisplayConfig {
   show_cost?: boolean
   skin?: string
   assistant_avatar_url?: string
+  assistant_name?: string
 }
 
 export interface AgentConfig {
