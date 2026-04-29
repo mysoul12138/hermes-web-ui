@@ -370,7 +370,7 @@ export class TuiBridgeService {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
     const requestedModel = options.model?.trim()
     const requestedProvider = options.provider?.trim()
-    if (requestedModel) {
+    if (requestedModel && !this.isWebUiCustomProviderKey(requestedProvider)) {
       await this.syncModel(requestedModel, requestedProvider)
     }
     let bridgeSession = await this.ensureBridgeSession(webSessionId)
@@ -431,8 +431,17 @@ export class TuiBridgeService {
 
   private formatModelSwitch(model: string, provider?: string): string {
     const value = model.trim()
-    const providerValue = provider?.trim()
+    const providerValue = this.toHermesProviderFlag(provider)
     return providerValue ? `${value} --provider ${providerValue}` : value
+  }
+
+  private isWebUiCustomProviderKey(provider?: string): boolean {
+    return /^custom:/i.test(provider?.trim() || '')
+  }
+
+  private toHermesProviderFlag(provider?: string): string {
+    const value = provider?.trim() || ''
+    return this.isWebUiCustomProviderKey(value) ? value.replace(/^custom:/i, '') : value
   }
 
   private async syncModel(model: string, provider?: string, bridgeSessionId?: string) {

@@ -406,6 +406,7 @@ export default {
       privacy: '隐私',
       apiServer: 'API 服务器',
       models: '模型',
+      webui: 'WebUI',
     },
     models: {
       apiKey: 'API Key',
@@ -414,6 +415,12 @@ export default {
       saved: '已保存',
       saveFailed: '保存失败',
       noProviders: '暂无已配置的模型',
+    },
+    webui: {
+      bridge: 'WebUI Bridge',
+      bridgeHint: '通过 Hermes TUI bridge 转发对话，以支持实时工具调用、审批、澄清和子代理事件。',
+      bridgeEnvDefault: '环境默认值',
+      bridgeEnvDefaultHint: '当前使用环境变量 HERMES_WEBUI_BRIDGE；保存设置后将改用显式配置。',
     },
     display: {
       streaming: '流式响应',

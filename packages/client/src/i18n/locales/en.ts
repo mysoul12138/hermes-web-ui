@@ -414,6 +414,7 @@ export default {
       privacy: 'Privacy',
       apiServer: 'API Server',
       models: 'Models',
+      webui: 'WebUI',
     },
     models: {
       apiKey: 'API Key',
@@ -422,6 +423,12 @@ export default {
       saved: 'Saved',
       saveFailed: 'Save failed',
       noProviders: 'No providers configured',
+    },
+    webui: {
+      bridge: 'WebUI Bridge',
+      bridgeHint: 'Route chat through the Hermes TUI bridge for live tool, approval, clarify, and subagent events.',
+      bridgeEnvDefault: 'Env default',
+      bridgeEnvDefaultHint: 'Using HERMES_WEBUI_BRIDGE from the environment until you save an explicit setting.',
     },
     display: {
       streaming: 'Stream Responses',

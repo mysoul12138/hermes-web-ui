@@ -810,8 +810,16 @@ export const useChatStore = defineStore('chat', () => {
     return loadJson<Record<string, BranchSessionMeta>>(branchSessionMetaKey()) || {}
   }
 
-  function applyBranchMeta(session: Session, meta: BranchSessionMeta | undefined) {
+  function hasLoadedBranches(rootSessionId: string, items: Session[] = sessions.value): boolean {
+    const root = items.find(item => item.id === rootSessionId)
+    return (root?.branchSessionCount || 0) > 0
+      || countBranchTree(dbBranchesBySession.value[rootSessionId] || []) > 0
+      || countBranchTree(liveBranchesBySession.value[rootSessionId] || []) > 0
+  }
+
+  function applyBranchMeta(session: Session, meta: BranchSessionMeta | undefined, rootItems: Session[] = sessions.value, allowUnverified = false) {
     if (!meta?.rootSessionId) return
+    if (!allowUnverified && !hasLoadedBranches(meta.rootSessionId, rootItems)) return
     session.isBranchSession = true
     session.parentSessionId = meta.parentSessionId
     session.rootSessionId = meta.rootSessionId
@@ -821,6 +829,9 @@ export const useChatStore = defineStore('chat', () => {
   function persistBranchSessionMeta(rootSessionId: string, branches: ConversationBranch[]) {
     if (!rootSessionId) return
     const next = { ...loadBranchSessionMetaIndex() }
+    for (const [sessionId, meta] of Object.entries(next)) {
+      if (sessionId !== rootSessionId && meta?.rootSessionId === rootSessionId) delete next[sessionId]
+    }
     const visit = (items: ConversationBranch[]) => {
       for (const branch of items) {
         next[branch.session_id] = {
@@ -833,6 +844,24 @@ export const useChatStore = defineStore('chat', () => {
     }
     visit(branches)
     saveJson(branchSessionMetaKey(), next)
+  }
+
+  function reconcileBranchSessions(rootSessionId: string) {
+    const validBranchIds = new Set(flattenBranchTree(sessionBranches(rootSessionId)).map(branch => branch.session_id))
+    let changed = false
+    sessions.value = sessions.value.filter(session => {
+      if (!session.isBranchSession || session.rootSessionId !== rootSessionId || validBranchIds.has(session.id)) return true
+      if (activeSessionId.value === session.id) {
+        const root = sessions.value.find(item => item.id === rootSessionId) || null
+        activeSessionId.value = root?.id || null
+        activeSession.value = root
+        if (root?.id) setItemBestEffort(storageKey(), root.id)
+      }
+      removeItemWithLegacy(msgsCacheKey(session.id), legacyMsgsCacheKey(session.id))
+      changed = true
+      return false
+    })
+    if (changed) persistSessionsList()
   }
 
   function findBranchById(branches: ConversationBranch[], branchId: string): ConversationBranch | null {
@@ -890,7 +919,7 @@ export const useChatStore = defineStore('chat', () => {
   function branchParentMatches(persisted: ConversationBranch, live: ConversationBranch): boolean {
     const persistedParent = persisted.parent_session_id || ''
     const liveParent = live.parent_session_id || ''
-    if (!persistedParent || !liveParent) return true
+    if (!persistedParent || !liveParent) return false
     return persistedParent === liveParent
       || persistedParent === sessionFetchId(liveParent)
       || sessionFetchId(persistedParent) === liveParent
@@ -911,7 +940,9 @@ export const useChatStore = defineStore('chat', () => {
     const startedDelta = Math.abs((persisted.started_at || 0) - (live.started_at || 0))
     const recentDelta = Math.abs((persisted.last_active || persisted.started_at || 0) - (live.last_active || live.started_at || 0))
 
-    return hasTextMatch || startedDelta <= 120 || (live.is_active && recentDelta <= 300)
+    if (hasTextMatch) return true
+    if (persistedKey || liveKey) return false
+    return startedDelta <= 5 && (!live.is_active || recentDelta <= 30)
   }
 
   function findLiveBranchMatch(persisted: ConversationBranch, live: ConversationBranch[], usedLiveIds: Set<string>): ConversationBranch | undefined {
@@ -1736,7 +1767,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       const cachedBranchMetaIndex = loadBranchSessionMetaIndex()
       if (cachedSessions?.length) {
         cachedSessions.forEach(session => {
-          applyBranchMeta(session, cachedBranchMetaIndex[session.id])
+          applyBranchMeta(session, cachedBranchMetaIndex[session.id], cachedSessions, true)
           applySessionModelOverride(session)
         })
         sessions.value = cachedSessions
@@ -1800,7 +1831,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           || branchMetaIndex[s.id]
           || (localBridge ? branchMetaByIdBefore.get(localBridge.id) : undefined)
           || (localBridge ? branchMetaIndex[localBridge.id] : undefined)
-        applyBranchMeta(s, branchMeta)
+        applyBranchMeta(s, branchMeta, fresh)
         if (localBridge) copySessionModelOverride(localBridge.id, s.id)
         applySessionModelOverride(s)
       }
@@ -1827,7 +1858,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         }
         if (readInFlight(s.id)) return true
         if (isBridgeLocalSession(s.id)) return true
-        if (s.isBranchSession) return true
+        if (s.isBranchSession) {
+          return !!s.rootSessionId && hasLoadedBranches(s.rootSessionId, fresh)
+        }
         // Session no longer exists on server and no active run — clean up cache
         removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
         removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
@@ -2681,6 +2714,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       if (session) session.branchSessionCount = branchCount
       syncBranchSessions(sid)
       promoteMergedSubagentBranchSessions(sid)
+      reconcileBranchSessions(sid)
       await hydrateActiveBranchSession(sid)
       if (activeSession.value?.rootSessionId === sid) persistActiveMessages()
     } catch {

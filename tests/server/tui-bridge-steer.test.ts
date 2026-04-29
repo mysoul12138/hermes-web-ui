@@ -83,6 +83,31 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).closeRun(result.run_id)
   })
 
+  it('passes custom providers to Hermes without the WebUI custom prefix', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await bridge.startRun('hello', 'web-session', [], {
+      model: 'gpt-5.4',
+      provider: 'custom:ai.warp2pans.online',
+    })
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
+      'prompt.submit',
+    ])
+    expect(client.requests[0].params).toMatchObject({
+      key: 'model',
+      session_id: 'tui-session',
+      value: 'gpt-5.4 --provider ai.warp2pans.online',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
   it('forwards tool arguments, progress, and result payloads to WebUI events', () => {
     const client = new FakeGatewayClient()
     const bridge = new TuiBridgeService(client as any)

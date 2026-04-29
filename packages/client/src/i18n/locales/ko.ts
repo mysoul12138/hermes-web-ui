@@ -382,6 +382,13 @@ export default {
       session: '세션',
       privacy: '개인정보',
       apiServer: 'API 서버',
+      webui: 'WebUI',
+    },
+    webui: {
+      bridge: 'WebUI Bridge',
+      bridgeHint: 'Route chat through the Hermes TUI bridge for live tool, approval, clarify, and subagent events.',
+      bridgeEnvDefault: 'Env default',
+      bridgeEnvDefaultHint: 'Using HERMES_WEBUI_BRIDGE from the environment until you save an explicit setting.',
     },
     display: {
       streaming: '스트리밍 응답',

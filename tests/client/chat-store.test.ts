@@ -1294,6 +1294,114 @@ describe('Chat Store', () => {
     ])
   })
 
+  it('does not merge a live subagent placeholder into a persisted branch from another parent', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('review the branch')
+    const rootId = store.activeSessionId!
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: 'unrelated-tui-branch',
+        parent_session_id: 'other-root',
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Review branch',
+        started_at: Date.now() / 1000,
+        ended_at: null,
+        last_active: Date.now() / 1000,
+        is_active: true,
+        visible_count: 0,
+        thread_session_count: 1,
+        messages: [],
+        branches: [],
+      }],
+    })
+
+    onEvent?.({
+      event: 'subagent.start',
+      subagent_id: 'subagent-1',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Starting review',
+      depth: 1,
+    })
+    await flushPromises()
+
+    expect(store.sessionBranches(rootId).map(branch => branch.session_id).sort()).toEqual([
+      'subagent-1',
+      'unrelated-tui-branch',
+    ])
+    await store.switchBranchSession(rootId, 'subagent-1')
+    expect(store.activeSessionId).toBe('subagent-1')
+  })
+
+  it('drops stale cached branch sessions when the refreshed root has no branches', async () => {
+    const cachedSessions = [
+      {
+        id: 'root',
+        title: 'Root',
+        source: 'tui',
+        messages: [],
+        createdAt: 1,
+        updatedAt: 1,
+        branchSessionCount: 0,
+      },
+      {
+        id: 'stale-child',
+        title: 'Stale child',
+        source: 'tui',
+        messages: [],
+        createdAt: 2,
+        updatedAt: 2,
+        isBranchSession: true,
+        parentSessionId: 'root',
+        rootSessionId: 'root',
+      },
+    ]
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(cachedSessions))
+    window.localStorage.setItem(branchSessionMetaKey, JSON.stringify({
+      'stale-child': {
+        parentSessionId: 'root',
+        rootSessionId: 'root',
+        branchSessionCount: 0,
+      },
+    }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary('root', 'Root'), source: 'tui', branch_session_count: 0 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: 'root',
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+    await store.refreshSessionBranches('root')
+
+    expect(store.sessions.map(session => session.id)).toEqual(['root'])
+    expect(JSON.parse(window.localStorage.getItem(branchSessionMetaKey) || '{}')).toEqual({})
+    expect(store.sessionBranchCount('root')).toBe(0)
+  })
+
   it('shows and responds to live clarify prompts', async () => {
     let onEvent: ((event: Record<string, any>) => void) | null = null
     mockChatApi.streamRunEvents.mockImplementation((
