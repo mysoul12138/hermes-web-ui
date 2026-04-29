@@ -190,7 +190,7 @@ export async function getAvailable(ctx: any) {
           const orKey = envGetValue(envMapping.api_key_env)
           if (orKey) {
             try {
-              const fetched = await fetchProviderModels(baseUrl, orKey, true)
+              const fetched = await fetchProviderModelsFromConfig(baseUrl, orKey, true)
               if (fetched.length > 0) modelsList = fetched
             } catch { /* ignore — leave empty, won't show */ }
           }
