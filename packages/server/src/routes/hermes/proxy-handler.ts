@@ -131,7 +131,10 @@ function processRunEventChunk(chunk: string, streamRunId?: string): void {
       if (data.event === 'run.completed' && data.usage) {
         const sessionId = getSessionForRun(eventRunId)
         if (sessionId) {
-          updateUsage(sessionId, data.usage.input_tokens, data.usage.output_tokens)
+          updateUsage(sessionId, {
+            inputTokens: data.usage.input_tokens,
+            outputTokens: data.usage.output_tokens,
+          })
         }
         clearLivePendingApprovalForRun(eventRunId)
         continue

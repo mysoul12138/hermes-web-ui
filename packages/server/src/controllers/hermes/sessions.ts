@@ -5,7 +5,7 @@ import {
   listConversationSummariesFromDb,
 } from '../../db/hermes/conversations-db'
 import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries } from '../../db/hermes/sessions-db'
-import { deleteUsage, getUsage, getUsageBatch } from '../../db/hermes/usage-store'
+import { deleteUsage, getLocalUsageStats, getUsage, getUsageBatch } from '../../db/hermes/usage-store'
 import { getModelContextLength } from '../../services/hermes/model-context'
 import type { ConversationDetail, ConversationSummary } from '../../services/hermes/conversations'
 import { getActiveProfileName } from '../../services/hermes/hermes-profile'
@@ -326,6 +326,13 @@ export async function usageSingle(ctx: any) {
     return
   }
   ctx.body = result
+}
+
+export async function usageStats(ctx: any) {
+  const profile = typeof ctx.query.profile === 'string' && ctx.query.profile.trim()
+    ? ctx.query.profile.trim()
+    : undefined
+  ctx.body = getLocalUsageStats(profile)
 }
 
 export async function rename(ctx: any) {
