@@ -140,6 +140,14 @@ export default {
     thinkingHide: '사고 과정 접기',
     thinkingDuration: '관측 {duration}',
     thinkingChars: '{count}자',
+    approvalTitle: '승인이 필요합니다',
+    approvalAllowOnce: '한 번 허용',
+    approvalAllowSession: '이 세션에서 허용',
+    approvalAllowAlways: '항상 허용',
+    approvalDeny: '거부',
+    approvalPendingCount: '승인 {current}/{total}',
+    approvalDangerousCommand: '이 작업에는 승인이 필요합니다.',
+    approvalResponding: '승인 응답을 제출하는 중...',
     copyBubble: '메시지 복사',
     copiedBubble: '복사됨',
     copyFailed: '복사 실패',
@@ -525,6 +533,7 @@ export default {
     qrFetching: 'QR 코드를 가져오는 중...',
     qrScanHint: 'WeChat으로 QR 코드를 스캔하여 로그인',
     qrScanedHint: '스캔됨, 휴대폰에서 확인해 주세요...',
+    qrExpiredHint: 'QR code expired. Refresh and try again.',
   },
 
   // 언어

@@ -140,6 +140,14 @@ export default {
     thinkingHide: 'Ocultar raciocínio',
     thinkingDuration: 'Observado {duration}',
     thinkingChars: '{count} caracteres',
+    approvalTitle: 'Aprovação necessária',
+    approvalAllowOnce: 'Permitir uma vez',
+    approvalAllowSession: 'Permitir nesta sessão',
+    approvalAllowAlways: 'Sempre permitir',
+    approvalDeny: 'Negar',
+    approvalPendingCount: 'Aprovação {current} de {total}',
+    approvalDangerousCommand: 'Esta ação requer sua aprovação.',
+    approvalResponding: 'Enviando resposta de aprovação...',
     copyBubble: 'Copiar mensagem',
     copiedBubble: 'Mensagem copiada',
     copyFailed: 'Falha ao copiar',
@@ -525,6 +533,7 @@ export default {
     qrFetching: 'Buscando codigo QR...',
     qrScanHint: 'Escaneie com WeChat para fazer login',
     qrScanedHint: 'Escaneado, por favor confirme no celular...',
+    qrExpiredHint: 'QR code expired. Refresh and try again.',
   },
 
   // Language

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { existsSync, readFileSync } from 'fs'
+import { homedir } from 'os'
 import { delimiter, resolve } from 'path'
 import { createInterface } from 'readline'
 import YAML from 'js-yaml'
@@ -13,6 +14,7 @@ import {
   setLivePendingClarifyForRun,
   setRunSession,
 } from './run-state'
+import { buildUserProviderConfigEntry, fetchProviderModels, listUserProviders, readConfigYaml, writeConfigYaml } from '../config-helpers'
 import { getActiveConfigPath } from './hermes-profile'
 
 export interface BridgeRunEvent {
@@ -125,18 +127,31 @@ const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIM
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
 const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
 
+function resolveHermesHome(): string {
+  return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
+}
+
+const DEFAULT_BRIDGE_PYTHON = resolve(resolveHermesHome(), 'webui-bridge-venv/bin/python')
+if (!process.env.HERMES_PYTHON && existsSync(DEFAULT_BRIDGE_PYTHON)) {
+  process.env.HERMES_PYTHON = DEFAULT_BRIDGE_PYTHON
+}
+
 function resolvePython(root: string): string {
   const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
-  if (configured) return configured
   const venv = process.env.VIRTUAL_ENV?.trim()
+  const hermesHome = resolveHermesHome()
   const hit = [
     venv && resolve(venv, 'bin/python'),
     venv && resolve(venv, 'Scripts/python.exe'),
+    resolve(hermesHome, 'webui-bridge-venv/bin/python'),
+    resolve(hermesHome, 'webui-bridge-venv/bin/python3'),
     resolve(root, '.venv/bin/python'),
     resolve(root, '.venv/bin/python3'),
     resolve(root, 'venv/bin/python'),
     resolve(root, 'venv/bin/python3'),
   ].find((p): p is string => !!p && existsSync(p))
+  if (hit) return hit
+  if (configured) return configured
   return hit || (process.platform === 'win32' ? 'python' : 'python3')
 }
 
@@ -144,7 +159,7 @@ function resolveBridgeRoot(): string {
   return process.env.HERMES_TUI_ROOT?.trim()
     || process.env.HERMES_PYTHON_SRC_ROOT?.trim()
     || process.env.HERMES_AGENT_ROOT?.trim()
-    || resolve(process.env.HOME || process.cwd(), '.hermes/hermes-publish.HkvvHk')
+    || resolve(resolveHermesHome(), 'hermes-publish.HkvvHk')
 }
 
 function parseBridgeFlag(value: unknown): boolean | null {
@@ -171,12 +186,43 @@ function isUnknownBridgeMethod(error: unknown, method: string): boolean {
   return new RegExp(`unknown method:\\s*${method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(message)
 }
 
+function isNonFatalCustomModelListingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /could not reach this custom endpoint's model listing/i.test(message)
+    && /Hermes will still save/i.test(message)
+    || /was not found in this custom endpoint's model listing/i.test(message)
+    && /It may still work/i.test(message)
+}
+
 function normalizeSteerResult(result: { status?: string, text?: string } | null | undefined, text: string) {
   return {
     ok: result?.status === 'queued',
     status: result?.status || 'unknown',
     text: result?.text || text,
   }
+}
+
+function normalizeModelToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function resolveCompatibleModel(requested: string, available: string[]): string {
+  const exact = available.find(item => item === requested)
+  if (exact) return exact
+
+  const requestedToken = normalizeModelToken(requested.split('/').pop() || requested)
+  if (!requestedToken) return requested
+
+  const matches = available.filter(item => normalizeModelToken(item.split('/').pop() || item) === requestedToken)
+  return matches.length === 1 ? matches[0] : requested
+}
+
+function payloadText(payload: Record<string, any>): string {
+  for (const key of ['text', 'delta', 'content', 'message', 'output', 'summary']) {
+    const value = payload[key]
+    if (typeof value === 'string' && value) return value
+  }
+  return ''
 }
 
 function toolPayloadFields(payload: Record<string, any>): Record<string, unknown> {
@@ -233,6 +279,7 @@ class TuiGatewayClient extends EventEmitter {
     const python = resolvePython(root)
     const cwd = process.env.HERMES_CWD || root
     const env = { ...process.env }
+    env.HERMES_PYTHON = python
     const pyPath = env.PYTHONPATH?.trim()
     env.PYTHONPATH = pyPath ? `${root}${delimiter}${pyPath}` : root
     env.PATH = [
@@ -439,18 +486,72 @@ export class TuiBridgeService {
     return /^custom:/i.test(provider?.trim() || '')
   }
 
+  private async resolveCustomProviderKey(provider?: string): Promise<string | null> {
+    const value = provider?.trim() || ''
+    if (!value) return null
+    if (this.isWebUiCustomProviderKey(value)) return value
+    const config = await readConfigYaml().catch(() => ({}))
+    const custom = listUserProviders(config).find(item => item.slug === value || item.providerKey === `custom:${value}`)
+    return custom ? custom.providerKey : null
+  }
+
   private toHermesProviderFlag(provider?: string): string {
     const value = provider?.trim() || ''
     return this.isWebUiCustomProviderKey(value) ? value.replace(/^custom:/i, '') : value
   }
 
-  private async syncModel(model: string, provider?: string, bridgeSessionId?: string) {
-    const params: Record<string, string> = {
-      key: 'model',
-      value: this.formatModelSwitch(model, provider),
+  private async prepareCustomProviderSelection(provider: string, model: string): Promise<string> {
+    const slug = this.toHermesProviderFlag(provider)
+    const config = await readConfigYaml()
+    const custom = listUserProviders(config).find(item => item.slug === slug || item.providerKey === `custom:${slug}`)
+    let resolvedModel = model
+    if (!config.providers || typeof config.providers !== 'object' || Array.isArray(config.providers)) {
+      config.providers = {}
     }
+    if (custom?.base_url && custom.api_key) {
+      try {
+        const liveModels = await fetchProviderModels(custom.base_url, custom.api_key)
+        if (liveModels.length > 0) {
+          resolvedModel = resolveCompatibleModel(model, liveModels)
+        }
+      } catch {
+        // Keep the user-selected model if probing fails.
+      }
+    }
+    if (custom && !config.providers[slug]) {
+      config.providers[slug] = buildUserProviderConfigEntry(
+        custom.label,
+        custom.base_url,
+        custom.api_key,
+        custom.model || resolvedModel,
+        custom.context_length,
+        custom.models,
+      )
+    }
+    if (typeof config.model !== 'object' || config.model === null) config.model = {}
+    config.model.default = resolvedModel
+    config.model.provider = slug
+    delete config.model.base_url
+    delete config.model.api_key
+    await writeConfigYaml(config)
+    return resolvedModel
+  }
+
+  private async syncModel(model: string, provider?: string, bridgeSessionId?: string) {
+    let value = this.formatModelSwitch(model, provider)
+    const customProviderKey = await this.resolveCustomProviderKey(provider)
+    if (customProviderKey) {
+      const resolvedModel = await this.prepareCustomProviderSelection(customProviderKey, model)
+      value = resolvedModel.trim()
+    }
+    const params: Record<string, string> = { key: 'model', value }
     if (bridgeSessionId) params.session_id = bridgeSessionId
-    await this.client.request('config.set', params)
+    try {
+      await this.client.request('config.set', params)
+    } catch (error) {
+      if (customProviderKey && isNonFatalCustomModelListingError(error)) return
+      throw error
+    }
   }
 
   async respondApproval(webSessionId: string, choice: string) {
@@ -770,7 +871,7 @@ export class TuiBridgeService {
         })
         break
       case 'message.delta':
-        this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payload.text || '' })
+        this.push(runId, { event: 'message.delta', run_id: runId, timestamp, delta: payloadText(payload) })
         this.scheduleIdleHeartbeat(runId)
         break
       case 'reasoning.delta':
@@ -803,7 +904,7 @@ export class TuiBridgeService {
           event: 'run.completed',
           run_id: runId,
           timestamp,
-          output: payload.text || '',
+          output: payloadText(payload),
           usage: payload.usage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
         })
         break

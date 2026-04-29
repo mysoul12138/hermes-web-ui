@@ -111,15 +111,30 @@ function getConfigContextLength(config: any): number | null {
  * - "custom" → match by model name
  */
 function lookupCustomProviderContextLength(config: any, modelName: string, provider: string | null): number | null {
-  const providers: any[] = Array.isArray(config?.custom_providers) ? config.custom_providers : []
   if (!provider || !provider.startsWith('custom')) return null
 
   let matched: any = null
+  const suffix = provider === 'custom' ? '' : provider.slice('custom:'.length)
+
+  const userProviders = config?.providers
+  if (userProviders && typeof userProviders === 'object' && !Array.isArray(userProviders)) {
+    if (provider === 'custom') {
+      matched = Object.values(userProviders).find((entry: any) => {
+        const defaultModel = typeof entry?.default_model === 'string' ? entry.default_model : entry?.model
+        return defaultModel === modelName
+      })
+    } else {
+      matched = (userProviders as Record<string, any>)[suffix]
+    }
+    const val = matched?.context_length
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) return val
+  }
+
+  const providers: any[] = Array.isArray(config?.custom_providers) ? config.custom_providers : []
 
   if (provider === 'custom') {
     matched = providers.find((cp: any) => cp.model === modelName)
   } else {
-    const suffix = provider.slice('custom:'.length)
     matched = providers.find((cp: any) => cp.name === suffix)
   }
 

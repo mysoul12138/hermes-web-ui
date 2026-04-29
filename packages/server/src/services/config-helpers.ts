@@ -59,6 +59,114 @@ export interface ModelGroup {
   models: ModelInfo[]
 }
 
+export interface UserProviderInfo {
+  providerKey: string
+  slug: string
+  label: string
+  base_url: string
+  model: string
+  api_key: string
+  models: string[]
+  api_mode?: string
+  context_length?: number
+}
+
+export function normalizeCustomProviderSlug(value: string): string {
+  return value.trim().replace(/^custom:/i, '').toLowerCase().replace(/ /g, '-')
+}
+
+function uniqueModels(defaultModel: string, models: unknown): string[] {
+  const result: string[] = []
+  const push = (value: unknown) => {
+    if (typeof value !== 'string') return
+    const model = value.trim()
+    if (model && !result.includes(model)) result.push(model)
+  }
+  push(defaultModel)
+  if (Array.isArray(models)) {
+    for (const model of models) push(model)
+  } else if (models && typeof models === 'object') {
+    for (const model of Object.keys(models as Record<string, unknown>)) push(model)
+  }
+  return result
+}
+
+export function buildUserProviderConfigEntry(
+  name: string,
+  base_url: string,
+  api_key: string,
+  model: string,
+  context_length?: number,
+  models?: string[],
+) {
+  const entry: Record<string, any> = {
+    name: name.trim(),
+    api: base_url.trim(),
+    api_key: api_key.trim(),
+    default_model: model.trim(),
+    models: uniqueModels(model, models),
+  }
+  if (context_length && context_length > 0) entry.context_length = context_length
+  return entry
+}
+
+export function listUserProviders(config: Record<string, any>): UserProviderInfo[] {
+  const result: UserProviderInfo[] = []
+  const seen = new Set<string>()
+  const add = (info: UserProviderInfo) => {
+    if (!info.slug || !info.base_url) return
+    if (seen.has(info.providerKey)) return
+    seen.add(info.providerKey)
+    result.push(info)
+  }
+
+  const providers = config.providers
+  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+    for (const [rawSlug, entry] of Object.entries(providers as Record<string, any>)) {
+      if (!entry || typeof entry !== 'object') continue
+      const slug = normalizeCustomProviderSlug(rawSlug)
+      const baseUrl = String(entry.api || entry.url || entry.base_url || '').trim()
+      const model = String(entry.default_model || entry.model || '').trim()
+      const label = String(entry.name || rawSlug).trim()
+      add({
+        providerKey: `custom:${slug}`,
+        slug,
+        label,
+        base_url: baseUrl,
+        model,
+        api_key: String(entry.api_key || '').trim(),
+        models: uniqueModels(model, entry.models),
+        api_mode: typeof entry.transport === 'string' ? entry.transport : typeof entry.api_mode === 'string' ? entry.api_mode : undefined,
+        context_length: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+      })
+    }
+  }
+
+  const customProviders = config.custom_providers
+  if (Array.isArray(customProviders)) {
+    for (const entry of customProviders) {
+      if (!entry || typeof entry !== 'object') continue
+      const name = String(entry.name || '').trim()
+      const slug = normalizeCustomProviderSlug(String(entry.provider_key || name))
+      const baseUrl = String(entry.base_url || '').trim()
+      const model = String(entry.model || '').trim()
+      add({
+        providerKey: `custom:${slug}`,
+        slug,
+        label: name || slug,
+        base_url: baseUrl,
+        model,
+        api_key: String(entry.api_key || '').trim(),
+        models: uniqueModels(model, entry.models),
+        api_mode: typeof entry.api_mode === 'string' ? entry.api_mode : undefined,
+        context_length: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+      })
+    }
+  }
+
+  return result
+}
+
 // --- Config YAML helpers ---
 
 const configPath = () => getActiveConfigPath()
@@ -221,22 +329,16 @@ export function buildModelGroups(config: Record<string, any>): { default: string
     defaultModel = modelSection.trim()
   }
 
-  // 2. Extract custom_providers section
-  const customProviders = config.custom_providers
-  if (Array.isArray(customProviders)) {
-    const customModels: ModelInfo[] = []
-    for (const entry of customProviders) {
-      if (entry && typeof entry === 'object') {
-        const cName = String(entry.name || '').trim()
-        const cModel = String(entry.model || '').trim()
-        if (cName && cModel) {
-          customModels.push({ id: cModel, label: `${cName}: ${cModel}` })
-        }
-      }
+  // 2. Extract user-defined providers from Hermes' current providers: dict
+  // and the legacy custom_providers: list.
+  const customModels: ModelInfo[] = []
+  for (const provider of listUserProviders(config)) {
+    for (const model of provider.models.length ? provider.models : [provider.model]) {
+      if (model) customModels.push({ id: model, label: `${provider.label}: ${model}` })
     }
-    if (customModels.length > 0) {
-      groups.push({ provider: 'Custom', models: customModels })
-    }
+  }
+  if (customModels.length > 0) {
+    groups.push({ provider: 'Custom', models: customModels })
   }
 
   return { default: defaultModel, groups }

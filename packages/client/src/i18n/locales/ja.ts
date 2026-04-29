@@ -140,6 +140,14 @@ export default {
     thinkingHide: '思考過程を隠す',
     thinkingDuration: '観測 {duration}',
     thinkingChars: '{count} 文字',
+    approvalTitle: '承認が必要です',
+    approvalAllowOnce: '一度だけ許可',
+    approvalAllowSession: 'このセッションで許可',
+    approvalAllowAlways: '常に許可',
+    approvalDeny: '拒否',
+    approvalPendingCount: '承認 {current} / {total}',
+    approvalDangerousCommand: 'この操作には承認が必要です。',
+    approvalResponding: '承認応答を送信中...',
     copyBubble: 'メッセージをコピー',
     copiedBubble: 'コピーしました',
     copyFailed: 'コピーに失敗しました',
@@ -525,6 +533,7 @@ export default {
     qrFetching: 'QR コードを取得中...',
     qrScanHint: 'WeChat でスキャンしてログイン',
     qrScanedHint: 'スキャン済み、スマートフォンで確認してください...',
+    qrExpiredHint: 'QR code expired. Refresh and try again.',
   },
 
   // 言語

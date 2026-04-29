@@ -580,6 +580,58 @@ describe('Chat Store', () => {
     expect(store.activeSession?.provider).toBe('new-provider')
   })
 
+  it('does not pair a custom model with a stale global provider that does not list it', async () => {
+    const appStore = useAppStore()
+    appStore.modelGroups = [
+      {
+        provider: 'openai-codex',
+        label: 'OpenAI Codex',
+        base_url: '',
+        models: ['gpt-5.4'],
+        api_key: '',
+      },
+      {
+        provider: 'custom:llm.mathmodel.tech',
+        label: 'llm.mathmodel.tech',
+        base_url: 'https://llm.mathmodel.tech/v1',
+        models: ['deepseek-ai/DeepSeek-V4-Pro'],
+        api_key: 'set',
+      },
+    ]
+    appStore.selectedModel = 'deepseek-ai/DeepSeek-V4-Pro'
+    appStore.selectedProvider = 'openai-codex'
+
+    const store = useChatStore()
+    store.newChat()
+    await store.sendMessage('use custom deepseek')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: 'custom:llm.mathmodel.tech',
+    }))
+    expect(store.activeSession?.provider).toBe('custom:llm.mathmodel.tech')
+  })
+
+  it('renders a completed bridge response when the final text is carried in content', async () => {
+    let onEvent!: (event: any) => void
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('hello')
+    await flushPromises()
+
+    onEvent({
+      event: 'run.completed',
+      content: 'final answer from bridge',
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    })
+
+    expect(store.messages.some(m => m.role === 'assistant' && m.content === 'final answer from bridge')).toBe(true)
+  })
+
   it('keeps the locally selected model when stale session detail still reports the old model', async () => {
     window.localStorage.setItem(sessionModelOverrideKey('sess-model'), JSON.stringify({
       model: 'new-model',

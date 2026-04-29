@@ -7,12 +7,16 @@ import { messages, rawMessages } from '@/i18n/messages'
 
 const SOURCE_ROOT = join(process.cwd(), 'packages/client/src')
 
+function toPosixPath(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
 function walkFiles(dir: string, files: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) {
       walkFiles(path, files)
-    } else if (/\.(ts|vue)$/.test(entry.name) && !path.includes('/i18n/locales/')) {
+    } else if (/\.(ts|vue)$/.test(entry.name) && !toPosixPath(path).includes('/i18n/locales/')) {
       files.push(path)
     }
   }
@@ -66,7 +70,34 @@ describe('i18n locale coverage', () => {
     expect(missing).toEqual([])
   })
 
+  it('keeps approval prompt actions translated in source locales', () => {
+    const approvalKeys = [
+      'approvalTitle',
+      'approvalAllowOnce',
+      'approvalAllowSession',
+      'approvalAllowAlways',
+      'approvalDeny',
+      'approvalPendingCount',
+      'approvalDangerousCommand',
+      'approvalResponding',
+    ]
+
+    for (const [locale, localeMessages] of Object.entries(rawMessages)) {
+      const chat = localeMessages.chat as Record<string, unknown>
+      const missingOrFallback = approvalKeys
+        .filter((key) => typeof chat?.[key] !== 'string' || chat[key] === `chat.${key}`)
+        .map((key) => `${locale}: chat.${key}`)
+
+      expect(missingOrFallback).toEqual([])
+    }
+
+    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowOnce).toBe('允许一次')
+    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowSession).toBe('本会话允许')
+    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowAlways).toBe('始终允许')
+    expect((rawMessages.zh.chat as Record<string, string>).approvalDeny).toBe('拒绝')
+  })
+
   it('keeps the coverage scanner rooted in client source files', () => {
-    expect(relative(process.cwd(), SOURCE_ROOT)).toBe('packages/client/src')
+    expect(toPosixPath(relative(process.cwd(), SOURCE_ROOT))).toBe('packages/client/src')
   })
 })

@@ -113,7 +113,7 @@ function extractApprovalCommandFromArgs(toolArgs?: string): string | undefined {
 }
 
 function textFromRunEvent(evt: RunEvent): string {
-  for (const value of [evt.text, evt.delta, evt.reasoning, evt.thinking, evt.content, evt.message]) {
+  for (const value of [evt.text, evt.delta, evt.reasoning, evt.thinking, evt.content, evt.message, evt.output]) {
     if (typeof value === 'string' && value) return value
   }
   return ''
@@ -497,6 +497,10 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
     lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
     branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
   }
+}
+
+function normalizeProviderKey(value: string): string {
+  return value.trim().toLowerCase()
 }
 
 // Cache keys for stale-while-revalidate loading of sessions / messages.
@@ -1530,11 +1534,88 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   }
 
   function sessionFetchId(sid: string): string {
-    return readBridgePersistentSessionId(sid) || sid
+    const persistent = readBridgePersistentSessionId(sid)
+    if (persistent) return persistent
+    const rootSessionId = sessions.value.find(session => session.id === sid)?.rootSessionId
+      || loadBranchSessionMetaIndex()[sid]?.rootSessionId
+      || null
+    if (rootSessionId && sid.includes(':') && rootSessionId !== sid) return rootSessionId
+    return sid
   }
 
   function rootSessionIdFor(sid: string): string {
     return sessions.value.find(session => session.id === sid)?.rootSessionId || sid
+  }
+
+  function normalizeProviderSelection(provider: string, model?: string): string {
+    const value = provider.trim()
+    if (!value) return ''
+    if (value.startsWith('custom:')) return value
+
+    const appStore = useAppStore()
+    const normalized = normalizeProviderKey(value)
+    const exact = appStore.modelGroups.find(group => normalizeProviderKey(group.provider) === normalized)
+    if (exact && (!model || exact.models.includes(model))) return exact.provider
+
+    const custom = appStore.modelGroups.find(group =>
+      group.provider.startsWith('custom:')
+      && (
+        normalizeProviderKey(group.provider.slice('custom:'.length)) === normalized
+        || normalizeProviderKey(group.label) === normalized
+        || (!!model && group.models.includes(model))
+      ),
+    )
+    if (custom) return custom.provider
+
+    if ((value.includes('.') || value.includes('/')) && !value.startsWith('custom:')) {
+      return `custom:${normalized}`
+    }
+    return value
+  }
+
+  function findProviderForModel(model?: string): string {
+    if (!model) return ''
+    const appStore = useAppStore()
+    return appStore.modelGroups.find(group => group.models.includes(model))?.provider || ''
+  }
+
+  function providerSupportsModel(provider: string, model?: string): boolean {
+    if (!provider || !model) return true
+    const appStore = useAppStore()
+    if (!appStore.modelGroups.length) return true
+    const normalized = normalizeProviderKey(provider)
+    const group = appStore.modelGroups.find(item => normalizeProviderKey(item.provider) === normalized)
+    return group ? group.models.includes(model) : true
+  }
+
+  function resolveSendModelSelection(target?: Session | null): { model: string; provider: string } {
+    const appStore = useAppStore()
+    const appModel = appStore.selectedModel?.trim() || ''
+    const appProvider = normalizeProviderSelection(appStore.selectedProvider || '', appModel)
+    const targetModel = target?.model?.trim() || activeSession.value?.model?.trim() || ''
+    const targetProvider = normalizeProviderSelection(
+      target?.provider || activeSession.value?.provider || '',
+      targetModel || appModel || undefined,
+    )
+
+    if (appModel) {
+      if (appProvider && providerSupportsModel(appProvider, appModel)) {
+        return { model: appModel, provider: appProvider }
+      }
+      const modelProvider = normalizeProviderSelection(findProviderForModel(appModel), appModel)
+      if (modelProvider) return { model: appModel, provider: modelProvider }
+      if (targetModel === appModel && targetProvider) return { model: appModel, provider: targetProvider }
+      return { model: appModel, provider: appProvider }
+    }
+
+    if (targetModel) {
+      return {
+        model: targetModel,
+        provider: targetProvider || normalizeProviderSelection(findProviderForModel(targetModel), targetModel),
+      }
+    }
+
+    return { model: '', provider: '' }
   }
 
   async function fetchResolvedSessionDetail(sid: string): Promise<SessionDetail | null> {
@@ -2201,17 +2282,18 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               applySessionUsage(target, evt.usage)
             }
             const finalOutput = typeof evt.output === 'string' ? evt.output : ''
-            const finalOutputTrimmed = finalOutput.trim()
-            if (!runProducedAssistantText && finalOutputTrimmed !== '') {
+            const eventOutput = finalOutput || textFromRunEvent(evt)
+            const eventOutputTrimmed = eventOutput.trim()
+            if (!runProducedAssistantText && eventOutputTrimmed !== '') {
               addMessage(sid, {
                 id: uid(),
                 role: 'assistant',
-                content: finalOutput,
+                content: eventOutput,
                 timestamp: Date.now(),
               })
               runProducedAssistantText = true
             }
-            const swallowedError = !runProducedAssistantText && !runHadToolActivity && finalOutputTrimmed === ''
+            const swallowedError = !runProducedAssistantText && !runHadToolActivity && eventOutputTrimmed === ''
             if (swallowedError) {
               addMessage(sid, {
                 id: uid(),
@@ -2450,7 +2532,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // Inherit current global model
     const appStore = useAppStore()
     session.model = appStore.selectedModel || undefined
-    session.provider = appStore.selectedProvider || ''
+    session.provider = normalizeProviderSelection(appStore.selectedProvider || '', session.model)
     if (session.model) writeSessionModelOverride(session.id, session.model, session.provider)
     switchSession(session.id)
   }
@@ -2458,8 +2540,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   async function switchSessionModel(modelId: string, provider?: string, options: { updateGlobal?: boolean } = {}) {
     if (!activeSession.value) return
     activeSession.value.model = modelId
-    activeSession.value.provider = provider || ''
-    writeSessionModelOverride(activeSession.value.id, modelId, provider)
+    activeSession.value.provider = normalizeProviderSelection(provider || '', modelId)
+    writeSessionModelOverride(activeSession.value.id, modelId, activeSession.value.provider)
     persistSessionsList()
     // If provider changed, update global config too (Hermes requires it)
     if (provider && options.updateGlobal !== false) {
@@ -2892,10 +2974,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         inputText = inputText ? inputText + '\n\n' + pathParts.join('\n') : pathParts.join('\n')
       }
 
-      const appStore = useAppStore()
       const target = sessions.value.find(s => s.id === sid)
-      const sessionModel = appStore.selectedModel || target?.model || activeSession.value?.model
-      const sessionProvider = appStore.selectedProvider || target?.provider || activeSession.value?.provider || ''
+      const { model: sessionModel, provider: sessionProvider } = resolveSendModelSelection(target)
       if (target) {
         if (sessionModel) target.model = sessionModel
         target.provider = sessionProvider

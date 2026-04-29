@@ -1,7 +1,7 @@
 import { readFile } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { getActiveEnvPath, getActiveAuthPath } from '../../services/hermes/hermes-profile'
-import { readConfigYaml, writeConfigYaml, fetchProviderModels as fetchProviderModelsFromConfig, buildModelGroups, PROVIDER_ENV_MAP } from '../../services/config-helpers'
+import { readConfigYaml, writeConfigYaml, fetchProviderModels as fetchProviderModelsFromConfig, buildModelGroups, listUserProviders, PROVIDER_ENV_MAP } from '../../services/config-helpers'
 import { buildProviderModelMap, PROVIDER_PRESETS } from '../../shared/providers'
 import { getCopilotModelsDetailed, resolveCopilotOAuthToken, type CopilotModelMeta } from '../../services/hermes/copilot-models'
 import { readAppConfig } from '../../services/app-config'
@@ -73,20 +73,28 @@ export async function getAvailable(ctx: any) {
     if (typeof modelSection === 'object' && modelSection !== null) {
       currentDefault = String(modelSection.default || '').trim()
       currentDefaultProvider = String(modelSection.provider || '').trim()
-      // When hermes CLI sets provider: custom, resolve to custom:name
-      // by matching base_url + model against custom_providers
+      // When Hermes CLI sets provider: custom, resolve to custom:name
+      // by matching base_url + model against user-defined providers.
       if (currentDefaultProvider === 'custom' && currentDefault) {
-        const cps = Array.isArray(config.custom_providers) ? config.custom_providers as any[] : []
-        const match = cps.find(
-          (cp: any) => cp.base_url?.replace(/\/+$/, '') === String(modelSection.base_url || '').replace(/\/+$/, '')
+        const match = listUserProviders(config).find(
+          cp => cp.base_url.replace(/\/+$/, '') === String(modelSection.base_url || '').replace(/\/+$/, '')
             && cp.model === currentDefault,
         )
         if (match) {
-          currentDefaultProvider = `custom:${match.name.trim().toLowerCase().replace(/ /g, '-')}`
+          currentDefaultProvider = match.providerKey
         }
       }
     } else if (typeof modelSection === 'string') {
       currentDefault = modelSection.trim()
+    }
+
+    if (currentDefaultProvider && currentDefaultProvider !== 'custom') {
+      const customMatch = listUserProviders(config).find(
+        provider => provider.slug === currentDefaultProvider || provider.providerKey === `custom:${currentDefaultProvider}`,
+      )
+      if (customMatch) {
+        currentDefaultProvider = customMatch.providerKey
+      }
     }
 
     const groups: Array<{ provider: string; label: string; base_url: string; models: string[]; api_key: string; model_meta?: Record<string, { preview?: boolean; disabled?: boolean }> }> = []
@@ -202,22 +210,20 @@ export async function getAvailable(ctx: any) {
       }
     }
 
-    const customProviders = Array.isArray(config.custom_providers)
-      ? config.custom_providers as Array<{ name: string; base_url: string; model: string; api_key?: string }>
-      : []
+    const customProviders = listUserProviders(config)
 
     const customFetches = await Promise.allSettled(
       customProviders.map(async cp => {
         if (!cp.base_url) return null
-        const providerKey = `custom:${cp.name.trim().toLowerCase().replace(/ /g, '-')}`
+        const providerKey = cp.providerKey
         const baseUrl = cp.base_url.replace(/\/+$/, '')
-        const bareKey = cp.name.trim().toLowerCase().replace(/ /g, '-')
+        const bareKey = cp.slug
         const builtinPreset = PROVIDER_PRESETS.find(p => p.value === bareKey)
-        let models = builtinPreset?.models?.length ? [...builtinPreset.models] : [cp.model]
+        let models = builtinPreset?.models?.length ? [...builtinPreset.models] : (cp.models.length ? [...cp.models] : [cp.model])
         if (cp.api_key) {
           try { const fetched = await fetchProviderModelsFromConfig(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([cp.model, ...fetched])] } catch { }
         }
-        const label = builtinPreset?.label || cp.name
+        const label = builtinPreset?.label || cp.label
         const presetBaseUrl = builtinPreset?.base_url || ''
         return { providerKey, label, base_url: presetBaseUrl || baseUrl, models, api_key: cp.api_key || '' }
       }),
