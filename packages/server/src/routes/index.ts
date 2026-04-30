@@ -26,6 +26,7 @@ import { downloadRoutes } from './hermes/download'
 import { jobRoutes } from './hermes/jobs'
 import { approvalRoutes } from './hermes/approval'
 import { clarifyRoutes } from './hermes/clarify'
+import { cronHistoryRoutes } from './hermes/cron-history'
 import { proxyRoutes, proxyMiddleware } from './hermes/proxy'
 import { groupChatRoutes, setGroupChatServer } from './hermes/group-chat'
 
@@ -66,6 +67,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(jobRoutes.routes())               // Must be before proxy
   app.use(approvalRoutes.routes())
   app.use(clarifyRoutes.routes())
+  app.use(cronHistoryRoutes.routes())        // Must be before proxy
   app.use(proxyRoutes.routes())
 
   // Proxy catch-all middleware (must be last)

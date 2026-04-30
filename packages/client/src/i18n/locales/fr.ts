@@ -178,6 +178,7 @@ export default {
     origin: 'Origine',
     local: 'Local',
     repeatCount: 'Nombre de repetitions (facultatif)',
+    modelPlaceholder: 'Modele par defaut',
     repeatPlaceholder: 'Laisser vide pour infini',
     jobCreated: 'Tache creee',
     jobUpdated: 'Tache mise a jour',
@@ -186,7 +187,8 @@ export default {
     loadFailed: 'Echec du chargement de la tache',
     jobPaused: 'Tache en pause',
     jobResumed: 'Tache reprise',
-    jobTriggered: 'Tache declenchee',
+jobTriggered: 'Job declenche',
+    modelUpdated: 'Modele mis a jour',
     jobDeleted: 'Tache supprimee',
     status: {
       running: 'En cours',
@@ -195,6 +197,7 @@ export default {
       scheduled: 'Planifiee',
     },
     info: {
+      model: 'Modele',
       schedule: 'Planification',
       lastRun: 'Derniere execution',
       nextRun: 'Prochaine execution',
@@ -208,7 +211,12 @@ export default {
       resume: 'Reprendre',
       resumeJob: 'Reprendre la tache',
       runNow: 'Executer maintenant',
-      triggerImmediately: 'Declencher immediatement',
+      triggerImmediately: 'Déclencher immédiatement',
+    },
+    runHistory: {
+      title: 'Historique',
+      runs: 'exécutions',
+      noRuns: 'Aucun historique trouvé.',
     },
   },
 

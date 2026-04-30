@@ -94,31 +94,34 @@ async function handleSave() {
 
   loading.value = true
   try {
-    const basePayload: CreateJobRequest = {
-      name: formData.value.name,
-      schedule: formData.value.schedule,
-      prompt: formData.value.prompt,
-      deliver: formData.value.deliver,
-      repeat: formData.value.repeat_times ?? undefined,
-    }
-    const payload: UpdateJobRequest = { ...basePayload }
-
-    if (isEdit.value && originalSchedule.value) {
-      (payload as any).schedule = {
-        kind: originalSchedule.value.kind,
-        expr: formData.value.schedule,
-        display: formData.value.schedule,
+    if (isEdit.value) {
+      const payload: UpdateJobRequest = {
+        name: formData.value.name,
+        prompt: formData.value.prompt,
+        deliver: formData.value.deliver,
+        repeat: formData.value.repeat_times ?? undefined,
+        ...originalHiddenFields.value,
       }
-    }
-    if (isEdit.value) {
-      Object.assign(payload, originalHiddenFields.value)
-    }
-
-    if (isEdit.value) {
+      if (originalSchedule.value) {
+        payload.schedule = {
+          kind: originalSchedule.value.kind,
+          expr: formData.value.schedule,
+          display: formData.value.schedule,
+        }
+      } else {
+        payload.schedule = formData.value.schedule
+      }
       await jobsStore.updateJob(props.jobId!, payload)
       message.success(t('jobs.jobUpdated'))
     } else {
-      await jobsStore.createJob(basePayload)
+      const payload: CreateJobRequest = {
+        name: formData.value.name,
+        schedule: formData.value.schedule,
+        prompt: formData.value.prompt,
+        deliver: formData.value.deliver,
+        repeat: formData.value.repeat_times ?? undefined,
+      }
+      await jobsStore.createJob(payload)
       message.success(t('jobs.jobCreated'))
     }
     emit('saved')
