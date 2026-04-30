@@ -224,6 +224,104 @@ describe('conversations service', () => {
     expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'duplicate-cont'])
   })
 
+  it('folds bridge context prompt duplicates into compressed TUI conversation branches', async () => {
+    exportSessionsRawMock.mockResolvedValue([
+      {
+        id: 'root',
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: 100,
+        ended_at: 200,
+        end_reason: 'compression',
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 1, session_id: 'root', role: 'user', content: 'before compression', timestamp: 101 },
+        ],
+      },
+      {
+        id: 'tip',
+        parent_session_id: 'root',
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: 200.1,
+        ended_at: null,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 3,
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 2, session_id: 'tip', role: 'user', content: 'after compression', timestamp: 201 },
+        ],
+      },
+      {
+        id: 'bridge-duplicate',
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: 260,
+        ended_at: null,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 0,
+        input_tokens: 5,
+        output_tokens: 6,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          {
+            id: 3,
+            session_id: 'bridge-duplicate',
+            role: 'user',
+            content: 'Previous conversation context:\nassistant: after compression\n\nCurrent user message:\ncontinue',
+            timestamp: 261,
+          },
+        ],
+      },
+    ])
+
+    const mod = await import('../../packages/server/src/services/hermes/conversations')
+    const summaries = await mod.listConversationSummaries({ humanOnly: true })
+
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
+    expect(summaries[0]).toMatchObject({
+      thread_session_count: 2,
+      branch_session_count: 1,
+      input_tokens: 3,
+      output_tokens: 4,
+    })
+
+    const detail = await mod.getConversationDetail('root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'tip'])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['bridge-duplicate'])
+  })
+
   it('treats branched children as their own visible conversations', async () => {
     exportSessionsRawMock.mockResolvedValue([
       {

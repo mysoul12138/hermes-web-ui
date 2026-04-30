@@ -17,6 +17,7 @@ const LINEAGE_TOLERANCE_SECONDS = 3
 const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const LIVE_WINDOW_SECONDS = 300
 const DEFAULT_CONVERSATION_LIMIT = 200
+const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
 const SYNTHETIC_USER_PREFIXES = [
   '[system:',
   "you've reached the maximum number of tool-calling iterations allowed.",
@@ -247,6 +248,10 @@ function isCompressionEndReason(reason: string | null): boolean {
   return reason === 'compression' || reason === 'compressed'
 }
 
+function isBridgeContextPrompt(value: unknown): boolean {
+  return normalizeText(value).startsWith(BRIDGE_CONTEXT_PROMPT_PREFIX)
+}
+
 function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
   if (child.id === parent.id || child.source !== parent.source || child.source === 'tool') return false
   if (parent.ended_at == null) return false
@@ -254,6 +259,8 @@ function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: Conve
   if (delta < 0) return false
   if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
+
+  if (parent.source === 'tui' && isBridgeContextPrompt(child.preview || child.title)) return true
 
   const parentPreview = normalizeText(parent.preview)
   const childPreview = normalizeText(child.preview)
@@ -315,6 +322,8 @@ function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string,
   })
 
   if (exactPreviewMatches.length === 1) return exactPreviewMatches[0]
+  const exactTimingMatches = candidates.filter(child => timingMatchesParent(parent, child))
+  if (exactTimingMatches.length === 1) return exactTimingMatches[0]
   return null
 }
 
@@ -323,6 +332,12 @@ function isCompressionContinuationChild(session: ConversationSessionRow | undefi
   const parent = byId.get(session.parent_session_id)
   if (!parent) return false
   return nextContinuationChild(parent, byId, childrenByParent)?.id === session.id
+}
+
+function isCompressionLineageChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
+  if (!session?.parent_session_id) return false
+  const parent = byId.get(session.parent_session_id)
+  return !!parent && isCompressionEndReason(parent.end_reason) && isLikelyOrphanContinuation(parent, session)
 }
 
 function compressionChainRootId(sessionId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): string | null {
@@ -334,7 +349,7 @@ function compressionChainRootId(sessionId: string, byId: Map<string, Conversatio
     seen.add(current.id)
     const parent = byId.get(current.parent_session_id)
     if (!parent) break
-    if (nextContinuationChild(parent, byId, childrenByParent)?.id !== current.id) break
+    if (!isCompressionLineageChild(current, byId)) break
     current = parent
   }
   return current?.id || null
@@ -342,7 +357,7 @@ function compressionChainRootId(sessionId: string, byId: Map<string, Conversatio
 
 function isVisibleConversationStart(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
   if (!session || session.source === 'tool') return false
-  return !isCompressionContinuationChild(session, byId, childrenByParent)
+  return !isCompressionContinuationChild(session, byId, childrenByParent) && !isCompressionLineageChild(session, byId)
 }
 
 function collectConversationChain(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {

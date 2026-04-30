@@ -5,6 +5,7 @@ import { join } from 'path'
 import { DatabaseSync } from 'node:sqlite'
 
 const profileDir = vi.hoisted(() => ({ value: '' }))
+let fts5Available = true
 
 vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
   getActiveProfileDir: () => profileDir.value,
@@ -53,8 +54,14 @@ function createStateDb(path: string) {
       reasoning_content TEXT
     );
 
-    CREATE VIRTUAL TABLE messages_fts USING fts5(content);
   `)
+  try {
+    db.exec('CREATE VIRTUAL TABLE messages_fts USING fts5(content)')
+    fts5Available = true
+  } catch {
+    db.exec('CREATE TABLE messages_fts(rowid INTEGER PRIMARY KEY, content TEXT)')
+    fts5Available = false
+  }
   return db
 }
 
@@ -154,6 +161,7 @@ describe('session DB compression lineage', () => {
 
   beforeEach(() => {
     vi.resetModules()
+    fts5Available = true
     tempDir = mkdtempSync(join(tmpdir(), 'wui-session-lineage-'))
     profileDir.value = tempDir
     db = createStateDb(join(tempDir, 'state.db'))
@@ -247,7 +255,54 @@ describe('session DB compression lineage', () => {
     expect(detail?.messages.map(message => message.session_id)).toEqual(['root', 'duplicate-cont'])
   })
 
+  it('hides bridge context prompt duplicates under the compressed TUI chain', async () => {
+    insertSession(db!, {
+      id: 'root',
+      source: 'tui',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 1,
+    })
+    insertSession(db!, {
+      id: 'tip',
+      source: 'tui',
+      parent_session_id: 'root',
+      started_at: 200.1,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+    })
+    insertSession(db!, {
+      id: 'bridge-duplicate',
+      source: 'tui',
+      parent_session_id: null,
+      started_at: 260,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+    })
+    insertMessage(db!, { id: 41, session_id: 'root', content: 'before compression', timestamp: 101 })
+    insertMessage(db!, { id: 42, session_id: 'tip', content: 'after compression', timestamp: 201 })
+    insertMessage(db!, {
+      id: 43,
+      session_id: 'bridge-duplicate',
+      content: 'Previous conversation context:\nassistant: after compression\n\nCurrent user message:\ncontinue',
+      timestamp: 261,
+    })
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const rows = await mod.listSessionSummaries(undefined, 20)
+
+    expect(rows.map((row: any) => row.id)).toEqual(['root'])
+
+    const detail = await mod.getSessionDetailFromDb('root')
+    expect(detail?.thread_session_count).toBe(2)
+    expect(detail?.messages.map(message => message.session_id)).toEqual(['root', 'tip'])
+  })
+
   it('returns the projected logical session when search matches continuation content', async () => {
+    if (!fts5Available) return
     seedCompressionChain(db!)
 
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
@@ -336,6 +391,7 @@ describe('session DB compression lineage', () => {
   })
 
   it('applies source filters before search candidate limiting', async () => {
+    if (!fts5Available) return
     for (let index = 0; index < 105; index += 1) {
       insertSession(db!, {
         id: `cli-${index}`,

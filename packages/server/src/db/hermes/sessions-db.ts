@@ -8,6 +8,7 @@ const SQLITE_AVAILABLE = (() => {
 const LINEAGE_TOLERANCE_SECONDS = 3
 const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const COMPRESSION_END_REASONS = new Set(['compression', 'compressed'])
+const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
 const SEARCH_CANDIDATE_MULTIPLIER = 20
 const SEARCH_CANDIDATE_MIN = 100
 
@@ -364,6 +365,10 @@ function isCompressionEnded(session: HermesSessionInternalRow | undefined): bool
   return !!session && COMPRESSION_END_REASONS.has(String(session.end_reason || ''))
 }
 
+function isBridgeContextPrompt(value: unknown): boolean {
+  return normalizeText(value).startsWith(BRIDGE_CONTEXT_PROMPT_PREFIX)
+}
+
 function isCompressionContinuation(parent: HermesSessionInternalRow | undefined, child: HermesSessionInternalRow | undefined): boolean {
   if (!parent || !child || !isCompressionEnded(parent) || parent.ended_at == null) return false
   return child.source !== 'tool' && Number(child.started_at || 0) >= Number(parent.ended_at || 0)
@@ -376,6 +381,8 @@ function isLikelyOrphanContinuation(parent: HermesSessionInternalRow, child: Her
   if (delta < 0) return false
   if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
+
+  if (parent.source === 'tui' && isBridgeContextPrompt(child.preview || child.title)) return true
 
   const parentPreview = normalizeText(parent.preview)
   const childPreview = normalizeText(child.preview)
@@ -482,9 +489,12 @@ function getLatestContinuationChild(
     .filter((c): c is HermesSessionInternalRow => !!c)
     .filter(c => Number(c.started_at || 0) >= Number(parent.ended_at || 0))
     .sort((a, b) => {
-      const aDelta = Number(a.started_at || 0) - Number(parent.ended_at || 0)
-      const bDelta = Number(b.started_at || 0) - Number(parent.ended_at || 0)
-      if (aDelta !== bDelta) return aDelta - bDelta
+      const aBridgeContext = isBridgeContextPrompt(a.preview || a.title)
+      const bBridgeContext = isBridgeContextPrompt(b.preview || b.title)
+      if (aBridgeContext !== bBridgeContext) return aBridgeContext ? 1 : -1
+      const aStarted = Number(a.started_at || 0)
+      const bStarted = Number(b.started_at || 0)
+      if (aStarted !== bStarted) return bStarted - aStarted
       return b.id.localeCompare(a.id)
     })
   return candidates[0] || null
@@ -886,11 +896,14 @@ export async function searchSessionSummaries(
       LIMIT ?
     `
 
-    const contentRows = useLiteralContentSearch
+    let contentRows = useLiteralContentSearch
       ? runLiteralContentSearch(db, source, trimmed, candidateLimit)
       : prefixQuery
         ? (db.prepare(contentSql).all(...sourceParams, prefixQuery, candidateLimit) as Record<string, unknown>[])
         : []
+    if (!useLiteralContentSearch && contentRows.length === 0) {
+      contentRows = runLiteralContentSearch(db, source, trimmed, candidateLimit)
+    }
 
     const idx = loadAllSessions(db)
     const merged = new Map<string, HermesSessionSearchRow>()
@@ -902,6 +915,14 @@ export async function searchSessionSummaries(
       const mapped = projectSearchRow(row, idx, source)
       if (mapped && !merged.has(mapped.id)) {
         merged.set(mapped.id, mapped)
+      }
+    }
+    if (merged.size === 0 && !useLiteralContentSearch) {
+      for (const row of runLiteralContentSearch(db, source, trimmed, candidateLimit)) {
+        const mapped = projectSearchRow(row, idx, source)
+        if (mapped && !merged.has(mapped.id)) {
+          merged.set(mapped.id, mapped)
+        }
       }
     }
 
