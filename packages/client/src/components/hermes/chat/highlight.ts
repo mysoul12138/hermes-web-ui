@@ -1,4 +1,5 @@
 import hljs from 'highlight.js'
+import { copyToClipboard } from '@/utils/clipboard'
 
 const LANGUAGE_ALIASES: Record<string, string> = {
   shellscript: 'bash',
@@ -80,20 +81,16 @@ export function renderHighlightedCodeBlock(
   return `<pre class="hljs-code-block"><div class="code-header">${languageLabelHtml}<button type="button" class="copy-btn" data-copy-code="true">${escapeHtml(copyLabel)}</button></div><code class="hljs language-${sanitizeLanguageClass(codeClassLanguage)}">${highlighted}</code></pre>`
 }
 
-export async function copyTextToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard?.writeText?.(text)
-  } catch {
-    // Ignore clipboard failures; the code block still renders safely.
-  }
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  return copyToClipboard(text)
 }
 
-export async function handleCodeBlockCopyClick(event: MouseEvent): Promise<boolean> {
+export async function handleCodeBlockCopyClick(event: MouseEvent): Promise<boolean | null> {
   const target = event.target
-  if (!(target instanceof HTMLElement)) return false
+  if (!(target instanceof HTMLElement)) return null
 
   const button = target.closest<HTMLElement>('[data-copy-code="true"]')
-  if (!button) return false
+  if (!button) return null
 
   event.preventDefault()
 
@@ -102,6 +99,5 @@ export async function handleCodeBlockCopyClick(event: MouseEvent): Promise<boole
   const text = code?.textContent ?? ''
   if (!text) return false
 
-  await copyTextToClipboard(text)
-  return true
+  return copyTextToClipboard(text)
 }
