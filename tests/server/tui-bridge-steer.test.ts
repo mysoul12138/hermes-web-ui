@@ -1,17 +1,29 @@
 import { EventEmitter } from 'events'
 import { describe, expect, it, vi } from 'vitest'
-import * as configHelpers from '../../packages/server/src/services/config-helpers'
 import { TuiBridgeService } from '../../packages/server/src/services/hermes/tui-bridge'
 
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
+  private createdSessions = 0
+  private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
 
   async request<T = any>(method: string, params: Record<string, any> = {}): Promise<T> {
     this.requests.push({ method, params })
     if (method === 'session.steer') throw new Error('unknown method: session.steer')
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
     if (method === 'prompt.submit') return { ok: true } as T
-    if (method === 'config.set') return { value: params.value } as T
+    if (method === 'config.set') throw new Error('config.set should not be called during bridge runs')
+    if (method === 'session.list') return { sessions: this.persistentSessions } as T
+    if (method === 'session.create') {
+      this.createdSessions += 1
+      const session_id = `tui-session-${this.createdSessions}`
+      this.persistentSessions.push({
+        id: `persistent-session-${this.createdSessions}`,
+        source: 'tui',
+        started_at: Date.now() / 1000,
+      })
+      return { session_id } as T
+    }
     return { status: 'ok' } as T
   }
 }
@@ -46,7 +58,7 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).closeRun('bridge_run_1')
   })
 
-  it('syncs the requested model globally and into the active bridge session before prompt submit', async () => {
+  it('submits bridge runs without model validation side effects', async () => {
     const client = new FakeGatewayClient()
     const bridge = new TuiBridgeService(client as any)
     vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
@@ -54,7 +66,7 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
     ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
 
-    const result = await bridge.startRun('hello', 'web-session', [], {
+    const result = await (bridge.startRun as any)('hello', 'web-session', [], {
       model: 'gpt-5.5',
       provider: 'openai-codex',
     })
@@ -64,168 +76,68 @@ describe('TuiBridgeService steer compatibility', () => {
       session_id: 'persistent-session',
     })
     expect(client.requests.map(request => request.method)).toEqual([
-      'config.set',
-      'config.set',
       'prompt.submit',
     ])
     expect(client.requests[0].params).toMatchObject({
-      key: 'model',
-      value: 'gpt-5.5 --provider openai-codex',
-    })
-    expect(client.requests[1].params).toMatchObject({
-      key: 'model',
-      session_id: 'tui-session',
-      value: 'gpt-5.5 --provider openai-codex',
-    })
-    expect(client.requests[2].params).toMatchObject({
       session_id: 'tui-session',
       text: 'hello',
     })
     ;(bridge as any).closeRun(result.run_id)
   })
 
-  it('passes custom providers to Hermes as provider keys for model switching', async () => {
+  it('does not validate Alibaba models during bridge run creation', async () => {
     const client = new FakeGatewayClient()
     const bridge = new TuiBridgeService(client as any)
     vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
-    const readSpy = vi.spyOn(configHelpers, 'readConfigYaml').mockResolvedValue({})
-    const writeSpy = vi.spyOn(configHelpers, 'writeConfigYaml').mockResolvedValue()
-    const listSpy = vi.spyOn(configHelpers, 'listUserProviders').mockReturnValue([
-      {
-        providerKey: 'custom:ai.warp2pans.online',
-        slug: 'ai.warp2pans.online',
-        label: 'Ai.warp2pans.online',
-        base_url: 'https://ai.warp2pans.online/v1',
-        model: 'gpt-5.4',
-        api_key: 'secret',
-        models: ['gpt-5.4'],
-      },
-    ] as any)
-    const fetchSpy = vi.spyOn(configHelpers, 'fetchProviderModels').mockResolvedValue(['openai/gpt-5.4'])
 
-    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
-    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'stale-tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'stale-persistent-session')
 
-    const result = await bridge.startRun('hello', 'web-session', [], {
-      model: 'gpt-5.4',
-      provider: 'custom:ai.warp2pans.online',
+    const result = await (bridge.startRun as any)('hello', 'web-session', [], {
+      model: 'qwen3.5-plus',
+      provider: 'alibaba',
     })
 
     expect(client.requests.map(request => request.method)).toEqual([
-      'config.set',
       'prompt.submit',
     ])
     expect(client.requests[0].params).toMatchObject({
-      key: 'model',
+      session_id: 'stale-tui-session',
+      text: 'hello',
+    })
+    expect(result).toMatchObject({
+      bridge: true,
+      session_id: 'stale-persistent-session',
+      bridge_session_id: 'stale-tui-session',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('does not validate custom provider models during bridge run creation', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await (bridge.startRun as any)('hello', 'web-session', [], {
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: 'custom:llm.mathmodel.tech',
+    })
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'prompt.submit',
+    ])
+    expect(client.requests[0].params).toMatchObject({
       session_id: 'tui-session',
-      value: 'openai/gpt-5.4',
+      text: 'hello',
     })
-    expect(readSpy).toHaveBeenCalled()
-    expect(writeSpy).toHaveBeenCalled()
-    expect(listSpy).toHaveBeenCalled()
-    expect(fetchSpy).toHaveBeenCalledWith('https://ai.warp2pans.online/v1', 'secret')
-    readSpy.mockRestore()
-    writeSpy.mockRestore()
-    listSpy.mockRestore()
-    fetchSpy.mockRestore()
-    ;(bridge as any).closeRun(result.run_id)
-  })
-
-  it('continues when Hermes saves a custom model but warns that /models is unreachable', async () => {
-    const client = new FakeGatewayClient()
-    const bridge = new TuiBridgeService(client as any)
-    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
-    const readSpy = vi.spyOn(configHelpers, 'readConfigYaml').mockResolvedValue({})
-    const writeSpy = vi.spyOn(configHelpers, 'writeConfigYaml').mockResolvedValue()
-    const listSpy = vi.spyOn(configHelpers, 'listUserProviders').mockReturnValue([
-      {
-        providerKey: 'custom:llm.mathmodel.tech',
-        slug: 'llm.mathmodel.tech',
-        label: 'llm.mathmodel.tech',
-        base_url: 'https://llm.mathmodel.tech/v1',
-        model: 'deepseek-ai/DeepSeek-V4-Pro',
-        api_key: 'secret',
-        models: ['deepseek-ai/DeepSeek-V4-Pro'],
-      },
-    ] as any)
-    const fetchSpy = vi.spyOn(configHelpers, 'fetchProviderModels').mockRejectedValue(new Error('probe failed'))
-    const requestSpy = vi.spyOn(client, 'request')
-    requestSpy.mockImplementation(async function (this: FakeGatewayClient, method: string, params: Record<string, any> = {}) {
-      this.requests.push({ method, params })
-      if (method === 'config.set') {
-        throw new Error("Note: could not reach this custom endpoint's model listing at `https://llm.mathmodel.tech/v1/models`. Hermes will still save `deepseek-ai/DeepSeek-V4-Pro`, but the endpoint should expose `/models` for verification.")
-      }
-      if (method === 'prompt.submit') return { ok: true }
-      return { status: 'ok' }
+    expect(result).toMatchObject({
+      bridge: true,
+      session_id: 'persistent-session',
+      bridge_session_id: 'tui-session',
     })
-
-    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
-    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
-
-    const result = await bridge.startRun('hello', 'web-session', [], {
-      model: 'deepseek-ai/DeepSeek-V4-Pro',
-      provider: 'custom:llm.mathmodel.tech',
-    })
-
-    expect(result).toMatchObject({ bridge: true, session_id: 'persistent-session' })
-    expect(client.requests.map(request => request.method)).toEqual([
-      'config.set',
-      'prompt.submit',
-    ])
-    readSpy.mockRestore()
-    writeSpy.mockRestore()
-    listSpy.mockRestore()
-    fetchSpy.mockRestore()
-    requestSpy.mockRestore()
-    ;(bridge as any).closeRun(result.run_id)
-  })
-
-  it('continues when Hermes warns that a hidden custom model is absent from /models', async () => {
-    const client = new FakeGatewayClient()
-    const bridge = new TuiBridgeService(client as any)
-    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
-    const readSpy = vi.spyOn(configHelpers, 'readConfigYaml').mockResolvedValue({})
-    const writeSpy = vi.spyOn(configHelpers, 'writeConfigYaml').mockResolvedValue()
-    const listSpy = vi.spyOn(configHelpers, 'listUserProviders').mockReturnValue([
-      {
-        providerKey: 'custom:llm.mathmodel.tech',
-        slug: 'llm.mathmodel.tech',
-        label: 'llm.mathmodel.tech',
-        base_url: 'https://llm.mathmodel.tech/v1',
-        model: 'deepseek-ai/DeepSeek-V4-Pro',
-        api_key: 'secret',
-        models: ['deepseek-ai/DeepSeek-V4-Pro'],
-      },
-    ] as any)
-    const fetchSpy = vi.spyOn(configHelpers, 'fetchProviderModels').mockResolvedValue(['deepseek/deepseek-v4-pro'])
-    const requestSpy = vi.spyOn(client, 'request')
-    requestSpy.mockImplementation(async function (this: FakeGatewayClient, method: string, params: Record<string, any> = {}) {
-      this.requests.push({ method, params })
-      if (method === 'config.set') {
-        throw new Error("Note: `deepseek-ai/DeepSeek-V4-Pro` was not found in this custom endpoint's model listing (https://openrouter.ai/api/v1/models). It may still work if the server supports hidden or aliased models.")
-      }
-      if (method === 'prompt.submit') return { ok: true }
-      return { status: 'ok' }
-    })
-
-    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
-    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
-
-    const result = await bridge.startRun('hello', 'web-session', [], {
-      model: 'deepseek-ai/DeepSeek-V4-Pro',
-      provider: 'custom:llm.mathmodel.tech',
-    })
-
-    expect(result).toMatchObject({ bridge: true, session_id: 'persistent-session' })
-    expect(client.requests.map(request => request.method)).toEqual([
-      'config.set',
-      'prompt.submit',
-    ])
-    readSpy.mockRestore()
-    writeSpy.mockRestore()
-    listSpy.mockRestore()
-    fetchSpy.mockRestore()
-    requestSpy.mockRestore()
     ;(bridge as any).closeRun(result.run_id)
   })
 

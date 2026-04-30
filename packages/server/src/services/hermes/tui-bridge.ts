@@ -14,7 +14,6 @@ import {
   setLivePendingClarifyForRun,
   setRunSession,
 } from './run-state'
-import { buildUserProviderConfigEntry, fetchProviderModels, listUserProviders, readConfigYaml, writeConfigYaml } from '../config-helpers'
 import { getActiveConfigPath } from './hermes-profile'
 
 export interface BridgeRunEvent {
@@ -106,11 +105,6 @@ interface BridgeSessionRef {
   persistentSessionId?: string
 }
 
-interface BridgeRunOptions {
-  model?: string
-  provider?: string
-}
-
 interface TuiSessionListItem {
   id?: string
   source?: string
@@ -186,35 +180,12 @@ function isUnknownBridgeMethod(error: unknown, method: string): boolean {
   return new RegExp(`unknown method:\\s*${method.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(message)
 }
 
-function isNonFatalCustomModelListingError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /could not reach this custom endpoint's model listing/i.test(message)
-    && /Hermes will still save/i.test(message)
-    || /was not found in this custom endpoint's model listing/i.test(message)
-    && /It may still work/i.test(message)
-}
-
 function normalizeSteerResult(result: { status?: string, text?: string } | null | undefined, text: string) {
   return {
     ok: result?.status === 'queued',
     status: result?.status || 'unknown',
     text: result?.text || text,
   }
-}
-
-function normalizeModelToken(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
-}
-
-function resolveCompatibleModel(requested: string, available: string[]): string {
-  const exact = available.find(item => item === requested)
-  if (exact) return exact
-
-  const requestedToken = normalizeModelToken(requested.split('/').pop() || requested)
-  if (!requestedToken) return requested
-
-  const matches = available.filter(item => normalizeModelToken(item.split('/').pop() || item) === requestedToken)
-  return matches.length === 1 ? matches[0] : requested
 }
 
 function payloadText(payload: Record<string, any>): string {
@@ -412,20 +383,11 @@ export class TuiBridgeService {
     input: string,
     webSessionId: string,
     conversationHistory: Array<{ role: string, content: string }> = [],
-    options: BridgeRunOptions = {},
   ) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
-    const requestedModel = options.model?.trim()
-    const requestedProvider = options.provider?.trim()
-    if (requestedModel && !this.isWebUiCustomProviderKey(requestedProvider)) {
-      await this.syncModel(requestedModel, requestedProvider)
-    }
     let bridgeSession = await this.ensureBridgeSession(webSessionId)
     let bridgeSessionId = bridgeSession.id
     let persistentSessionId = bridgeSession.persistentSessionId
-    if (requestedModel) {
-      await this.syncModel(requestedModel, requestedProvider, bridgeSessionId)
-    }
     const runId = `bridge_run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const state: RunState = {
       runId,
@@ -462,9 +424,6 @@ export class TuiBridgeService {
       persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
-      if (requestedModel) {
-        await this.syncModel(requestedModel, requestedProvider, bridgeSessionId)
-      }
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
     return {
@@ -473,84 +432,6 @@ export class TuiBridgeService {
       bridge: true,
       session_id: persistentSessionId,
       bridge_session_id: bridgeSessionId,
-    }
-  }
-
-  private formatModelSwitch(model: string, provider?: string): string {
-    const value = model.trim()
-    const providerValue = this.toHermesProviderFlag(provider)
-    return providerValue ? `${value} --provider ${providerValue}` : value
-  }
-
-  private isWebUiCustomProviderKey(provider?: string): boolean {
-    return /^custom:/i.test(provider?.trim() || '')
-  }
-
-  private async resolveCustomProviderKey(provider?: string): Promise<string | null> {
-    const value = provider?.trim() || ''
-    if (!value) return null
-    if (this.isWebUiCustomProviderKey(value)) return value
-    const config = await readConfigYaml().catch(() => ({}))
-    const custom = listUserProviders(config).find(item => item.slug === value || item.providerKey === `custom:${value}`)
-    return custom ? custom.providerKey : null
-  }
-
-  private toHermesProviderFlag(provider?: string): string {
-    const value = provider?.trim() || ''
-    return this.isWebUiCustomProviderKey(value) ? value.replace(/^custom:/i, '') : value
-  }
-
-  private async prepareCustomProviderSelection(provider: string, model: string): Promise<string> {
-    const slug = this.toHermesProviderFlag(provider)
-    const config = await readConfigYaml()
-    const custom = listUserProviders(config).find(item => item.slug === slug || item.providerKey === `custom:${slug}`)
-    let resolvedModel = model
-    if (!config.providers || typeof config.providers !== 'object' || Array.isArray(config.providers)) {
-      config.providers = {}
-    }
-    if (custom?.base_url && custom.api_key) {
-      try {
-        const liveModels = await fetchProviderModels(custom.base_url, custom.api_key)
-        if (liveModels.length > 0) {
-          resolvedModel = resolveCompatibleModel(model, liveModels)
-        }
-      } catch {
-        // Keep the user-selected model if probing fails.
-      }
-    }
-    if (custom && !config.providers[slug]) {
-      config.providers[slug] = buildUserProviderConfigEntry(
-        custom.label,
-        custom.base_url,
-        custom.api_key,
-        custom.model || resolvedModel,
-        custom.context_length,
-        custom.models,
-      )
-    }
-    if (typeof config.model !== 'object' || config.model === null) config.model = {}
-    config.model.default = resolvedModel
-    config.model.provider = slug
-    delete config.model.base_url
-    delete config.model.api_key
-    await writeConfigYaml(config)
-    return resolvedModel
-  }
-
-  private async syncModel(model: string, provider?: string, bridgeSessionId?: string) {
-    let value = this.formatModelSwitch(model, provider)
-    const customProviderKey = await this.resolveCustomProviderKey(provider)
-    if (customProviderKey) {
-      const resolvedModel = await this.prepareCustomProviderSelection(customProviderKey, model)
-      value = resolvedModel.trim()
-    }
-    const params: Record<string, string> = { key: 'model', value }
-    if (bridgeSessionId) params.session_id = bridgeSessionId
-    try {
-      await this.client.request('config.set', params)
-    } catch (error) {
-      if (customProviderKey && isNonFatalCustomModelListingError(error)) return
-      throw error
     }
   }
 
