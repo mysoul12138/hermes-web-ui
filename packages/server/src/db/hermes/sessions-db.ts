@@ -29,6 +29,7 @@ export interface HermesSessionRow {
   cache_write_tokens: number
   reasoning_tokens: number
   billing_provider: string | null
+  billing_base_url: string | null
   estimated_cost_usd: number
   actual_cost_usd: number | null
   cost_status: string
@@ -116,6 +117,7 @@ function mapRow(row: Record<string, unknown>): HermesSessionRow {
     cache_write_tokens: normalizeNumber(row.cache_write_tokens),
     reasoning_tokens: normalizeNumber(row.reasoning_tokens),
     billing_provider: normalizeNullableString(row.billing_provider),
+    billing_base_url: normalizeNullableString(row.billing_base_url),
     estimated_cost_usd: normalizeNumber(row.estimated_cost_usd),
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
@@ -141,6 +143,7 @@ const SESSION_SELECT = `
   COALESCE(s.cache_write_tokens, 0) AS cache_write_tokens,
   COALESCE(s.reasoning_tokens, 0) AS reasoning_tokens,
   COALESCE(s.billing_provider, '') AS billing_provider,
+  COALESCE(s.billing_base_url, '') AS billing_base_url,
   COALESCE(s.estimated_cost_usd, 0) AS estimated_cost_usd,
   s.actual_cost_usd AS actual_cost_usd,
   COALESCE(s.cost_status, '') AS cost_status,
@@ -443,6 +446,7 @@ function projectSessionSummary(root: HermesSessionInternalRow, chain: HermesSess
     cache_write_tokens: latest.cache_write_tokens,
     reasoning_tokens: latest.reasoning_tokens,
     billing_provider: latest.billing_provider ?? root.billing_provider,
+    billing_base_url: latest.billing_base_url ?? root.billing_base_url,
     estimated_cost_usd: latest.estimated_cost_usd,
     actual_cost_usd: latest.actual_cost_usd,
     cost_status: latest.cost_status,
@@ -808,8 +812,11 @@ export async function listSessionSummaries(source?: string, limit = 2000): Promi
 
     const idx = loadAllSessions(db)
     return roots
-      .filter(root => compressionChainRootId(root.id, idx) === root.id)
-      .map(root => projectSessionSummary(root, collectSessionChain(root, idx)))
+      .filter(root => {
+        if (!idx.byId.has(root.id)) return true
+        return compressionChainRootId(root.id, idx) === root.id
+      })
+      .map(root => projectSessionSummary(root, idx.byId.has(root.id) ? collectSessionChain(root, idx) : [root]))
       .sort((a, b) => Number(b.last_active || b.started_at || 0) - Number(a.last_active || a.started_at || 0))
       .slice(0, limit)
   } finally {

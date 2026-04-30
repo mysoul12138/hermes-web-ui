@@ -52,6 +52,7 @@ export interface ConversationSummary {
   cache_write_tokens: number
   reasoning_tokens: number
   billing_provider: string | null
+  billing_base_url?: string | null
   estimated_cost_usd: number
   actual_cost_usd: number | null
   cost_status: string

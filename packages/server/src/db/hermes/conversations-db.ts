@@ -56,6 +56,7 @@ interface ConversationSessionRow {
   cache_write_tokens: number
   reasoning_tokens: number
   billing_provider: string | null
+  billing_base_url: string | null
   estimated_cost_usd: number
   actual_cost_usd: number | null
   cost_status: string
@@ -190,6 +191,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
     cache_write_tokens: normalizeNumber(row.cache_write_tokens),
     reasoning_tokens: normalizeNumber(row.reasoning_tokens),
     billing_provider: normalizeNullableString(row.billing_provider),
+    billing_base_url: normalizeNullableString(row.billing_base_url),
     estimated_cost_usd: normalizeNumber(row.estimated_cost_usd),
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
@@ -220,6 +222,7 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     cache_write_tokens: 0,
     reasoning_tokens: 0,
     billing_provider: null,
+    billing_base_url: null,
     estimated_cost_usd: 0,
     actual_cost_usd: null,
     cost_status: '',
@@ -389,6 +392,7 @@ function toSummary(session: ConversationSessionRow): ConversationSummary {
     cache_write_tokens: Number(session.cache_write_tokens || 0),
     reasoning_tokens: Number(session.reasoning_tokens || 0),
     billing_provider: session.billing_provider ?? null,
+    billing_base_url: session.billing_base_url ?? null,
     estimated_cost_usd: Number(session.estimated_cost_usd || 0),
     actual_cost_usd: session.actual_cost_usd ?? null,
     cost_status: safeText(session.cost_status),
@@ -417,6 +421,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
     last_active: Math.max(...chain.map(session => session.last_active)),
     is_active: chain.some(session => session.is_active),
     billing_provider: last?.billing_provider ?? root.billing_provider ?? null,
+    billing_base_url: last?.billing_base_url ?? root.billing_base_url ?? null,
     cost_status: costStatuses.length === 1 ? costStatuses[0] : 'mixed',
     thread_session_count: chain.length,
     branch_session_count: branchSessionCount,
@@ -581,6 +586,7 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
       COALESCE(s.cache_write_tokens, 0) AS cache_write_tokens,
       COALESCE(s.reasoning_tokens, 0) AS reasoning_tokens,
       COALESCE(s.billing_provider, '') AS billing_provider,
+      COALESCE(s.billing_base_url, '') AS billing_base_url,
       COALESCE(s.estimated_cost_usd, 0) AS estimated_cost_usd,
       s.actual_cost_usd AS actual_cost_usd,
       COALESCE(s.cost_status, '') AS cost_status,

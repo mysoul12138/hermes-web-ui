@@ -118,7 +118,7 @@ describe('TuiBridgeService steer compatibility', () => {
     expect(client.requests[0].params).toMatchObject({
       key: 'model',
       session_id: 'tui-session',
-      value: 'openai/gpt-5.4',
+      value: 'openai/gpt-5.4 --provider ai.warp2pans.online',
     })
     expect(readSpy).toHaveBeenCalled()
     expect(writeSpy).toHaveBeenCalled()

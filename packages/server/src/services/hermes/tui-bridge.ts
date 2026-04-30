@@ -542,7 +542,7 @@ export class TuiBridgeService {
     const customProviderKey = await this.resolveCustomProviderKey(provider)
     if (customProviderKey) {
       const resolvedModel = await this.prepareCustomProviderSelection(customProviderKey, model)
-      value = resolvedModel.trim()
+      value = this.formatModelSwitch(resolvedModel, customProviderKey)
     }
     const params: Record<string, string> = { key: 'model', value }
     if (bridgeSessionId) params.session_id = bridgeSessionId

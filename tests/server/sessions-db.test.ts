@@ -10,7 +10,7 @@ const prepareMock = vi.fn((sql: string) => {
   if (sql.includes('JOIN messages m') && sql.includes('LIKE')) return ({ all: likeAllMock })
   if (sql.includes('base.title') && sql.includes('LIKE')) return ({ all: titleAllMock })
   // loadAllSessions: full table scan — contains parent_session_id but NOT base/CTE/WHERE
-  if (sql.includes('parent_session_id AS parent_session_id') && !sql.includes('base') && !sql.includes('parent_session_id IS NULL')) return ({ all: indexAllMock })
+  if (sql.includes('parent_session_id AS parent_session_id') && !sql.includes('WITH base') && !sql.includes('parent_session_id IS NULL')) return ({ all: indexAllMock })
   return ({ all: allMock })
 })
 const closeMock = vi.fn()
@@ -60,6 +60,7 @@ describe('session DB summaries', () => {
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         billing_provider: 'openrouter',
+        billing_base_url: null,
         estimated_cost_usd: 0.01,
         actual_cost_usd: null,
         cost_status: 'estimated',
@@ -93,6 +94,7 @@ describe('session DB summaries', () => {
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         billing_provider: 'openrouter',
+        billing_base_url: null,
         estimated_cost_usd: 0.01,
         actual_cost_usd: null,
         cost_status: 'estimated',

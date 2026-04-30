@@ -63,6 +63,7 @@ export interface Session {
   updatedAt: number
   model?: string
   provider?: string
+  billingBaseUrl?: string
   messageCount?: number
   inputTokens?: number
   outputTokens?: number
@@ -329,6 +330,7 @@ function applySessionDetail(session: Session | undefined | null, detail: Partial
   if (detail.source) session.source = detail.source === 'webui-bridge' ? 'tui' : detail.source
   if (detail.model) session.model = detail.model
   if (detail.billing_provider != null) session.provider = detail.billing_provider || ''
+  if ((detail as any).billing_base_url != null) session.billingBaseUrl = (detail as any).billing_base_url || ''
   if (detail.message_count != null) session.messageCount = detail.message_count
   if (detail.ended_at !== undefined) session.endedAt = detail.ended_at != null ? Math.round(detail.ended_at * 1000) : null
   if (detail.last_active != null) session.lastActiveAt = Math.round(detail.last_active * 1000)
@@ -490,6 +492,7 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
     updatedAt: Math.round((s.last_active || s.ended_at || s.started_at) * 1000),
     model: s.model,
     provider: (s as any).billing_provider || '',
+    billingBaseUrl: (s as any).billing_base_url || '',
     messageCount: s.message_count,
     inputTokens: s.input_tokens,
     outputTokens: s.output_tokens,
@@ -501,6 +504,10 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
 
 function normalizeProviderKey(value: string): string {
   return value.trim().toLowerCase()
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '').toLowerCase()
 }
 
 // Cache keys for stale-while-revalidate loading of sessions / messages.
@@ -1579,6 +1586,17 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return appStore.modelGroups.find(group => group.models.includes(model))?.provider || ''
   }
 
+  function findProviderForBaseUrl(baseUrl?: string, model?: string): string {
+    const normalized = normalizeBaseUrl(baseUrl || '')
+    if (!normalized) return ''
+    const appStore = useAppStore()
+    const group = appStore.modelGroups.find(item =>
+      normalizeBaseUrl(item.base_url || '') === normalized
+      && (!model || item.models.includes(model)),
+    )
+    return group?.provider || ''
+  }
+
   function providerSupportsModel(provider: string, model?: string): boolean {
     if (!provider || !model) return true
     const appStore = useAppStore()
@@ -1597,6 +1615,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       target?.provider || activeSession.value?.provider || '',
       targetModel || appModel || undefined,
     )
+    const targetBaseUrlProvider = normalizeProviderSelection(
+      findProviderForBaseUrl(target?.billingBaseUrl || activeSession.value?.billingBaseUrl || '', targetModel || appModel || undefined),
+      targetModel || appModel || undefined,
+    )
 
     if (appModel) {
       if (appProvider && providerSupportsModel(appProvider, appModel)) {
@@ -1604,14 +1626,19 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       }
       const modelProvider = normalizeProviderSelection(findProviderForModel(appModel), appModel)
       if (modelProvider) return { model: appModel, provider: modelProvider }
-      if (targetModel === appModel && targetProvider) return { model: appModel, provider: targetProvider }
-      return { model: appModel, provider: appProvider }
+      if (targetModel === appModel && targetProvider && providerSupportsModel(targetProvider, appModel)) return { model: appModel, provider: targetProvider }
+      if (targetModel === appModel && targetBaseUrlProvider) return { model: appModel, provider: targetBaseUrlProvider }
+      return { model: appModel, provider: '' }
     }
 
     if (targetModel) {
+      if (targetProvider && providerSupportsModel(targetProvider, targetModel)) {
+        return { model: targetModel, provider: targetProvider }
+      }
+      if (targetBaseUrlProvider) return { model: targetModel, provider: targetBaseUrlProvider }
       return {
         model: targetModel,
-        provider: targetProvider || normalizeProviderSelection(findProviderForModel(targetModel), targetModel),
+        provider: normalizeProviderSelection(findProviderForModel(targetModel), targetModel),
       }
     }
 

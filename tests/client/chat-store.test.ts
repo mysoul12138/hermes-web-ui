@@ -58,6 +58,7 @@ function makeSummary(id: string, title = 'Session') {
     cache_write_tokens: 0,
     reasoning_tokens: 0,
     billing_provider: 'openai',
+    billing_base_url: null,
     estimated_cost_usd: 0,
     actual_cost_usd: 0,
     cost_status: 'estimated',
@@ -610,6 +611,71 @@ describe('Chat Store', () => {
       provider: 'custom:llm.mathmodel.tech',
     }))
     expect(store.activeSession?.provider).toBe('custom:llm.mathmodel.tech')
+  })
+
+  it('uses billing base url to recover the provider for older sessions without billing_provider', async () => {
+    const appStore = useAppStore()
+    appStore.modelGroups = [
+      {
+        provider: 'openai-codex',
+        label: 'OpenAI Codex',
+        base_url: '',
+        models: ['gpt-5.4'],
+        api_key: '',
+      },
+      {
+        provider: 'custom:llm.mathmodel.tech',
+        label: 'llm.mathmodel.tech',
+        base_url: 'https://llm.mathmodel.tech/v1',
+        models: ['deepseek-ai/DeepSeek-V4-Pro'],
+        api_key: 'set',
+      },
+    ]
+    appStore.selectedModel = 'deepseek-ai/DeepSeek-V4-Pro'
+    appStore.selectedProvider = 'openai-codex'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, 'legacy-session')
+    mockSessionsApi.fetchSessions.mockResolvedValue([
+      {
+        ...makeSummary('legacy-session'),
+        model: 'deepseek-ai/DeepSeek-V4-Pro',
+        billing_provider: null,
+        billing_base_url: 'https://llm.mathmodel.tech/v1',
+      },
+    ])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+    await store.sendMessage('continue on recovered custom provider')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: 'custom:llm.mathmodel.tech',
+    }))
+  })
+
+  it('does not send a stale provider when no provider supports the selected model', async () => {
+    const appStore = useAppStore()
+    appStore.modelGroups = [
+      {
+        provider: 'openai-codex',
+        label: 'OpenAI Codex',
+        base_url: '',
+        models: ['gpt-5.4'],
+        api_key: '',
+      },
+    ]
+    appStore.selectedModel = 'deepseek-ai/DeepSeek-V4-Pro'
+    appStore.selectedProvider = 'openai-codex'
+
+    const store = useChatStore()
+    store.newChat()
+    await store.sendMessage('avoid mismatched provider')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'deepseek-ai/DeepSeek-V4-Pro',
+      provider: undefined,
+    }))
   })
 
   it('renders a completed bridge response when the final text is carried in content', async () => {
