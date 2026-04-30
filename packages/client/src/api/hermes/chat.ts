@@ -90,7 +90,10 @@ export interface RunEvent {
   files_written?: string[]
   input_tokens?: number
   output_tokens?: number
+  inputTokens?: number
+  outputTokens?: number
   reasoning_tokens?: number
+  usage_source?: string
   api_calls?: number
   cost_usd?: number
   duration_seconds?: number
@@ -98,6 +101,7 @@ export interface RunEvent {
     input_tokens: number
     output_tokens: number
     total_tokens: number
+    source?: string
   }
 }
 
@@ -137,6 +141,7 @@ const NAMED_RUN_EVENTS = [
   'tool.started',
   'tool.progress',
   'tool.completed',
+  'usage.updated',
   'tool.start',
   'tool.complete',
   'run.started',

@@ -325,6 +325,23 @@ function applySessionUsage(session: Session | undefined | null, usage: { input_t
   }
 }
 
+function usageFromRunEvent(evt: RunEvent): { input_tokens: number; output_tokens: number } | null {
+  if (evt.usage) {
+    return {
+      input_tokens: evt.usage.input_tokens ?? 0,
+      output_tokens: evt.usage.output_tokens ?? 0,
+    }
+  }
+  const raw = evt as RunEvent & { inputTokens?: number; outputTokens?: number }
+  const inputTokens = raw.input_tokens ?? raw.inputTokens
+  const outputTokens = raw.output_tokens ?? raw.outputTokens
+  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return null
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+  }
+}
+
 function applySessionDetail(session: Session | undefined | null, detail: Partial<SessionDetail> | null | undefined) {
   if (!session || !detail) return
   if (detail.source) session.source = detail.source === 'webui-bridge' ? 'tui' : detail.source
@@ -2298,16 +2315,21 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             break
           }
 
+          case 'usage.updated': {
+            const target = sessions.value.find(s => s.id === sid)
+            applySessionUsage(target, usageFromRunEvent(evt), { allowReset: true })
+            persistSessionsList()
+            break
+          }
+
           case 'run.completed': {
             const msgs = getSessionMsgs(sid)
             const lastMsg = msgs[msgs.length - 1]
             if (lastMsg?.isStreaming) {
               updateMessage(sid, lastMsg.id, { isStreaming: false })
             }
-            if (evt.usage) {
-              const target = sessions.value.find(s => s.id === sid)
-              applySessionUsage(target, evt.usage)
-            }
+            const target = sessions.value.find(s => s.id === sid)
+            applySessionUsage(target, usageFromRunEvent(evt))
             const finalOutput = typeof evt.output === 'string' ? evt.output : ''
             const eventOutput = finalOutput || textFromRunEvent(evt)
             const eventOutputTrimmed = eventOutput.trim()

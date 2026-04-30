@@ -15,6 +15,8 @@ import {
   setRunSession,
 } from './run-state'
 import { getActiveConfigPath } from './hermes-profile'
+import { updateUsage } from '../../db/hermes/usage-store'
+import { countTokens } from '../../lib/context-compressor'
 
 export interface BridgeRunEvent {
   event: string
@@ -77,7 +79,12 @@ export interface BridgeRunEvent {
     input_tokens: number
     output_tokens: number
     total_tokens: number
+    reasoning_tokens?: number
+    cache_read_tokens?: number
+    cache_write_tokens?: number
+    source?: string
   }
+  usage_source?: string
 }
 
 interface PendingRpc {
@@ -97,6 +104,7 @@ interface RunState {
   completeTimer?: ReturnType<typeof setTimeout>
   pendingApproval?: boolean
   pendingClarify?: boolean
+  contextInputTokens?: number
 }
 
 interface BridgeSessionRef {
@@ -231,6 +239,27 @@ function toolPayloadFields(payload: Record<string, any>): Record<string, unknown
     fields.result = payload.result ?? payload.output ?? payload.stdout ?? payload.stderr
   }
   return fields
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const numberValue = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(numberValue) && numberValue >= 0 ? Math.round(numberValue) : undefined
+}
+
+function normalizeUsagePayload(payload: Record<string, any>): BridgeRunEvent['usage'] | undefined {
+  const raw = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : payload
+  const inputTokens = finiteNumber(raw.input_tokens ?? raw.inputTokens)
+  const outputTokens = finiteNumber(raw.output_tokens ?? raw.outputTokens)
+  if (inputTokens === undefined || outputTokens === undefined) return undefined
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: finiteNumber(raw.total_tokens ?? raw.totalTokens) ?? inputTokens + outputTokens,
+    reasoning_tokens: finiteNumber(raw.reasoning_tokens ?? raw.reasoningTokens),
+    cache_read_tokens: finiteNumber(raw.cache_read_tokens ?? raw.cacheReadTokens),
+    cache_write_tokens: finiteNumber(raw.cache_write_tokens ?? raw.cacheWriteTokens),
+    source: typeof raw.source === 'string' ? raw.source : typeof payload.usage_source === 'string' ? payload.usage_source : 'provider',
+  }
 }
 
 class TuiGatewayClient extends EventEmitter {
@@ -389,6 +418,7 @@ export class TuiBridgeService {
     let bridgeSessionId = bridgeSession.id
     let persistentSessionId = bridgeSession.persistentSessionId
     const runId = `bridge_run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    const contextPrompt = this.buildPrompt(input, conversationHistory)
     const state: RunState = {
       runId,
       webSessionId,
@@ -396,6 +426,7 @@ export class TuiBridgeService {
       events: [],
       waiters: [],
       closed: false,
+      contextInputTokens: countTokens(contextPrompt),
     }
     this.runs.set(runId, state)
     setRunSession(runId, webSessionId)
@@ -403,7 +434,7 @@ export class TuiBridgeService {
     this.push(runId, { event: 'run.started', run_id: runId, timestamp: Date.now() / 1000 })
     this.scheduleIdleHeartbeat(runId)
 
-    const prompt = bridgeSession.created ? this.buildPrompt(input, conversationHistory) : input
+    const prompt = bridgeSession.created ? contextPrompt : input
     try {
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: prompt })
     } catch (error) {
@@ -423,6 +454,7 @@ export class TuiBridgeService {
       bridgeSessionId = recreated.id
       persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
+      state.contextInputTokens = countTokens(this.buildPrompt(input, conversationHistory))
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
@@ -781,13 +813,17 @@ export class TuiBridgeService {
         this.scheduleIdleHeartbeat(runId)
         break
       case 'message.complete':
-        this.scheduleRunCompleted(runId, {
-          event: 'run.completed',
-          run_id: runId,
-          timestamp,
-          output: payloadText(payload),
-          usage: payload.usage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-        })
+        {
+          const usage = normalizeUsagePayload(payload)
+          this.scheduleRunCompleted(runId, {
+            event: 'run.completed',
+            run_id: runId,
+            timestamp,
+            output: payloadText(payload),
+            usage,
+            usage_source: usage?.source,
+          })
+        }
         break
       case 'error':
         clearLivePendingApprovalForRun(runId)
@@ -846,12 +882,53 @@ export class TuiBridgeService {
     state.completeTimer = undefined
   }
 
+  private completedEventWithUsage(state: RunState, event: BridgeRunEvent): BridgeRunEvent {
+    const normalized = event.usage || normalizeUsagePayload(event as Record<string, any>)
+    if (normalized && normalized.input_tokens + normalized.output_tokens > 0) {
+      return {
+        ...event,
+        usage: normalized,
+        usage_source: normalized.source || event.usage_source || 'provider',
+      }
+    }
+
+    const outputTokens = countTokens(event.output || '')
+    const inputTokens = state.contextInputTokens ?? 0
+    const fallback = {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+      source: 'server-tokenizer',
+    }
+    return {
+      ...event,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      usage: fallback,
+      usage_source: fallback.source,
+    }
+  }
+
+  private persistCompletedUsage(state: RunState, event: BridgeRunEvent) {
+    const usage = event.usage
+    if (!usage || usage.input_tokens + usage.output_tokens <= 0) return
+    updateUsage(state.webSessionId, {
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_tokens,
+      cacheWriteTokens: usage.cache_write_tokens,
+      reasoningTokens: usage.reasoning_tokens,
+    })
+  }
+
   private scheduleRunCompleted(runId: string, event: BridgeRunEvent) {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
     this.clearCompleteTimer(state)
     state.completeTimer = setTimeout(() => {
-      this.push(runId, event)
+      const completedEvent = this.completedEventWithUsage(state, event)
+      this.persistCompletedUsage(state, completedEvent)
+      this.push(runId, completedEvent)
       this.closeRun(runId)
     }, COMPLETE_GRACE_MS)
   }

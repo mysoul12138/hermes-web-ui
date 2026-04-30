@@ -1,5 +1,12 @@
 import { EventEmitter } from 'events'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const mockUpdateUsage = vi.hoisted(() => vi.fn())
+
+vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
+  updateUsage: mockUpdateUsage,
+}))
+
 import { TuiBridgeService } from '../../packages/server/src/services/hermes/tui-bridge'
 
 class FakeGatewayClient extends EventEmitter {
@@ -29,6 +36,10 @@ class FakeGatewayClient extends EventEmitter {
 }
 
 describe('TuiBridgeService steer compatibility', () => {
+  beforeEach(() => {
+    mockUpdateUsage.mockClear()
+  })
+
   it('falls back to command.dispatch /steer when the bridge lacks session.steer', async () => {
     const client = new FakeGatewayClient()
     const bridge = new TuiBridgeService(client as any)
@@ -246,6 +257,99 @@ describe('TuiBridgeService steer compatibility', () => {
         output: 'final answer from gateway',
       }),
     ])
+    vi.useRealTimers()
+  })
+
+  it('adds server-tokenizer usage when bridge completion has no provider usage', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await bridge.startRun('current question', 'web-session', [
+      { role: 'user', content: 'hello from earlier context' },
+      { role: 'assistant', content: 'previous answer' },
+    ])
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'message.complete',
+      payload: {
+        content: 'final answer from gateway',
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(1600)
+
+    const events = (bridge as any).runs.get(result.run_id).events
+    const completed = events.find((event: any) => event.event === 'run.completed')
+    expect(completed).toMatchObject({
+      usage_source: 'server-tokenizer',
+      usage: {
+        source: 'server-tokenizer',
+      },
+    })
+    expect(completed.usage.input_tokens).toBeGreaterThan(0)
+    expect(completed.usage.output_tokens).toBeGreaterThan(0)
+    expect(mockUpdateUsage).toHaveBeenCalledWith('web-session', expect.objectContaining({
+      inputTokens: completed.usage.input_tokens,
+      outputTokens: completed.usage.output_tokens,
+    }))
+    vi.useRealTimers()
+  })
+
+  it('preserves provider usage from bridge completion payloads', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+
+    ;(bridge as any).webSessionsByBridgeSession.set('tui-session', 'web-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_usage')
+    ;(bridge as any).runs.set('bridge_run_usage', {
+      runId: 'bridge_run_usage',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+      contextInputTokens: 999,
+    })
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'message.complete',
+      payload: {
+        content: 'final answer',
+        usage: {
+          input_tokens: 7,
+          output_tokens: 3,
+          total_tokens: 10,
+        },
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(1600)
+
+    const events = (bridge as any).runs.get('bridge_run_usage').events
+    expect(events).toEqual([
+      expect.objectContaining({
+        event: 'run.completed',
+        usage_source: 'provider',
+        usage: expect.objectContaining({
+          input_tokens: 7,
+          output_tokens: 3,
+          total_tokens: 10,
+          source: 'provider',
+        }),
+      }),
+    ])
+    expect(mockUpdateUsage).toHaveBeenCalledWith('web-session', expect.objectContaining({
+      inputTokens: 7,
+      outputTokens: 3,
+    }))
     vi.useRealTimers()
   })
 })

@@ -560,6 +560,27 @@ describe('Chat Store', () => {
     expect(store.activeSession?.outputTokens).toBe(700)
   })
 
+  it('updates active session usage from live usage.updated events', async () => {
+    let onEvent!: (event: any) => void
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('count live context')
+    await flushPromises()
+
+    onEvent({
+      event: 'usage.updated',
+      inputTokens: 321,
+      outputTokens: 12,
+    })
+
+    expect(store.activeSession?.inputTokens).toBe(321)
+    expect(store.activeSession?.outputTokens).toBe(12)
+  })
+
   it('sends the currently selected model instead of the model captured at session creation', async () => {
     const appStore = useAppStore()
     appStore.selectedModel = 'old-model'
