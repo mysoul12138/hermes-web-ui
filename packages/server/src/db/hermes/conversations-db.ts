@@ -274,6 +274,20 @@ function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: Conve
   return !!parentTitle && !!childTitle && parentTitle === childTitle
 }
 
+function isLikelyBridgeContextBranchContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
+  if (!parent.parent_session_id) return false
+  if (!isBridgeContextPrompt(child.preview || child.title)) return false
+
+  const childStarted = Number(child.started_at || 0)
+  const parentStarted = Number(parent.started_at || 0)
+  if (childStarted < parentStarted) return false
+
+  const startedDelta = childStarted - parentStarted
+  const activeGap = childStarted - Number(parent.last_active || parent.started_at || 0)
+  return startedDelta <= DUPLICATE_CONTINUATION_WINDOW_SECONDS || activeGap <= LINEAGE_TOLERANCE_SECONDS
+}
+
 function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) {
   const parentless = sessions.filter(session => session.parent_session_id == null && session.source !== 'tool')
   const assignments = new Map<string, string | null>()
@@ -297,6 +311,30 @@ function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) 
   }
 }
 
+function linkOrphanBridgeContextBranchContinuations(sessions: ConversationSessionRow[]) {
+  const parentless = sessions.filter(session =>
+    session.parent_session_id == null
+    && session.source === 'tui'
+    && isBridgeContextPrompt(session.preview || session.title),
+  )
+  const branchParents = sessions.filter(session =>
+    session.parent_session_id != null
+    && session.source === 'tui',
+  )
+
+  for (const child of parentless) {
+    const parent = branchParents
+      .filter(candidate => isLikelyBridgeContextBranchContinuation(candidate, child))
+      .sort((a, b) => {
+        const aDelta = Math.abs(Number(child.started_at || 0) - Number(a.started_at || 0))
+        const bDelta = Math.abs(Number(child.started_at || 0) - Number(b.started_at || 0))
+        if (aDelta !== bDelta) return aDelta - bDelta
+        return b.id.localeCompare(a.id)
+      })[0]
+    if (parent) child.parent_session_id = parent.id
+  }
+}
+
 function continuationCandidates(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
   const childIds = childrenByParent.get(parent.id) || []
   return childIds
@@ -304,17 +342,21 @@ function continuationCandidates(parent: ConversationSessionRow, byId: Map<string
     .filter((child): child is ConversationSessionRow => !!child)
     .filter(child => allowTool || child.source !== 'tool')
     .filter(child => child.source === parent.source)
-    .filter(child => isLikelyOrphanContinuation(parent, child))
+    .filter(child => isCompressionEndReason(parent.end_reason)
+      ? isLikelyOrphanContinuation(parent, child)
+      : isLikelyBridgeContextBranchContinuation(parent, child))
     .sort((a, b) => {
-      const aDelta = Math.abs(Number(a.started_at || 0) - Number(parent.ended_at || 0))
-      const bDelta = Math.abs(Number(b.started_at || 0) - Number(parent.ended_at || 0))
+      const anchor = isCompressionEndReason(parent.end_reason)
+        ? Number(parent.ended_at || 0)
+        : Number(parent.started_at || 0)
+      const aDelta = Math.abs(Number(a.started_at || 0) - anchor)
+      const bDelta = Math.abs(Number(b.started_at || 0) - anchor)
       if (aDelta !== bDelta) return aDelta - bDelta
       return a.id.localeCompare(b.id)
     })
 }
 
 function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow | null {
-  if (!isCompressionEndReason(parent.end_reason)) return null
   const candidates = continuationCandidates(parent, byId, childrenByParent, allowTool)
   if (candidates.length === 1) return candidates[0]
 
@@ -750,6 +792,7 @@ async function loadConversationSessions(source?: string, includeTool = false): P
     const nowSeconds = Date.now() / 1000
     const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
     linkOrphanCompressionContinuations(sessions)
+    linkOrphanBridgeContextBranchContinuations(sessions)
     if (source && source !== 'tui') return sessions
 
     const knownIds = new Set(sessions.map(session => session.id))

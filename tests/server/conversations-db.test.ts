@@ -454,6 +454,100 @@ describe('conversation DB service', () => {
     expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['root', 'bridge-duplicate'])
   })
 
+  it('folds parentless bridge context sessions into existing branch placeholders', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'branch-placeholder',
+      parent_session_id: 'root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 200,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'context-continuation',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 260,
+      ended_at: null,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 5,
+      output_tokens: 6,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 41, session_id: 'root', role: 'user', content: 'root request', timestamp: 101 })
+    insertMessage(db, { id: 42, session_id: 'branch-placeholder', role: 'assistant', content: 'branch work before compaction', timestamp: 201 })
+    insertMessage(db, {
+      id: 43,
+      session_id: 'context-continuation',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: branch work before compaction\n\nCurrent user message:\ncontinue branch',
+      timestamp: 261,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
+
+    const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
+    expect(detail?.branches?.[0]?.thread_session_count).toBe(2)
+    expect(detail?.branches?.[0]?.messages.map((message: any) => message.session_id)).toEqual([
+      'branch-placeholder',
+      'context-continuation',
+    ])
+  })
+
   it('treats branched children as their own visible conversations', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
