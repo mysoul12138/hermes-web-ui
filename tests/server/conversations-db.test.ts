@@ -537,20 +537,18 @@ describe('conversation DB service', () => {
 
     const mod = await import('../../packages/server/src/db/hermes/conversations-db')
     const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
-    expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['context-continuation'])
 
-    const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
-    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['context-continuation'])
-    expect(detail?.branches?.[0]?.thread_session_count).toBe(1)
-    expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
-    expect(detail?.branches?.[0]?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
-    expect(detail?.branches?.[0]?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+    const rootDetail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
+    expect(rootDetail).toBeNull()
+
+    const detail = await mod.getConversationDetailFromDb('context-continuation', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
       'branch work before compaction',
     ])
-
-    const continuationDetail = await mod.getConversationDetailFromDb('context-continuation', { humanOnly: true })
-    expect(continuationDetail?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
-    expect(continuationDetail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
   })
 
   it('treats branched children as their own visible conversations', async () => {

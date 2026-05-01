@@ -24,6 +24,7 @@ type HermesMessageLike = {
 
 type ConversationSession = HermesSessionFull & {
   parent_session_id?: string | null
+  raw_preview?: string
   preview: string
   last_active: number
   is_active: boolean
@@ -183,6 +184,15 @@ function visibleHumanMessage(message: HermesMessageLike): boolean {
 
 function firstVisibleHumanText(messages: HermesMessageLike[]): string {
   const firstVisible = messages.find(visibleHumanMessage)
+  if (!firstVisible) return ''
+  const content = textFromContent(firstVisible.content).trim()
+  return safeText(firstVisible.role) === 'user'
+    ? (bridgeContextDisplayText(content) || content)
+    : content
+}
+
+function firstRawVisibleHumanText(messages: HermesMessageLike[]): string {
+  const firstVisible = messages.find(visibleHumanMessage)
   return firstVisible ? textFromContent(firstVisible.content).trim() : ''
 }
 
@@ -197,12 +207,14 @@ function enrichSession(session: HermesSessionFull, nowSeconds: number, liveTuiSe
   const messages = Array.isArray(session.messages) ? session.messages : []
   const source = safeText(session.source)
   const isLiveTuiProcess = source === 'tui' && liveTuiSessionKeys.has(safeText(session.id))
+  const rawPreview = firstRawVisibleHumanText(messages)
   const preview = excerpt(firstVisibleHumanText(messages))
   const lastActive = maxMessageTimestamp(messages) || Number(session.ended_at || session.started_at || 0)
   const endedAt = session.ended_at ?? null
   return {
     ...session,
     parent_session_id: (session.parent_session_id as string | null | undefined) ?? null,
+    raw_preview: rawPreview,
     preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
     is_active: isLiveTuiProcess || (endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS),
@@ -233,6 +245,7 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     cost_status: '',
     messages: [],
     parent_session_id: null,
+    raw_preview: 'Running TUI session',
     preview: 'Running TUI session',
     last_active: nowSeconds,
     is_active: true,
@@ -279,7 +292,7 @@ function isLikelyOrphanContinuation(parent: ConversationSession, child: Conversa
   if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
 
-  if (parent.source === 'tui' && isBridgeContextPrompt(child.preview || child.title)) return true
+  if (parent.source === 'tui' && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return true
 
   const parentPreview = normalizeText(parent.preview)
   const childPreview = normalizeText(child.preview)

@@ -61,6 +61,7 @@ interface ConversationSessionRow {
   estimated_cost_usd: number
   actual_cost_usd: number | null
   cost_status: string
+  raw_preview: string
   preview: string
   last_active: number
   has_visible_messages: boolean
@@ -168,7 +169,8 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
   const source = String(row.source || '')
   const startedAt = normalizeNumber(row.started_at)
   const endedAt = normalizeNullableNumber(row.ended_at)
-  const preview = excerpt(row.preview || '')
+  const rawPreview = safeText(row.raw_preview || row.preview || '')
+  const preview = excerpt(bridgeContextDisplayText(rawPreview) || rawPreview)
   const rawTitle = normalizeNullableString(row.title)
   const title = rawTitle || (preview ? (preview.length > 40 ? `${preview.slice(0, 40)}...` : preview) : null)
   const lastActive = normalizeNumber(row.last_active, startedAt)
@@ -196,6 +198,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
     estimated_cost_usd: normalizeNumber(row.estimated_cost_usd),
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
+    raw_preview: rawPreview,
     preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
     has_visible_messages: !!normalizeNumber(row.has_visible_messages) || isLiveTuiProcess,
@@ -227,6 +230,7 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     estimated_cost_usd: 0,
     actual_cost_usd: null,
     cost_status: '',
+    raw_preview: 'Running TUI session',
     preview: 'Running TUI session',
     last_active: nowSeconds,
     has_visible_messages: true,
@@ -274,7 +278,7 @@ function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: Conve
   if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
 
-  if (parent.source === 'tui' && isBridgeContextPrompt(child.preview || child.title)) return true
+  if (parent.source === 'tui' && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return true
 
   const parentPreview = normalizeText(parent.preview)
   const childPreview = normalizeText(child.preview)
@@ -288,7 +292,7 @@ function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: Conve
 function isLikelyBridgeContextBranchContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
   if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
   if (!parent.parent_session_id) return false
-  if (!isBridgeContextPrompt(child.preview || child.title)) return false
+  if (!isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
 
   const childStarted = Number(child.started_at || 0)
   const parentStarted = Number(parent.started_at || 0)
@@ -326,7 +330,7 @@ function linkOrphanBridgeContextBranchContinuations(sessions: ConversationSessio
   const parentless = sessions.filter(session =>
     session.parent_session_id == null
     && session.source === 'tui'
-    && isBridgeContextPrompt(session.preview || session.title),
+    && isBridgeContextPrompt(session.raw_preview || session.preview || session.title),
   )
   const branchParents = sessions.filter(session =>
     session.parent_session_id != null
@@ -396,6 +400,34 @@ function isBridgeContextBranchContinuationChild(session: ConversationSessionRow 
   return !!parent && isLikelyBridgeContextBranchContinuation(parent, session)
 }
 
+function bridgeContextHistoryPathToRoot(session: ConversationSessionRow, byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {
+  if (!isBridgeContextBranchContinuationChild(session, byId)) return []
+  const reversed: ConversationSessionRow[] = []
+  const seen = new Set<string>()
+  let current = byId.get(session.parent_session_id || '') || null
+
+  while (current && !seen.has(current.id)) {
+    reversed.push(current)
+    seen.add(current.id)
+    current = current.parent_session_id ? byId.get(current.parent_session_id) || null : null
+  }
+
+  return reversed.reverse()
+}
+
+function hasBridgeContextContinuationDescendant(session: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): boolean {
+  if (seen.has(session.id)) return false
+  seen.add(session.id)
+  const childIds = childrenByParent.get(session.id) || []
+  for (const childId of childIds) {
+    const child = byId.get(childId)
+    if (!child || child.source === 'tool') continue
+    if (isBridgeContextBranchContinuationChild(child, byId)) return true
+    if (hasBridgeContextContinuationDescendant(child, byId, childrenByParent, seen)) return true
+  }
+  return false
+}
+
 function isCompressionLineageChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
@@ -440,6 +472,12 @@ function isLatestCompressionContinuation(session: ConversationSessionRow | undef
   return collectConversationChain(path[0].id, byId, childrenByParent).at(-1)?.id === session.id
 }
 
+function isLatestBridgeContextContinuation(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
+  if (!session || session.source === 'tool') return false
+  if (!isBridgeContextBranchContinuationChild(session, byId)) return false
+  return collectConversationChain(session.id, byId, childrenByParent).at(-1)?.id === session.id
+}
+
 function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
@@ -449,7 +487,9 @@ function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<str
 function isVisibleConversationStart(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
   if (!session || session.source === 'tool') return false
   if (isLatestCompressionContinuation(session, byId, childrenByParent)) return true
+  if (isLatestBridgeContextContinuation(session, byId, childrenByParent)) return true
   if (nextContinuationChild(session, byId, childrenByParent)) return false
+  if (hasBridgeContextContinuationDescendant(session, byId, childrenByParent)) return false
   return (session.parent_session_id == null || isBranchRoot(session, byId))
     && !isCompressionContinuationChild(session, byId, childrenByParent)
     && !isCompressionLineageChild(session, byId)
@@ -507,14 +547,16 @@ function toSummary(session: ConversationSessionRow): ConversationSummary {
 function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSummary | null {
   const requestedRoot = byId.get(rootId)
   const compressionHistory = requestedRoot ? compressionPathToRoot(requestedRoot, byId).slice(0, -1) : []
+  const bridgeContextHistory = requestedRoot ? bridgeContextHistoryPathToRoot(requestedRoot, byId) : []
   const chain = compressionHistory.length ? [requestedRoot!] : collectConversationChain(rootId, byId, childrenByParent)
-  if (!chain.length || ![...chain, ...compressionHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
+  if (!chain.length || ![...chain, ...compressionHistory, ...bridgeContextHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
   const root = chain[0]
   const last = chain[chain.length - 1]
   const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
   const costStatuses = Array.from(new Set(chain.map(session => safeText(session.cost_status)).filter(Boolean)))
   const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
     + (compressionHistory.length ? 1 + countConversationBranchSessions(compressionHistory, byId, childrenByParent) : 0)
+    + (bridgeContextHistory.length ? 1 + countConversationBranchSessions(bridgeContextHistory, byId, childrenByParent) : 0)
 
   return {
     ...toSummary(root),
@@ -680,25 +722,27 @@ function buildHistoryBranchFromChain(
   seen: Set<string>,
 ): ConversationBranch | null {
   if (!historyChain.length) return null
-  const historyRoot = historyChain[0]
-  const last = historyChain[historyChain.length - 1]
-  const messages = loadVisibleMessagesForSessions(db, historyChain)
+  const displayChain = historyChain.filter(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)
+  if (!displayChain.length) return null
+  const historyRoot = displayChain[0]
+  const last = displayChain[displayChain.length - 1]
+  const messages = loadVisibleMessagesForSessions(db, displayChain)
   return {
     session_id: historyRoot.id,
     parent_session_id: visibleRoot.id,
     source: safeText(historyRoot.source),
     model: safeText(last.model || historyRoot.model),
-    title: historyRoot.title || historyChain.map(session => session.preview).find(Boolean) || historyRoot.id,
+    title: historyRoot.title || displayChain.map(session => session.preview).find(Boolean) || historyRoot.id,
     started_at: Number(historyRoot.started_at || 0),
     ended_at: last.ended_at ?? null,
-    last_active: historyChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(historyRoot.last_active || historyRoot.started_at || 0)),
-    is_active: historyChain.some(session => session.is_active),
+    last_active: displayChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(historyRoot.last_active || historyRoot.started_at || 0)),
+    is_active: displayChain.some(session => session.is_active),
     messages,
     visible_count: messages.length,
-    thread_session_count: historyChain.length,
+    thread_session_count: displayChain.length,
     input_tokens: Number(last.input_tokens || 0),
     output_tokens: Number(last.output_tokens || 0),
-    branches: collectConversationBranches(db, historyChain, byId, childrenByParent, seen, false),
+    branches: collectConversationBranches(db, displayChain, byId, childrenByParent, seen, false),
   }
 }
 
@@ -710,10 +754,10 @@ function buildBridgeContextHistoryBranch(
   seen: Set<string>,
 ): ConversationBranch | null {
   if (!visibleRoot || !isBridgeContextBranchContinuationChild(visibleRoot, byId)) return null
-  const parent = byId.get(visibleRoot.parent_session_id || '')
-  if (!parent || seen.has(parent.id)) return null
-  seen.add(parent.id)
-  return buildHistoryBranchFromChain(db, [parent], visibleRoot, byId, childrenByParent, seen)
+  const historyChain = bridgeContextHistoryPathToRoot(visibleRoot, byId)
+  if (!historyChain.length) return null
+  for (const session of historyChain) seen.add(session.id)
+  return buildHistoryBranchFromChain(db, historyChain, visibleRoot, byId, childrenByParent, seen)
 }
 
 function buildCompressionContinuationAlternativeBranches(
@@ -846,7 +890,7 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
       COALESCE(s.cost_status, '') AS cost_status,
       COALESCE(
         (
-          SELECT SUBSTR(REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' '), 1, 80)
+          SELECT REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' ')
           FROM messages m
           WHERE m.session_id = s.id
             AND ${VISIBLE_HUMAN_MESSAGE_SQL}
@@ -854,7 +898,7 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
           LIMIT 1
         ),
         ''
-      ) AS preview,
+      ) AS raw_preview,
       COALESCE((SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id), s.started_at) AS last_active,
       CASE WHEN EXISTS (
         SELECT 1
