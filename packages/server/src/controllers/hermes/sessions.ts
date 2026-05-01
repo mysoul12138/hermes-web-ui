@@ -128,38 +128,6 @@ export async function listConversations(ctx: any) {
   const humanOnly = (ctx.query.humanOnly as string) !== 'false' && ctx.query.humanOnly !== '0'
   const limit = ctx.query.limit ? parseInt(ctx.query.limit as string, 10) : undefined
 
-  if (useLocalSessionStore()) {
-    const profile = getActiveProfileName()
-    const sessions = localListSessions(profile, source, limit && limit > 0 ? limit : 200)
-    const summaries: ConversationSummary[] = sessions.map(s => ({
-      id: s.id,
-      source: s.source,
-      model: s.model,
-      title: s.title,
-      started_at: s.started_at,
-      ended_at: s.ended_at,
-      last_active: s.last_active,
-      message_count: s.message_count,
-      tool_call_count: s.tool_call_count,
-      input_tokens: s.input_tokens,
-      output_tokens: s.output_tokens,
-      cache_read_tokens: s.cache_read_tokens,
-      cache_write_tokens: s.cache_write_tokens,
-      reasoning_tokens: s.reasoning_tokens,
-      billing_provider: s.billing_provider,
-      estimated_cost_usd: s.estimated_cost_usd,
-      actual_cost_usd: s.actual_cost_usd,
-      cost_status: s.cost_status,
-      preview: s.preview,
-      workspace: s.workspace || null,
-      is_active: s.ended_at == null && (Date.now() / 1000 - s.last_active) <= 300,
-      thread_session_count: 1,
-      branch_session_count: 0,
-    }))
-    ctx.body = { sessions: filterPendingDeletedConversationSummaries(summaries) }
-    return
-  }
-
   try {
     const sessions = await listConversationSummariesFromDb({ source, humanOnly, limit })
     ctx.body = { sessions: filterPendingDeletedConversationSummaries(sessions) }
