@@ -358,6 +358,29 @@ function compressionChainRootId(sessionId: string, byId: Map<string, Conversatio
   return current?.id || null
 }
 
+function compressionPathToRoot(session: ConversationSessionRow, byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {
+  const reversed: ConversationSessionRow[] = [session]
+  const seen = new Set<string>()
+  let current: ConversationSessionRow | null = session
+
+  while (current?.parent_session_id && !seen.has(current.id)) {
+    seen.add(current.id)
+    const parent = byId.get(current.parent_session_id)
+    if (!parent || !isCompressionLineageChild(current, byId)) break
+    reversed.push(parent)
+    current = parent
+  }
+
+  return reversed.reverse()
+}
+
+function isLatestCompressionContinuation(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
+  if (!session || session.source === 'tool') return false
+  const path = compressionPathToRoot(session, byId)
+  if (path.length <= 1) return false
+  return collectConversationChain(path[0].id, byId, childrenByParent).at(-1)?.id === session.id
+}
+
 function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
@@ -366,6 +389,8 @@ function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<str
 
 function isVisibleConversationStart(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
   if (!session || session.source === 'tool') return false
+  if (isLatestCompressionContinuation(session, byId, childrenByParent)) return true
+  if (nextContinuationChild(session, byId, childrenByParent)) return false
   return (session.parent_session_id == null || isBranchRoot(session, byId))
     && !isCompressionContinuationChild(session, byId, childrenByParent)
     && !isCompressionLineageChild(session, byId)
@@ -412,13 +437,16 @@ function toSummary(session: ConversationSessionRow): ConversationSummary {
 }
 
 function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSummary | null {
-  const chain = collectConversationChain(rootId, byId, childrenByParent)
-  if (!chain.length || !chain.some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
+  const requestedRoot = byId.get(rootId)
+  const compressionHistory = requestedRoot ? compressionPathToRoot(requestedRoot, byId).slice(0, -1) : []
+  const chain = compressionHistory.length ? [requestedRoot!] : collectConversationChain(rootId, byId, childrenByParent)
+  if (!chain.length || ![...chain, ...compressionHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
   const root = chain[0]
   const last = chain[chain.length - 1]
   const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
   const costStatuses = Array.from(new Set(chain.map(session => safeText(session.cost_status)).filter(Boolean)))
   const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
+    + (compressionHistory.length ? 1 + countConversationBranchSessions(compressionHistory, byId, childrenByParent) : 0)
 
   return {
     ...toSummary(root),
@@ -521,9 +549,17 @@ function collectBranchRoots(chain: ConversationSessionRow[], byId: Map<string, C
   })
 }
 
-function collectConversationBranches(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>()): ConversationBranch[] {
+function collectConversationBranches(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, seen = new Set<string>(), includeCompressionHistory = true): ConversationBranch[] {
+  const promotedCompressionBranches = includeCompressionHistory
+    ? buildCompressionContinuationAlternativeBranches(db, chain[0], byId, childrenByParent, seen)
+    : []
+  const historyBranch = includeCompressionHistory
+    ? buildCompressionHistoryBranch(db, chain[0], byId, childrenByParent, seen)
+    : null
   const roots = collectBranchRoots(chain, byId, childrenByParent)
   const branches: ConversationBranch[] = []
+  if (historyBranch) branches.push(historyBranch)
+  branches.push(...promotedCompressionBranches)
   for (const root of roots) {
     if (seen.has(root.id)) continue
     seen.add(root.id)
@@ -548,6 +584,86 @@ function collectConversationBranches(db: { prepare: (sql: string) => { all: (...
     })
   }
   return branches
+}
+
+function buildCompressionContinuationAlternativeBranches(
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+  visibleRoot: ConversationSessionRow | undefined,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  seen: Set<string>,
+): ConversationBranch[] {
+  if (!visibleRoot) return []
+  const historyChain = compressionPathToRoot(visibleRoot, byId).slice(0, -1)
+  if (!historyChain.length) return []
+
+  const promoted: ConversationBranch[] = []
+  for (const parent of historyChain) {
+    const continuation = nextContinuationChild(parent, byId, childrenByParent, true)
+    const childIds = childrenByParent.get(parent.id) || []
+    for (const childId of childIds) {
+      if (childId === continuation?.id || seen.has(childId)) continue
+      const root = byId.get(childId)
+      if (!root || root.source === 'tool' || root.source !== parent.source) continue
+      if (!isLikelyOrphanContinuation(parent, root)) continue
+
+      seen.add(root.id)
+      const branchChain = collectConversationChain(root.id, byId, childrenByParent, true)
+      const messages = loadVisibleMessagesForSessions(db, branchChain)
+      promoted.push({
+        session_id: root.id,
+        parent_session_id: visibleRoot.id,
+        source: safeText(root.source),
+        model: safeText(root.model),
+        title: root.title ?? null,
+        started_at: Number(root.started_at || 0),
+        ended_at: branchChain[branchChain.length - 1]?.ended_at ?? root.ended_at ?? null,
+        last_active: branchChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(root.last_active || root.started_at || 0)),
+        is_active: branchChain.some(session => session.is_active),
+        messages,
+        visible_count: messages.length,
+        thread_session_count: branchChain.length,
+        input_tokens: branchChain.reduce((sum, session) => sum + Number(session.input_tokens || 0), 0),
+        output_tokens: branchChain.reduce((sum, session) => sum + Number(session.output_tokens || 0), 0),
+        branches: collectConversationBranches(db, branchChain, byId, childrenByParent, seen, false),
+      })
+    }
+  }
+  return promoted
+}
+
+function buildCompressionHistoryBranch(
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+  visibleRoot: ConversationSessionRow | undefined,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  seen: Set<string>,
+): ConversationBranch | null {
+  if (!visibleRoot) return null
+  const historyChain = compressionPathToRoot(visibleRoot, byId).slice(0, -1)
+  if (!historyChain.length) return null
+  const historyRoot = historyChain[0]
+  if (seen.has(historyRoot.id)) return null
+  seen.add(historyRoot.id)
+  const last = historyChain[historyChain.length - 1]
+  const messages = loadVisibleMessagesForSessions(db, historyChain)
+  return {
+    session_id: historyRoot.id,
+    parent_session_id: visibleRoot.id,
+    source: safeText(historyRoot.source),
+    model: safeText(last.model || historyRoot.model),
+    title: historyRoot.title || historyChain.map(session => session.preview).find(Boolean) || historyRoot.id,
+    started_at: Number(historyRoot.started_at || 0),
+    ended_at: last.ended_at ?? null,
+    last_active: historyChain.reduce((max, session) => Math.max(max, Number(session.last_active || session.started_at || 0)), Number(historyRoot.last_active || historyRoot.started_at || 0)),
+    is_active: historyChain.some(session => session.is_active),
+    messages,
+    visible_count: messages.length,
+    thread_session_count: historyChain.length,
+    input_tokens: Number(last.input_tokens || 0),
+    output_tokens: Number(last.output_tokens || 0),
+    branches: collectConversationBranches(db, historyChain, byId, childrenByParent, seen),
+  }
 }
 
 function countBranches(branches: ConversationBranch[]): number {
@@ -693,7 +809,9 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
   } else {
     const session = byId.get(sessionId)
     if (!session || session.source === 'tool') return null
-    const rootId = compressionChainRootId(sessionId, byId, childrenByParent)
+    const rootId = isVisibleConversationStart(session, byId, childrenByParent)
+      ? session.id
+      : compressionChainRootId(sessionId, byId, childrenByParent)
     if (!rootId) return null
     if (!isVisibleConversationStart(byId.get(rootId), byId, childrenByParent)) return null
     chain = collectConversationChain(rootId, byId, childrenByParent)
