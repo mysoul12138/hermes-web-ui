@@ -502,7 +502,7 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
 function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
   return {
     id: s.id,
-    title: s.title || '',
+    title: s.title || s.preview || s.id,
     source: s.source === 'webui-bridge' ? 'tui' : (s.source || undefined),
     messages: [],
     createdAt: Math.round(s.started_at * 1000),
@@ -740,9 +740,10 @@ function applySessionModelOverride(session: Session | undefined | null) {
 // File objects don't serialize and we only need name/type/size/url for display.
 function sanitizeForCache(msgs: Message[]): Message[] {
   return msgs.map(m => {
-    if (!m.attachments?.length) return m
+    const { isStreaming: _isStreaming, ...rest } = m
+    if (!m.attachments?.length) return rest
     return {
-      ...m,
+      ...rest,
       attachments: m.attachments.map(a => ({ id: a.id, name: a.name, type: a.type, size: a.size, url: a.url })),
     }
   })
@@ -929,6 +930,8 @@ export const useChatStore = defineStore('chat', () => {
 
   function normalizedBranchText(value: string | null | undefined): string {
     return (value || '')
+      .replace(/^subagent\s+l\d+\s*:\s*/i, '')
+      .replace(/^subagent\s*:\s*/i, '')
       .toLowerCase()
       .replace(/\s+/g, ' ')
       .replace(/[^\p{L}\p{N}\s]/gu, '')
@@ -936,11 +939,21 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function branchTextKey(branch: ConversationBranch): string {
+    const primaryText = branch.source === 'subagent'
+      ? (
+          branch.messages.find(message => message.role === 'user' && message.content.trim())?.content
+          || branch.title
+          || branch.messages.find(message => message.content.trim())?.content
+          || ''
+        )
+      : (
+          branch.title
+          || branch.messages.find(message => message.role === 'user' && message.content.trim())?.content
+          || branch.messages.find(message => message.content.trim())?.content
+          || ''
+        )
     return normalizedBranchText(
-      branch.title
-        || branch.messages.find(message => message.role === 'user' && message.content.trim())?.content
-        || branch.messages.find(message => message.content.trim())?.content
-        || '',
+      primaryText,
     )
   }
 
@@ -969,12 +982,30 @@ export const useChatStore = defineStore('chat', () => {
     const recentDelta = Math.abs((persisted.last_active || persisted.started_at || 0) - (live.last_active || live.started_at || 0))
 
     if (hasTextMatch) return true
-    if (persistedKey || liveKey) return false
+    if (persistedKey || liveKey) {
+      // During execution, the persisted TUI branch can exist before its
+      // title/visible messages are hydrated. In that window we still need to
+      // collapse the live subagent placeholder into the single closest TUI
+      // branch under the same parent, otherwise the UI shows two child
+      // sessions and later "snaps" when the live placeholder disappears.
+      if (!persistedKey && startedDelta <= 15 && recentDelta <= 120) return true
+      return false
+    }
     return startedDelta <= 5 && (!live.is_active || recentDelta <= 30)
   }
 
   function findLiveBranchMatch(persisted: ConversationBranch, live: ConversationBranch[], usedLiveIds: Set<string>): ConversationBranch | undefined {
-    return live.find(branch => !usedLiveIds.has(branch.session_id) && branchesRepresentSameSubagent(persisted, branch))
+    return live
+      .filter(branch => !usedLiveIds.has(branch.session_id) && branchesRepresentSameSubagent(persisted, branch))
+      .sort((a, b) => {
+        const aStartedDelta = Math.abs((persisted.started_at || 0) - (a.started_at || 0))
+        const bStartedDelta = Math.abs((persisted.started_at || 0) - (b.started_at || 0))
+        if (aStartedDelta !== bStartedDelta) return aStartedDelta - bStartedDelta
+        const aRecentDelta = Math.abs((persisted.last_active || persisted.started_at || 0) - (a.last_active || a.started_at || 0))
+        const bRecentDelta = Math.abs((persisted.last_active || persisted.started_at || 0) - (b.last_active || b.started_at || 0))
+        if (aRecentDelta !== bRecentDelta) return aRecentDelta - bRecentDelta
+        return a.session_id.localeCompare(b.session_id)
+      })[0]
   }
 
   function mergePersistedAndLiveBranch(persisted: ConversationBranch, liveBranch: ConversationBranch): ConversationBranch {
@@ -1010,20 +1041,42 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function normalizePersistedBranchForUi(branch: ConversationBranch): ConversationBranch {
+    if (branch.source === 'subagent') return branch
+    return {
+      ...branch,
+      is_active: false,
+      branches: (branch.branches || []).map(normalizePersistedBranchForUi),
+    }
+  }
+
   function mergeBranchLists(persisted: ConversationBranch[] = [], live: ConversationBranch[] = []): ConversationBranch[] {
     const liveById = new Map(live.map(branch => [branch.session_id, branch]))
     const usedLiveIds = new Set<string>()
     const merged = persisted.map(branch => {
       const liveBranch = liveById.get(branch.session_id)
         || findLiveBranchMatch(branch, live, usedLiveIds)
-      if (!liveBranch) return branch
+      if (!liveBranch) return normalizePersistedBranchForUi(branch)
       usedLiveIds.add(liveBranch.session_id)
       return mergePersistedAndLiveBranch(branch, liveBranch)
     })
     for (const branch of live) {
       if (!usedLiveIds.has(branch.session_id)) merged.push(branch)
     }
-    return merged
+
+    const deduped: ConversationBranch[] = []
+    for (const branch of merged) {
+      if (branch.source === 'subagent') {
+        const persistedMatch = merged.find(candidate =>
+          candidate !== branch
+          && candidate.source !== 'subagent'
+          && branchesRepresentSameSubagent(candidate, branch)
+        )
+        if (persistedMatch) continue
+      }
+      deduped.push(branch)
+    }
+    return deduped
   }
 
   function mergedSessionBranches(sessionId: string): ConversationBranch[] {
@@ -1094,15 +1147,25 @@ export const useChatStore = defineStore('chat', () => {
     const nextSession = branchToSession(branch, rootSessionId)
     const preserveHydratedMessages = hasRealBranchMessageContent(existing.messages)
       && !hasRealBranchMessageContent(nextSession.messages)
+    const preserveActiveHydratedMessages = activeSessionId.value === existing.id
+      && branch.source !== 'subagent'
+      && hasRealBranchMessageContent(existing.messages)
     existing.title = nextSession.title
     existing.source = nextSession.source
     existing.model = nextSession.model
-    if (!preserveHydratedMessages) {
-      existing.messages = nextSession.messages
+    if (!preserveHydratedMessages && !preserveActiveHydratedMessages) {
+      const mergedMessages = existing.messages.length > 0
+        ? mergeServerToolDetails(nextSession.messages, existing.messages)
+        : nextSession.messages
+      if (!messagesEquivalent(existing.messages, mergedMessages)) {
+        existing.messages = mergedMessages
+      }
     }
     existing.createdAt = nextSession.createdAt
     existing.updatedAt = nextSession.updatedAt
-    existing.messageCount = preserveHydratedMessages ? existing.messages.length : nextSession.messageCount
+    existing.messageCount = (preserveHydratedMessages || preserveActiveHydratedMessages)
+      ? existing.messages.length
+      : nextSession.messageCount
     existing.inputTokens = nextSession.inputTokens
     existing.outputTokens = nextSession.outputTokens
     existing.endedAt = nextSession.endedAt
@@ -1173,8 +1236,15 @@ export const useChatStore = defineStore('chat', () => {
       const mappedOnlySubagentStatus = mapped.length > 0 && mapped.every(message => isSubagentStatusText(message.content))
       if (branch.is_active && mappedOnlySubagentStatus) return
       if (mapped.length > 0) {
-        target.messages = withLocalSteeredMessages(mapped, target.messages)
-        target.messageCount = mapped.length
+        const local = target.messages
+        const nextMessages = withLocalSteeredMessages(
+          mergeServerToolDetails(mapped, local),
+          local,
+        )
+        if (!messagesEquivalent(local, nextMessages)) {
+          target.messages = nextMessages
+        }
+        target.messageCount = target.messages.length
         if (branchId === activeSessionId.value) persistActiveMessages()
       }
       applySessionDetail(target, detail)
@@ -1192,15 +1262,42 @@ export const useChatStore = defineStore('chat', () => {
     }
     if (branch) {
       const nextSession = branchToSession(branch, rootSessionId)
+      let seededMessages = nextSession.messages
+      let prefetchedDetail: SessionDetail | null = null
+      try {
+        const detail = await fetchResolvedSessionDetail(branchId)
+        if (detail && detail.messages && !isBridgeFallbackSession(detail)) {
+          prefetchedDetail = detail
+          const mapped = mapHermesMessages(detail.messages)
+          if (mapped.length > 0) {
+            const branchSummaryHasTools = nextSession.messages.some(message => message.role === 'tool')
+            seededMessages = !branchSummaryHasTools
+              ? mapped
+              : (
+                  serverHasBetterToolDetails(nextSession.messages, mapped)
+                    ? mergeServerToolDetails(nextSession.messages, mapped)
+                    : mapped
+                )
+          }
+        }
+      } catch {
+        // Branch session prefetch is best-effort; fall back to branch summary messages.
+      }
       const existing = sessions.value.find(session => session.id === branchId)
       if (existing) {
+        const preserveToolDetails = serverHasBetterToolDetails(seededMessages, existing.messages)
+        const nextMessages = preserveToolDetails
+          ? mergeServerToolDetails(seededMessages, existing.messages)
+          : seededMessages
         existing.title = nextSession.title
         existing.source = nextSession.source
         existing.model = nextSession.model
-        existing.messages = nextSession.messages
+        if (!messagesEquivalent(existing.messages, nextMessages)) {
+          existing.messages = nextMessages
+        }
         existing.createdAt = nextSession.createdAt
         existing.updatedAt = nextSession.updatedAt
-        existing.messageCount = nextSession.messageCount
+        existing.messageCount = existing.messages.length
         existing.endedAt = nextSession.endedAt
         existing.lastActiveAt = nextSession.lastActiveAt
         existing.branchSessionCount = nextSession.branchSessionCount
@@ -1208,9 +1305,13 @@ export const useChatStore = defineStore('chat', () => {
         existing.rootSessionId = nextSession.rootSessionId
         existing.isBranchSession = true
       } else {
+        nextSession.messages = seededMessages
+        nextSession.messageCount = seededMessages.length
         sessions.value.push(nextSession)
       }
       persistSessionsList()
+      await switchSession(branchId, null, prefetchedDetail)
+      return
     }
     await switchSession(branchId)
   }
@@ -1460,7 +1561,9 @@ export const useChatStore = defineStore('chat', () => {
     // Cache lightweight summaries only (messages are cached per-session).
     saveJsonWithLegacy(
       sessionsCacheKey(),
-      sessions.value.map(s => ({ ...s, messages: [] })),
+      sessions.value
+        .filter(s => s.source !== 'subagent')
+        .map(s => ({ ...s, messages: [] })),
       legacySessionsCacheKey(),
     )
   }
@@ -1792,6 +1895,30 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return next
   }
 
+  function messagesEquivalent(a: Message[], b: Message[]): boolean {
+    if (a === b) return true
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i += 1) {
+      const left = a[i]
+      const right = b[i]
+      if (!left || !right) return false
+      if (left.id !== right.id) return false
+      if (left.role !== right.role) return false
+      if ((left.content || '') !== (right.content || '')) return false
+      if ((left.toolName || '') !== (right.toolName || '')) return false
+      if ((left.toolPreview || '') !== (right.toolPreview || '')) return false
+      if ((left.toolArgs || '') !== (right.toolArgs || '')) return false
+      if ((left.toolResult || '') !== (right.toolResult || '')) return false
+      if ((left.toolCallId || '') !== (right.toolCallId || '')) return false
+      if ((left.toolStatus || '') !== (right.toolStatus || '')) return false
+      if ((left.reasoning || '') !== (right.reasoning || '')) return false
+      if (!!left.isStreaming !== !!right.isStreaming) return false
+      if (!!left.queued !== !!right.queued) return false
+      if (!!left.steered !== !!right.steered) return false
+    }
+    return true
+  }
+
   function stopPolling(sid: string) {
     const t = pollTimers.get(sid)
     if (t) {
@@ -1828,7 +1955,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         const { serverIsAhead, serverIsCaughtUp } = compareServerMessages(local, mapped)
         const hasBetterToolDetails = serverHasBetterToolDetails(local, mapped)
         if (serverIsAhead) {
-          target.messages = withLocalSteeredMessages(mapped, target.messages)
+          target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
           if (detail.title && !target.title) target.title = detail.title
           if (sid === activeSessionId.value) persistActiveMessages()
         } else if (hasBetterToolDetails) {
@@ -1862,7 +1989,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
               // the locally streamed assistant reply, end recovery without
               // retreating local state; otherwise commit the server view.
               if (serverIsAhead) {
-                target.messages = withLocalSteeredMessages(mapped, target.messages)
+                target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
                 if (detail.title) target.title = detail.title
                 if (sid === activeSessionId.value) persistActiveMessages()
               } else if (hasBetterToolDetails) {
@@ -1888,9 +2015,10 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     isLoadingSessions.value = true
     try {
       // 从 profile 对应的缓存中恢复，实现 instant render
-      const cachedSessions = loadJsonWithFallback<Session[]>(sessionsCacheKey(), legacySessionsCacheKey())
+      const cachedSessions = (loadJsonWithFallback<Session[]>(sessionsCacheKey(), legacySessionsCacheKey()) || [])
+        .filter(session => session.source !== 'subagent')
       const cachedBranchMetaIndex = loadBranchSessionMetaIndex()
-      if (cachedSessions?.length) {
+      if (cachedSessions.length) {
         cachedSessions.forEach(session => {
           applyBranchMeta(session, cachedBranchMetaIndex[session.id], cachedSessions, true)
           applySessionModelOverride(session)
@@ -2028,7 +2156,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       const mapped = mapHermesMessages(detail.messages || [])
       const { serverIsAhead } = compareServerMessages(target.messages, mapped)
       if (serverIsAhead) {
-        target.messages = withLocalSteeredMessages(mapped, target.messages)
+        target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
         persistActiveMessages()
       } else if (serverHasBetterToolDetails(target.messages, mapped)) {
         target.messages = mergeServerToolDetails(target.messages, mapped)
@@ -2478,7 +2606,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     return session
   }
 
-  async function switchSession(sessionId: string, focusId?: string | null) {
+  async function switchSession(sessionId: string, focusId?: string | null, prefetchedDetail: SessionDetail | null = null) {
     clearThinkingObservationFor(sessionId)
     activeSessionId.value = sessionId
     focusMessageId.value = focusId ?? null
@@ -2504,7 +2632,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (needsBlockingLoad) isLoadingMessages.value = true
 
     try {
-      const detail = await fetchResolvedSessionDetail(sessionId)
+      const detail = prefetchedDetail ?? await fetchResolvedSessionDetail(sessionId)
       if (detail && detail.messages) {
         if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)
@@ -2517,9 +2645,15 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         const local = activeSession.value.messages
         const { serverIsAhead } = compareServerMessages(local, mapped)
         if (serverIsAhead) {
-          activeSession.value.messages = withLocalSteeredMessages(mapped, activeSession.value.messages)
+          const nextMessages = withLocalSteeredMessages(mergeServerToolDetails(mapped, activeSession.value.messages), activeSession.value.messages)
+          if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
+            activeSession.value.messages = nextMessages
+          }
         } else if (serverHasBetterToolDetails(local, mapped)) {
-          activeSession.value.messages = mergeServerToolDetails(activeSession.value.messages, mapped)
+          const nextMessages = mergeServerToolDetails(activeSession.value.messages, mapped)
+          if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
+            activeSession.value.messages = nextMessages
+          }
         }
         void refreshSessionBranches(rootSessionIdFor(sessionId))
         if (isSessionLive(sessionId) || readInFlight(sessionId)) {

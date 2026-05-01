@@ -770,6 +770,7 @@ describe('Chat Store', () => {
 
     const persisted = JSON.parse(window.localStorage.getItem(sessionMessagesKey('sess-1')) || '[]')
     expect(persisted.some((message: any) => message.content === 'background answer')).toBe(true)
+    expect(persisted.some((message: any) => message.isStreaming)).toBe(false)
   })
 
   it('queues busy input and sends it after the current run completes', async () => {
@@ -1170,6 +1171,527 @@ describe('Chat Store', () => {
     expect(toolMessage?.toolPreview).toContain('packages/client/src/stores/hermes/chat.ts')
   })
 
+  it('preserves local tool detail when a caught-up server snapshot is less detailed', async () => {
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, 'sess-tool-merge')
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: 'sess-tool-merge',
+          title: 'Tool merge',
+          source: 'api_server',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ]),
+    )
+    window.localStorage.setItem(
+      sessionMessagesKey('sess-tool-merge'),
+      JSON.stringify([
+        { id: 'u1', role: 'user', content: 'check status', timestamp: 1 },
+        {
+          id: 't1',
+          role: 'tool',
+          content: '',
+          timestamp: 2,
+          toolName: 'terminal',
+          toolPreview: 'git status --short',
+          toolArgs: JSON.stringify({ command: 'git status --short' }),
+          toolResult: JSON.stringify({ output: 'M packages/client/src/stores/hermes/chat.ts', exit_code: 0 }),
+          toolStatus: 'done',
+        },
+      ]),
+    )
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([makeSummary('sess-tool-merge', 'Tool merge')])
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail('sess-tool-merge', [
+      {
+        id: 1,
+        session_id: 'sess-tool-merge',
+        role: 'user',
+        content: 'check status',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000000,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 2,
+        session_id: 'sess-tool-merge',
+        role: 'assistant',
+        content: 'done',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000001,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 3,
+        session_id: 'sess-tool-merge',
+        role: 'tool',
+        content: '',
+        tool_call_id: 'call_1',
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1710000002,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+    ]))
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshActiveSession()
+
+    const toolMessage = store.messages.find(message => message.role === 'tool')
+    expect(toolMessage?.toolName).toBe('terminal')
+    expect(toolMessage?.toolArgs).toContain('"command":"git status --short"')
+    expect(toolMessage?.toolResult).toContain('packages/client/src/stores/hermes/chat.ts')
+  })
+
+  it('keeps branch tool details when branch metadata refresh is less detailed', async () => {
+    const rootId = 'root-tool-branch'
+    const branchId = 'branch-tool-detail'
+    const detailedToolArgs = JSON.stringify({ command: 'git status --short' })
+    const detailedToolResult = JSON.stringify({ output: 'M packages/client/src/stores/hermes/chat.ts', exit_code: 0 })
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: rootId,
+          title: 'Root',
+          source: 'tui',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+          branchSessionCount: 1,
+        },
+        {
+          id: branchId,
+          title: 'Branch task',
+          source: 'tui',
+          messages: [
+            { id: 'u1', role: 'user', content: 'Branch task', timestamp: 2 },
+            { id: 'a1', role: 'assistant', content: 'Working', timestamp: 3 },
+            {
+              id: 't1',
+              role: 'tool',
+              content: '',
+              timestamp: 4,
+              toolName: 'terminal',
+              toolPreview: 'git status --short',
+              toolArgs: detailedToolArgs,
+              toolResult: detailedToolResult,
+              toolStatus: 'done',
+            },
+          ],
+          createdAt: 2,
+          updatedAt: 4,
+          parentSessionId: rootId,
+          rootSessionId: rootId,
+          isBranchSession: true,
+        },
+      ]),
+    )
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Branch task',
+        started_at: 1710000002,
+        ended_at: null,
+        last_active: 1710000003,
+        is_active: false,
+        messages: [
+          { id: 1, session_id: branchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+          { id: 2, session_id: branchId, role: 'assistant', content: 'Working', timestamp: 1710000003 },
+          { id: 3, session_id: branchId, role: 'tool', content: '', timestamp: 1710000004 },
+        ],
+        visible_count: 3,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(rootId, []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshSessionBranches(rootId)
+
+    const branchSession = store.sessions.find(session => session.id === branchId)
+    const toolMessage = branchSession?.messages.find(message => message.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolPreview: 'git status --short',
+      toolArgs: detailedToolArgs,
+      toolResult: detailedToolResult,
+      toolStatus: 'done',
+    })
+  })
+
+  it('preserves branch tool details when switching into a branch backed by less detailed branch messages', async () => {
+    const rootId = 'root-switch-tool-branch'
+    const branchId = 'branch-switch-tool-detail'
+    const detailedToolArgs = JSON.stringify({ command: 'git status --short' })
+    const detailedToolResult = JSON.stringify({ output: 'M packages/client/src/stores/hermes/chat.ts', exit_code: 0 })
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: rootId,
+          title: 'Root',
+          source: 'tui',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+          branchSessionCount: 1,
+        },
+        {
+          id: branchId,
+          title: 'Branch task',
+          source: 'tui',
+          messages: [
+            { id: 'u1', role: 'user', content: 'Branch task', timestamp: 2 },
+            { id: 'a1', role: 'assistant', content: 'Working', timestamp: 3 },
+            {
+              id: 't1',
+              role: 'tool',
+              content: '',
+              timestamp: 4,
+              toolName: 'terminal',
+              toolPreview: 'git status --short',
+              toolArgs: detailedToolArgs,
+              toolResult: detailedToolResult,
+              toolStatus: 'done',
+              toolCallId: 'call_1',
+            },
+          ],
+          createdAt: 2,
+          updatedAt: 4,
+          parentSessionId: rootId,
+          rootSessionId: rootId,
+          isBranchSession: true,
+        },
+      ]),
+    )
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Branch task',
+        started_at: 1710000002,
+        ended_at: null,
+        last_active: 1710000003,
+        is_active: false,
+        messages: [
+          { id: 1, session_id: branchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+          { id: 2, session_id: branchId, role: 'assistant', content: 'Working', timestamp: 1710000003 },
+        ],
+        visible_count: 2,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === rootId) return makeDetail(rootId, [])
+      if (id === branchId) return null
+      return null
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshSessionBranches(rootId)
+    await store.switchBranchSession(rootId, branchId)
+
+    const branchSession = store.sessions.find(session => session.id === branchId)
+    const toolMessage = branchSession?.messages.find(message => message.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolPreview: 'git status --short',
+      toolArgs: detailedToolArgs,
+      toolResult: detailedToolResult,
+      toolStatus: 'done',
+      toolCallId: 'call_1',
+    })
+  })
+
+  it('keeps full branch detail when switching into a branch with equivalent fetched detail', async () => {
+    const rootId = 'root-branch-equivalent'
+    const branchId = 'branch-equivalent'
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: rootId,
+          title: 'Root',
+          source: 'tui',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+          branchSessionCount: 1,
+        },
+        {
+          id: branchId,
+          title: 'Branch task',
+          source: 'tui',
+          messages: [
+            { id: 'u1', role: 'user', content: 'Branch task', timestamp: 2 },
+            { id: 'a1', role: 'assistant', content: 'Working', timestamp: 3 },
+            {
+              id: 't1',
+              role: 'tool',
+              content: '',
+              timestamp: 4,
+              toolName: 'terminal',
+              toolPreview: 'git status --short',
+              toolArgs: JSON.stringify({ command: 'git status --short' }),
+              toolResult: JSON.stringify({ output: 'ok', exit_code: 0 }),
+              toolStatus: 'done',
+              toolCallId: 'call_1',
+            },
+            { id: 'a2', role: 'assistant', content: 'Done', timestamp: 5 },
+          ],
+          createdAt: 2,
+          updatedAt: 5,
+          parentSessionId: rootId,
+          rootSessionId: rootId,
+          isBranchSession: true,
+        },
+      ]),
+    )
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Branch task',
+        started_at: 1710000002,
+        ended_at: null,
+        last_active: 1710000005,
+        is_active: false,
+        messages: [
+          { id: 1, session_id: branchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+          { id: 2, session_id: branchId, role: 'assistant', content: 'Working', timestamp: 1710000003 },
+        ],
+        visible_count: 2,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === rootId) return makeDetail(rootId, [])
+      if (id === branchId) {
+        return makeDetail(branchId, [
+          {
+            id: 1,
+            session_id: branchId,
+            role: 'user',
+            content: 'Branch task',
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 1710000002,
+            token_count: null,
+            finish_reason: null,
+            reasoning: null,
+          },
+          {
+            id: 2,
+            session_id: branchId,
+            role: 'assistant',
+            content: '',
+            tool_call_id: null,
+            tool_calls: [{ id: 'call_1', function: { name: 'terminal', arguments: '{"command":"git status --short"}' } }],
+            tool_name: null,
+            timestamp: 1710000003,
+            token_count: null,
+            finish_reason: 'tool_calls',
+            reasoning: null,
+          },
+          {
+            id: 3,
+            session_id: branchId,
+            role: 'tool',
+            content: '{"output":"ok","exit_code":0}',
+            tool_call_id: 'call_1',
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 1710000004,
+            token_count: null,
+            finish_reason: null,
+            reasoning: null,
+          },
+          {
+            id: 4,
+            session_id: branchId,
+            role: 'assistant',
+            content: 'Done',
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 1710000005,
+            token_count: null,
+            finish_reason: 'stop',
+            reasoning: null,
+          },
+        ])
+      }
+      return null
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshSessionBranches(rootId)
+    const branchSession = store.sessions.find(session => session.id === branchId)!
+    await store.switchBranchSession(rootId, branchId)
+
+    expect(store.activeSession?.messages).toHaveLength(3)
+    const toolMessage = store.activeSession?.messages.find(message => message.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      toolName: 'terminal',
+      toolArgs: JSON.stringify({ command: 'git status --short' }),
+      toolResult: JSON.stringify({ output: 'ok', exit_code: 0 }),
+      toolCallId: 'call_1',
+      toolStatus: 'done',
+    })
+    expect(store.activeSession?.messages.map(message => message.role)).toEqual(['user', 'tool', 'assistant'])
+  })
+
+  it('uses a prefetched branch detail to switch directly into full branch content', async () => {
+    const rootId = 'root-prefetch-branch'
+    const branchId = 'branch-prefetch-detail'
+    let branchFetches = 0
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: rootId,
+          title: 'Root',
+          source: 'tui',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 2,
+          branchSessionCount: 1,
+        },
+      ]),
+    )
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Branch task',
+        started_at: 1710000002,
+        ended_at: null,
+        last_active: 1710000005,
+        is_active: false,
+        messages: [
+          { id: 1, session_id: branchId, role: 'user', content: 'Branch task', timestamp: 1710000002 },
+        ],
+        visible_count: 1,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === rootId) return makeDetail(rootId, [])
+      if (id === branchId) {
+        branchFetches += 1
+        return makeDetail(branchId, [
+          {
+            id: 1,
+            session_id: branchId,
+            role: 'user',
+            content: 'Branch task',
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 1710000002,
+            token_count: null,
+            finish_reason: null,
+            reasoning: null,
+          },
+          {
+            id: 2,
+            session_id: branchId,
+            role: 'assistant',
+            content: 'Done',
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 1710000003,
+            token_count: null,
+            finish_reason: 'stop',
+            reasoning: null,
+          },
+        ])
+      }
+      return null
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshSessionBranches(rootId)
+    await store.switchBranchSession(rootId, branchId)
+
+    expect(branchFetches).toBeGreaterThanOrEqual(1)
+    expect(store.activeSession?.messages.map(message => message.content)).toEqual(['Branch task', 'Done'])
+  })
+
   it('does not mark server sessions live from last_active alone', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-22T19:00:00.000Z'))
@@ -1433,6 +1955,281 @@ describe('Chat Store', () => {
     ])
   })
 
+  it('does not replace active branch messages when branch hydration returns equivalent content', async () => {
+    const rootId = 'root-stable-branch'
+    const branchId = 'tui-stable-branch'
+    const detailMessages = [
+      { id: 1, session_id: branchId, role: 'user', content: 'Review branch', timestamp: 1710000100 },
+      {
+        id: 2,
+        session_id: branchId,
+        role: 'assistant',
+        content: 'Full hydrated markdown **rendered** answer\n\n'.repeat(80),
+        timestamp: 1710000101,
+      },
+    ]
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([
+      {
+        id: rootId,
+        title: 'Root',
+        source: 'tui',
+        messages: [],
+        createdAt: 1,
+        updatedAt: 2,
+        branchSessionCount: 1,
+      },
+    ]))
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(rootId, 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Review branch',
+        started_at: 1710000100,
+        ended_at: 1710000102,
+        last_active: 1710000102,
+        is_active: false,
+        visible_count: detailMessages.length,
+        thread_session_count: 1,
+        messages: detailMessages,
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === branchId) return makeDetail(branchId, detailMessages)
+      return makeDetail(rootId, [])
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.refreshSessionBranches(rootId)
+    await store.switchBranchSession(rootId, branchId)
+
+    const messagesRef = store.messages
+    const assistantRef = store.messages[1]
+
+    await store.refreshSessionBranches(rootId)
+
+    expect(store.activeSessionId).toBe(branchId)
+    expect(store.messages).toBe(messagesRef)
+    expect(store.messages[1]).toBe(assistantRef)
+  })
+
+  it('does not downgrade the active hydrated branch to branch summary while full detail is pending', async () => {
+    const rootId = 'root-summary-downgrade'
+    const branchId = 'tui-summary-downgrade'
+    const fullMessages = [
+      { id: 'u1', role: 'user' as const, content: 'Review branch', timestamp: 1710000100000 },
+      {
+        id: 'a1',
+        role: 'assistant' as const,
+        content: 'Full hydrated markdown **rendered** answer\n\n'.repeat(80),
+        timestamp: 1710000101000,
+      },
+    ]
+    let resolveDetail: (value: any) => void = () => {}
+    const pendingDetail = new Promise(resolve => {
+      resolveDetail = resolve
+    })
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: branchId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Review branch',
+        started_at: 1710000100,
+        ended_at: 1710000102,
+        last_active: 1710000102,
+        is_active: false,
+        visible_count: 2,
+        thread_session_count: 1,
+        messages: [
+          { id: 1, session_id: branchId, role: 'user', content: 'Review branch', timestamp: 1710000100 },
+          { id: 2, session_id: branchId, role: 'assistant', content: 'Summary only', timestamp: 1710000101 },
+        ],
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockReturnValue(pendingDetail)
+
+    const store = useChatStore()
+    const branchSession = {
+      id: branchId,
+      title: 'Review branch',
+      source: 'tui',
+      messages: fullMessages,
+      createdAt: 1710000100000,
+      updatedAt: 1710000101000,
+      parentSessionId: rootId,
+      rootSessionId: rootId,
+      isBranchSession: true,
+    }
+    store.sessions = [
+      {
+        id: rootId,
+        title: 'Root',
+        source: 'tui',
+        messages: [],
+        createdAt: 1710000000000,
+        updatedAt: 1710000102000,
+        branchSessionCount: 1,
+      },
+      branchSession,
+    ]
+    store.activeSessionId = branchId
+    store.activeSession = branchSession
+
+    const messagesRef = store.messages
+    const assistantRef = store.messages[1]
+    const refresh = store.refreshSessionBranches(rootId)
+    await flushPromises()
+
+    expect(store.messages).toBe(messagesRef)
+    expect(store.messages[1]).toBe(assistantRef)
+    expect(store.messages[1].content).toContain('Full hydrated markdown')
+    expect(store.messages[1].content).not.toBe('Summary only')
+
+    resolveDetail(makeDetail(branchId, [
+      { id: 1, session_id: branchId, role: 'user', content: 'Review branch', timestamp: 1710000100 },
+      { id: 2, session_id: branchId, role: 'assistant', content: fullMessages[1].content, timestamp: 1710000101 },
+    ]))
+    await refresh
+  })
+
+  it('merges a live subagent branch into its persisted tui branch when the live title has a Subagent prefix', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('review the branch')
+    const rootId = store.activeSessionId!
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: 'tui-branch-1',
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Review branch',
+        started_at: Date.now() / 1000,
+        ended_at: null,
+        last_active: Date.now() / 1000,
+        is_active: true,
+        visible_count: 0,
+        thread_session_count: 1,
+        messages: [],
+        branches: [],
+      }],
+    })
+
+    onEvent?.({
+      event: 'subagent.start',
+      subagent_id: 'subagent-prefixed',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Starting review',
+      depth: 1,
+    })
+    await flushPromises()
+
+    // Simulate a live branch title carrying the historical "Subagent L1:" prefix.
+    const liveBranch = store.sessionBranches(rootId).find(branch => branch.session_id === 'subagent-prefixed')
+    if (liveBranch) liveBranch.title = 'Subagent L1: Review branch'
+
+    onEvent?.({
+      event: 'subagent.progress',
+      subagent_id: 'subagent-prefixed',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Inspecting files',
+      depth: 1,
+    })
+    await flushPromises()
+
+    expect(store.sessionBranches(rootId).map(branch => branch.session_id)).toEqual(['tui-branch-1'])
+  })
+
+  it('merges a live subagent branch into a persisted tui branch that has no title or visible messages yet', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('review the branch')
+    const rootId = store.activeSessionId!
+    const startedAt = Date.now() / 1000
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: 'tui-branch-empty',
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: null,
+        started_at: startedAt,
+        ended_at: null,
+        last_active: startedAt + 2,
+        is_active: true,
+        visible_count: 0,
+        thread_session_count: 1,
+        messages: [],
+        branches: [],
+      }],
+    })
+
+    onEvent?.({
+      event: 'subagent.start',
+      subagent_id: 'subagent-empty-persisted',
+      parent_id: rootId,
+      goal: 'Review branch',
+      text: 'Starting review',
+      depth: 1,
+    })
+    await flushPromises()
+
+    expect(store.sessionBranches(rootId).map(branch => branch.session_id)).toEqual(['tui-branch-empty'])
+  })
+
   it('does not merge a live subagent placeholder into a persisted branch from another parent', async () => {
     let onEvent: ((event: Record<string, any>) => void) | null = null
     mockChatApi.streamRunEvents.mockImplementation((
@@ -1539,6 +2336,51 @@ describe('Chat Store', () => {
     expect(store.sessions.map(session => session.id)).toEqual(['root'])
     expect(JSON.parse(window.localStorage.getItem(branchSessionMetaKey) || '{}')).toEqual({})
     expect(store.sessionBranchCount('root')).toBe(0)
+  })
+
+  it('does not restore cached subagent sessions on reload', async () => {
+    window.localStorage.setItem(
+      SESSIONS_CACHE_KEY,
+      JSON.stringify([
+        {
+          id: 'root',
+          title: 'Root',
+          source: 'tui',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 1,
+          branchSessionCount: 1,
+        },
+        {
+          id: 'subagent-ghost',
+          title: 'Subagent L1: Review branch',
+          source: 'subagent',
+          messages: [],
+          createdAt: 2,
+          updatedAt: 2,
+          isBranchSession: true,
+          parentSessionId: 'root',
+          rootSessionId: 'root',
+        },
+      ]),
+    )
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary('root', 'Root'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: 'root',
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail('root', []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.sessions.some(session => session.id === 'subagent-ghost')).toBe(false)
   })
 
   it('shows and responds to live clarify prompts', async () => {

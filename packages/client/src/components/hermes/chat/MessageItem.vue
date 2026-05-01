@@ -6,7 +6,7 @@ import { useMessage } from "naive-ui";
 import { downloadFile } from "@/api/hermes/download";
 import { copyToClipboard } from "@/utils/clipboard";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
-import { parseThinking, countThinkingChars } from "@/utils/thinking-parser";
+import { parseThinking, isPlaceholderThinkingText } from "@/utils/thinking-parser";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
 import { getApiKey, getBaseUrlValue } from "@/api/client";
@@ -82,23 +82,44 @@ const isLongUserMessage = computed(() => {
   );
 });
 
+const displayReasoning = computed(() => {
+  const reasoning = props.message.reasoning?.trim() || "";
+  if (!reasoning || isPlaceholderThinkingText(reasoning)) return "";
+  return reasoning;
+});
+
+const visibleThinkingSegments = computed(() =>
+  parsedThinking.value.segments.filter((segment) => !isPlaceholderThinkingText(segment)),
+);
+
+const visiblePendingThinking = computed(() => {
+  const pending = parsedThinking.value.pending;
+  if (!pending || isPlaceholderThinkingText(pending)) return null;
+  return pending;
+});
+
 // 优先使用来自 reasoning 字段/事件的思考文本；否则回退到从 content 解析的 <think> 标签。
 // 若两者共存，则拼接展示（罕见，但保持信息不丢）。
-const hasReasoningField = computed(() => !!(props.message.reasoning && props.message.reasoning.length > 0));
+const hasReasoningField = computed(() => displayReasoning.value.length > 0);
 
-const hasThinking = computed(() => hasReasoningField.value || parsedThinking.value.hasThinking);
+const hasThinking = computed(() =>
+  hasReasoningField.value
+  || visibleThinkingSegments.value.length > 0
+  || visiblePendingThinking.value !== null,
+);
 
 const thinkingFullText = computed(() => {
   const parts: string[] = [];
-  if (props.message.reasoning) parts.push(props.message.reasoning);
-  parts.push(...parsedThinking.value.segments);
-  if (parsedThinking.value.pending) parts.push(parsedThinking.value.pending);
+  if (displayReasoning.value) parts.push(displayReasoning.value);
+  parts.push(...visibleThinkingSegments.value);
+  if (visiblePendingThinking.value) parts.push(visiblePendingThinking.value);
   return parts.join("\n\n");
 });
 
 const thinkingCharCount = computed(() => {
-  let count = countThinkingChars(parsedThinking.value);
-  if (props.message.reasoning) count += props.message.reasoning.length;
+  let count = visibleThinkingSegments.value.reduce((sum, segment) => sum + [...segment].length, 0);
+  if (visiblePendingThinking.value) count += [...visiblePendingThinking.value].length;
+  if (displayReasoning.value) count += displayReasoning.value.length;
   return count;
 });
 
@@ -300,6 +321,15 @@ const hasAttachments = computed(
   () => (props.message.attachments?.length ?? 0) > 0,
 );
 
+const hasVisibleMessageSurface = computed(() => {
+  if (props.message.role !== "assistant") return true;
+  return (
+    hasAttachments.value
+    || hasThinking.value
+    || parsedThinking.value.body.trim().length > 0
+  );
+});
+
 const hasToolDetails = computed(
   () => !!(
     props.message.toolArgs ||
@@ -426,6 +456,7 @@ const renderedToolResult = computed(() => {
     </template>
     <template v-else>
       <div
+        v-if="message.role !== 'assistant' || hasVisibleMessageSurface"
         class="msg-body"
         :class="{
           'msg-body--outbound': message.role === 'user',
@@ -440,6 +471,7 @@ const renderedToolResult = computed(() => {
         />
         <div class="msg-content" :class="[message.role, { 'msg-content--outbound': message.role === 'user' }]">
           <div
+            v-if="hasVisibleMessageSurface"
             class="message-bubble"
             :class="{
               system: isSystem,
@@ -539,7 +571,7 @@ const renderedToolResult = computed(() => {
               />
             </div>
           </div>
-          <div class="message-meta">
+          <div v-if="message.role !== 'assistant' || hasVisibleMessageSurface" class="message-meta">
             <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
             <span v-else-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
             <div class="message-meta-hover">

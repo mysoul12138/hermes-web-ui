@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseThinking, countThinkingChars, detectThinkingBoundary } from '@/utils/thinking-parser'
+import { parseThinking, countThinkingChars, detectThinkingBoundary, isPlaceholderThinkingText } from '@/utils/thinking-parser'
 
 describe('parseThinking', () => {
   it('splits a single closed <think> block from body', () => {
@@ -181,5 +181,20 @@ describe('detectThinkingBoundary', () => {
     )
     expect(r.startedAtBoundary).toBe(false)
     expect(r.endedAtBoundary).toBe(false)
+  })
+})
+
+describe('isPlaceholderThinkingText', () => {
+  it('recognizes provider placeholder thinking phrases', () => {
+    expect(isPlaceholderThinkingText('(´･_･`) synthesizing...')).toBe(true)
+    expect(isPlaceholderThinkingText('ಠ╭╮ಠ musing...')).toBe(true)
+    expect(isPlaceholderThinkingText('ಠ╭╮ಠ musings...')).toBe(true)
+    expect(isPlaceholderThinkingText('( •_•)>⌐■-■ deliberating…')).toBe(true)
+    expect(isPlaceholderThinkingText('🧠 analyzing…')).toBe(true)
+    expect(isPlaceholderThinkingText('⏳ reviewing...')).toBe(true)
+  })
+
+  it('keeps real reasoning visible', () => {
+    expect(isPlaceholderThinkingText('I need to compare the two release timestamps before summarizing.')).toBe(false)
   })
 })

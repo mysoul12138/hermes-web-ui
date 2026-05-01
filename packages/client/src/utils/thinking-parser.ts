@@ -10,6 +10,45 @@ export interface ParseOptions {
 }
 
 const TAG_RE = /<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/gi
+const PLACEHOLDER_THINKING_PATTERNS = [
+  /^think(?:ing)?$/i,
+  /^reason(?:ing)?$/i,
+  /^synthes(?:is|izing|ising|ized|ised)?$/i,
+  /^generat(?:e|ing|ed|or|ion|ions)?$/i,
+  /^mus(?:e|ing|ings?)?$/i,
+  /^ponder(?:ing|ed|s)?$/i,
+  /^deliberat(?:e|ing|ed|ion|ions)?$/i,
+  /^process(?:ing|ed|es)?$/i,
+  /^analy(?:s(?:is|ing|ed)?|z(?:e|ing|ed|er|ers)?|sis)$/i,
+  /^reflect(?:ing|ed|ion|ions|ive|ively|s)?$/i,
+  /^consider(?:ing|ed|ation|ations|s)?$/i,
+  /^evaluat(?:e|ing|ed|ion|ions|or|ors)?$/i,
+  /^review(?:ing|ed|s)?$/i,
+  /^inspect(?:ing|ed|ion|ions|or|ors|s)?$/i,
+  /^investigat(?:e|ing|ed|ion|ions|or|ors)?$/i,
+  /^explor(?:e|ing|ed|ation|ations|er|ers|atory)?$/i,
+  /^organi[sz](?:e|ing|ed|ation|ations|er|ers)?$/i,
+  /^plan(?:ning|ned|s|ner|ners)?$/i,
+  /^draft(?:ing|ed|s|er|ers)?$/i,
+  /^compos(?:e|ing|ed|er|ers|ition|itions)?$/i,
+  /^summari[sz](?:e|ing|ed|ation|ations)?$/i,
+  /^search(?:ing|ed|es|er|ers|s)?$/i,
+  /^scan(?:ning|ned|s|ner|ners)?$/i,
+  /^comput(?:e|ing|ed|ation|ations|er|ers)?$/i,
+  /^calculat(?:e|ing|ed|ion|ions|or|ors)?$/i,
+  /^infer(?:ring|red|ence|ences|s)?$/i,
+  /^prepar(?:e|ing|ed|ation|ations|atory)?$/i,
+  /^check(?:ing|ed|s|list|lists)?$/i,
+  /^brainstorm(?:ing|ed|s)?$/i,
+  /^contemplat(?:e|ing|ed|ion|ions)?$/i,
+  /^assess(?:ing|ed|ment|ments|or|ors)?$/i,
+  /^pars(?:e|ing|ed|er|ers|able)?$/i,
+  /^examin(?:e|ing|ed|ation|ations|er|ers)?$/i,
+  /^deriv(?:e|ing|ed|ation|ations)?$/i,
+  /^formulat(?:e|ing|ed|ion|ions|or|ors)?$/i,
+  /^strategiz(?:e|ing|ed|ation|ations)?$/i,
+  /^outlin(?:e|ing|ed|es|er|ers)?$/i,
+]
 
 const PLACEHOLDER_PREFIX = '\u0000THKCODE'
 const PLACEHOLDER_SUFFIX = '\u0000'
@@ -46,6 +85,26 @@ function restoreCodeBlocks(text: string, blocks: string[]): string {
   }
 
   return restored
+}
+
+export function isPlaceholderThinkingText(text: string): boolean {
+  const cleaned = text
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[^\p{L}\p{N}\s.]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+
+  if (!cleaned) return true
+  if (/^[.\s…]+$/.test(cleaned)) return true
+
+  const words = cleaned
+    .split(' ')
+    .map(word => word.replace(/[.]+$/g, ''))
+    .filter(Boolean)
+
+  if (words.length === 0 || words.length > 3) return false
+  return words.some(word => PLACEHOLDER_THINKING_PATTERNS.some(pattern => pattern.test(word)))
 }
 
 export function parseThinking(content: string, opts: ParseOptions): ParsedThinking {

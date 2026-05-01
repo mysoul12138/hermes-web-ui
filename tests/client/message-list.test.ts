@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
@@ -81,5 +82,48 @@ describe('MessageList', () => {
 
     expect(wrapper.find('.message-list-stage').exists()).toBe(true)
     expect(wrapper.find('.message-list-stack').exists()).toBe(true)
+  })
+
+  it('does not force historical branch sessions to the bottom on first switch', async () => {
+    const store = useChatStore()
+    store.activeSessionId = 'root'
+    store.activeSession = {
+      id: 'root',
+      title: 'Root',
+      source: 'tui',
+      messages: [
+        { id: 'r1', role: 'assistant', content: 'root', timestamp: Date.now() },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+
+    const wrapper = mount(MessageList)
+    const list = wrapper.find('.message-list').element as HTMLElement
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 1200 })
+    Object.defineProperty(list, 'clientHeight', { configurable: true, value: 400 })
+
+    list.scrollTop = 300
+    await wrapper.find('.message-list').trigger('scroll')
+
+    store.activeSessionId = 'branch'
+    store.activeSession = {
+      id: 'branch',
+      title: 'Branch',
+      source: 'tui',
+      isBranchSession: true,
+      rootSessionId: 'root',
+      parentSessionId: 'root',
+      messages: [
+        { id: 'b1', role: 'user', content: 'branch task', timestamp: Date.now() },
+        { id: 'b2', role: 'assistant', content: 'long branch content', timestamp: Date.now() },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    await nextTick()
+    await nextTick()
+
+    expect(list.scrollTop).toBe(0)
   })
 })

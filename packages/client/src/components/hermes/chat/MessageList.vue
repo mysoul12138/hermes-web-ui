@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import MessageItem from "./MessageItem.vue";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
-import { parseThinking } from "@/utils/thinking-parser";
+import { parseThinking, isPlaceholderThinkingText } from "@/utils/thinking-parser";
 import { getApiKey, getBaseUrlValue } from "@/api/client";
 
 const chatStore = useChatStore();
@@ -13,6 +13,8 @@ const { t } = useI18n();
 const listRef = ref<HTMLElement>();
 const isAtLatest = ref(true);
 const LATEST_THRESHOLD = 120;
+const scrollPositions = new Map<string, number>();
+let scrollRequestToken = 0;
 
 const displayMessages = computed(() => chatStore.displayMessages);
 
@@ -36,12 +38,12 @@ const streamingAssistantHasVisibleOutput = computed(() => {
     .reverse()
     .find((msg) => msg.role === "assistant" && msg.isStreaming);
   if (!streamingAssistant) return false;
-  if (streamingAssistant.reasoning?.trim()) return true;
+  if (streamingAssistant.reasoning?.trim() && !isPlaceholderThinkingText(streamingAssistant.reasoning)) return true;
   const parsed = parseThinking(streamingAssistant.content || "", { streaming: true });
   return (
     parsed.body.trim().length > 0 ||
-    parsed.segments.some((segment) => segment.trim().length > 0) ||
-    (parsed.pending?.trim().length ?? 0) > 0
+    parsed.segments.some((segment) => segment.trim().length > 0 && !isPlaceholderThinkingText(segment)) ||
+    (!!parsed.pending?.trim().length && !isPlaceholderThinkingText(parsed.pending))
   );
 });
 
@@ -59,9 +61,28 @@ function updateLatestState() {
   isAtLatest.value = isNearBottom();
 }
 
-function scrollToBottom(smooth = false) {
+function rememberSessionScroll(sessionId: string | null | undefined) {
+  const el = listRef.value;
+  if (!el || !sessionId) return;
+  scrollPositions.set(sessionId, el.scrollTop);
+}
+
+function restoreScrollTop(top: number, sessionId = chatStore.activeSessionId) {
+  const token = ++scrollRequestToken;
   nextTick(() => {
     const el = listRef.value;
+    if (token !== scrollRequestToken || sessionId !== chatStore.activeSessionId) return;
+    if (!el) return;
+    el.scrollTop = Math.max(0, Math.min(top, el.scrollHeight));
+    updateLatestState();
+  });
+}
+
+function scrollToBottom(smooth = false, sessionId = chatStore.activeSessionId) {
+  const token = ++scrollRequestToken;
+  nextTick(() => {
+    const el = listRef.value;
+    if (token !== scrollRequestToken || sessionId !== chatStore.activeSessionId) return;
     if (el) {
       if (smooth && typeof el.scrollTo === "function") {
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
@@ -73,8 +94,10 @@ function scrollToBottom(smooth = false) {
   });
 }
 
-function scrollToMessage(messageId: string) {
+function scrollToMessage(messageId: string, sessionId = chatStore.activeSessionId) {
+  const token = ++scrollRequestToken;
   nextTick(() => {
+    if (token !== scrollRequestToken || sessionId !== chatStore.activeSessionId) return;
     const el = document.getElementById(`message-${messageId}`);
     if (el) {
       el.scrollIntoView({ block: 'center' });
@@ -84,6 +107,7 @@ function scrollToMessage(messageId: string) {
 }
 
 function handleScroll() {
+  rememberSessionScroll(chatStore.activeSessionId);
   updateLatestState();
 }
 
@@ -95,13 +119,22 @@ onMounted(() => {
 // Scroll to bottom on session switch
 watch(
   () => chatStore.activeSessionId,
-  (id) => {
+  (id, previousId) => {
+    rememberSessionScroll(previousId);
     if (!id) return;
     if (chatStore.focusMessageId) {
-      nextTick(() => scrollToMessage(chatStore.focusMessageId!));
+      scrollToMessage(chatStore.focusMessageId, id);
       return;
     }
-    nextTick(() => scrollToBottom());
+    if (scrollPositions.has(id)) {
+      restoreScrollTop(scrollPositions.get(id)!, id);
+      return;
+    }
+    if (chatStore.activeSession?.isBranchSession && !chatStore.isSessionLive(id)) {
+      restoreScrollTop(0, id);
+      return;
+    }
+    scrollToBottom(false, id);
   },
   { immediate: true },
 );
@@ -142,12 +175,14 @@ watch(
     ].join(":");
   },
   () => {
+    const last = chatStore.messages[chatStore.messages.length - 1];
+    if (!chatStore.isRunActive && !last?.isStreaming) return;
     if (chatStore.focusMessageId) {
       scrollToMessage(chatStore.focusMessageId);
       return;
     }
     if (!isAtLatest.value) return;
-    scrollToBottom();
+    scrollToBottom(false, chatStore.activeSessionId);
   },
 );
 </script>

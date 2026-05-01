@@ -424,6 +424,48 @@ describe('conversations service', () => {
     expect(detail).toBeNull()
   })
 
+  it('keeps tool-only conversations visible in human-only mode', async () => {
+    exportSessionsRawMock.mockResolvedValue([
+      {
+        id: 'tool-only-root',
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: 100,
+        ended_at: 101,
+        end_reason: null,
+        message_count: 1,
+        tool_call_count: 1,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+        messages: [
+          { id: 1, session_id: 'tool-only-root', role: 'tool', content: '{"output":"ok"}', timestamp: 100 },
+        ],
+      },
+    ])
+
+    const mod = await import('../../packages/server/src/services/hermes/conversations')
+    const summaries = await mod.listConversationSummaries({ humanOnly: true })
+    const detail = await mod.getConversationDetail('tool-only-root', { humanOnly: true })
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      id: 'tool-only-root',
+      source: 'tui',
+      tool_call_count: 1,
+    })
+    expect(detail).not.toBeNull()
+    expect(detail?.session_id).toBe('tool-only-root')
+  })
+
   it('caches raw exports briefly and normalizes structured message content', async () => {
     exportSessionsRawMock.mockResolvedValue([
       {

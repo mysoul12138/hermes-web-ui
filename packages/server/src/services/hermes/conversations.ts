@@ -464,6 +464,7 @@ function countConversationBranchSessions(chain: ConversationSession[], byId: Map
 
 function hasVisibleHumanMessages(sessions: HermesSessionFull[]): boolean {
   return visibleMessagesForSessions(sessions).length > 0
+    || sessions.some(session => Number(session.tool_call_count || 0) > 0)
     || sessions.some(session => (session as ConversationSession).is_live_tui_process)
 }
 
@@ -622,7 +623,7 @@ export async function getConversationDetail(sessionId: string, options: Conversa
   const chain = collectConversationChain(sessionId, byId, childrenByParent)
   const messages = visibleMessagesForSessions(chain)
   const branches = collectConversationBranches(chain, byId, childrenByParent)
-  if (!messages.length && !branches.length && !chain.some(session => session.is_live_tui_process)) return null
+  if (!messages.length && !branches.length && !chain.some(session => session.is_live_tui_process || Number(session.tool_call_count || 0) > 0)) return null
   return {
     session_id: sessionId,
     messages,

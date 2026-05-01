@@ -131,6 +131,10 @@ function isSessionTreeActive(sessionId: string): boolean {
 }
 
 function handleBranchClick(parentSessionId: string, branchId: string) {
+  if (isBranchSelected(parentSessionId, branchId)) {
+    if (mobileQuery?.matches) showSessions.value = false
+    return
+  }
   void chatStore.switchBranchSession(parentSessionId, branchId)
   if (mobileQuery?.matches) showSessions.value = false
 }
@@ -422,6 +426,7 @@ async function handleRenameConfirm() {
                 :class="{ active: isBranchSelected(s.id, branch.session_id), live: isBranchLive(branch) }"
                 :style="{ paddingLeft: `${18 + Math.min(branch.depth, 4) * 14}px` }"
                 @click="handleBranchClick(s.id, branch.session_id)"
+                @contextmenu="handleContextMenu($event, branch.session_id)"
               >
                 <span class="session-branch-title-row">
                   <span v-if="isBranchLive(branch)" class="session-branch-active-indicator" aria-hidden="true">
@@ -477,6 +482,7 @@ async function handleRenameConfirm() {
                   :class="{ active: isBranchSelected(s.id, branch.session_id), live: isBranchLive(branch) }"
                   :style="{ paddingLeft: `${18 + Math.min(branch.depth, 4) * 14}px` }"
                   @click="handleBranchClick(s.id, branch.session_id)"
+                  @contextmenu="handleContextMenu($event, branch.session_id)"
                 >
                   <span class="session-branch-title-row">
                     <span v-if="isBranchLive(branch)" class="session-branch-active-indicator" aria-hidden="true">

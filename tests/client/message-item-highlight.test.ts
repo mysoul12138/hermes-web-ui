@@ -116,6 +116,53 @@ describe('MessageItem tool details', () => {
     expect(wrapper.find('.tool-details code.hljs').text()).toContain('terminal npm run build')
   })
 
+  it('hides provider placeholder reasoning and empty placeholder bubbles while still showing real reasoning', async () => {
+    const placeholderReasoningWrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-placeholder-reasoning',
+          role: 'assistant',
+          content: '',
+          reasoning: 'ಠ╭╮ಠ musing...',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(placeholderReasoningWrapper.find('.thinking-block').exists()).toBe(false)
+    expect(placeholderReasoningWrapper.find('.message-bubble').exists()).toBe(false)
+
+    const placeholderContentWrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-placeholder-content',
+          role: 'assistant',
+          content: '<think>ಠ╭╮ಠ musing...</think>',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(placeholderContentWrapper.find('.thinking-block').exists()).toBe(false)
+    expect(placeholderContentWrapper.find('.message-bubble').exists()).toBe(false)
+
+    const realReasoningWrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-real-reasoning',
+          role: 'assistant',
+          content: 'Final answer',
+          reasoning: 'I need to compare the two release timestamps before summarizing.',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(realReasoningWrapper.find('.thinking-block').exists()).toBe(true)
+    await realReasoningWrapper.find('.thinking-header').trigger('click')
+    expect(realReasoningWrapper.find('.thinking-body').text()).toContain('I need to compare')
+  })
+
   it('marks outbound user messages so they can be right-aligned and use palette option 5', () => {
     const wrapper = mount(MessageItem, {
       props: {

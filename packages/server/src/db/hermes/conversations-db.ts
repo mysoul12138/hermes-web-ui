@@ -358,9 +358,17 @@ function compressionChainRootId(sessionId: string, byId: Map<string, Conversatio
   return current?.id || null
 }
 
+function isBranchRoot(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
+  if (!session?.parent_session_id) return false
+  const parent = byId.get(session.parent_session_id)
+  return !!parent && parent.end_reason === 'branched' && timingMatchesParent(parent, session)
+}
+
 function isVisibleConversationStart(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
   if (!session || session.source === 'tool') return false
-  return !isCompressionContinuationChild(session, byId, childrenByParent) && !isCompressionLineageChild(session, byId)
+  return (session.parent_session_id == null || isBranchRoot(session, byId))
+    && !isCompressionContinuationChild(session, byId, childrenByParent)
+    && !isCompressionLineageChild(session, byId)
 }
 
 function collectConversationChain(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow[] {
@@ -405,7 +413,7 @@ function toSummary(session: ConversationSessionRow): ConversationSummary {
 
 function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSummary | null {
   const chain = collectConversationChain(rootId, byId, childrenByParent)
-  if (!chain.length || !chain.some(session => session.has_visible_messages)) return null
+  if (!chain.length || !chain.some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
   const root = chain[0]
   const last = chain[chain.length - 1]
   const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
@@ -699,7 +707,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     const branches = humanOnly ? collectConversationBranches(db, chain, byId, childrenByParent) : []
 
     if (!messages.length) {
-      if (humanOnly && !branches.length && !chain.some(session => session.is_live_tui_process)) return null
+      if (humanOnly && !branches.length && !chain.some(session => session.is_live_tui_process || Number(session.tool_call_count || 0) > 0)) return null
       const detail: ConversationDetail = {
         session_id: sessionId,
         messages: [],

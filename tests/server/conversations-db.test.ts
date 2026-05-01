@@ -515,6 +515,66 @@ describe('conversation DB service', () => {
     expect(detail?.messages.map((message: any) => message.content)).toEqual(['Branch prompt', 'Branch answer'])
   })
 
+  it('does not expose active child tui branches as top-level conversations', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'gpt-5.5',
+      title: 'Root',
+      started_at: 100,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'child',
+      parent_session_id: 'root',
+      source: 'tui',
+      model: 'gpt-5.5',
+      title: 'Child branch',
+      started_at: 101,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, { id: 1, session_id: 'root', role: 'user', content: 'Root prompt', timestamp: 100 })
+    insertMessage(db, { id: 2, session_id: 'root', role: 'assistant', content: 'Root answer', timestamp: 100.5 })
+    insertMessage(db, { id: 3, session_id: 'child', role: 'user', content: 'Child prompt', timestamp: 101 })
+    insertMessage(db, { id: 4, session_id: 'child', role: 'assistant', content: 'Child answer', timestamp: 101.5 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
+  })
+
   it('keeps non-compression child sessions visible instead of hiding them under their parent', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
@@ -571,11 +631,10 @@ describe('conversation DB service', () => {
 
     const mod = await import('../../packages/server/src/db/hermes/conversations-db')
     const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
-    expect(summaries.map((summary: any) => summary.id)).toEqual(['review-child', 'parent'])
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['parent'])
 
     const detail = await mod.getConversationDetailFromDb('review-child', { humanOnly: true })
-    expect(detail?.thread_session_count).toBe(1)
-    expect(detail?.messages.map((message: any) => message.content)).toEqual(['Review prompt', 'Review answer'])
+    expect(detail).toBeNull()
   })
 
   it('excludes synthetic-only roots from human-only summaries and details', async () => {
@@ -620,6 +679,59 @@ describe('conversation DB service', () => {
 
     expect(summaries).toEqual([])
     expect(detail).toBeNull()
+  })
+
+  it('keeps tool-only conversations visible in human-only mode', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'tool-only-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 101,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: 'tool-only-root',
+      role: 'tool',
+      content: '{"output":"ok"}',
+      tool_call_id: 'call-1',
+      tool_calls: null,
+      tool_name: 'terminal',
+      timestamp: 100,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    const detail = await mod.getConversationDetailFromDb('tool-only-root', { humanOnly: true })
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      id: 'tool-only-root',
+      source: 'tui',
+      tool_call_count: 1,
+    })
+    expect(detail).not.toBeNull()
+    expect(detail?.session_id).toBe('tool-only-root')
   })
 
   it('returns an empty detail payload for non-human-only sessions with no visible messages', async () => {
