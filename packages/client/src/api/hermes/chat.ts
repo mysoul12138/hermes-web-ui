@@ -97,6 +97,17 @@ export interface RunEvent {
   api_calls?: number
   cost_usd?: number
   duration_seconds?: number
+  message_count?: number
+  token_count?: number
+  compressed?: boolean
+  llmCompressed?: boolean
+  totalMessages?: number
+  resultMessages?: number
+  beforeTokens?: number
+  afterTokens?: number
+  summaryTokens?: number
+  verbatimCount?: number
+  compressedStartIndex?: number
   usage?: {
     input_tokens: number
     output_tokens: number
@@ -144,6 +155,8 @@ const NAMED_RUN_EVENTS = [
   'usage.updated',
   'tool.start',
   'tool.complete',
+  'compression.started',
+  'compression.completed',
   'run.started',
   'run.completed',
   'run.failed',

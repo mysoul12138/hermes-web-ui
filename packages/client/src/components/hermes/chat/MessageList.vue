@@ -51,6 +51,42 @@ const showRunPlaceholder = computed(() =>
   chatStore.isRunActive && !streamingAssistantHasVisibleOutput.value,
 );
 
+const compressionNoticeClass = computed(() => ({
+  "compression-notice--started": chatStore.activeCompression?.status === "started",
+  "compression-notice--completed": chatStore.activeCompression?.status === "completed",
+  "compression-notice--failed": chatStore.activeCompression?.status === "failed",
+}));
+
+const compressionNoticeTitle = computed(() => {
+  const state = chatStore.activeCompression;
+  if (!state) return "";
+  if (state.status === "started") return t("chat.compressionStarted");
+  if (state.status === "failed") return t("chat.compressionFailed");
+  return t("chat.compressionCompleted");
+});
+
+const compressionNoticeMeta = computed(() => {
+  const state = chatStore.activeCompression;
+  if (!state) return "";
+  if (state.beforeTokens != null && state.afterTokens != null) {
+    return t("chat.compressionTokenStats", {
+      before: state.beforeTokens.toLocaleString(),
+      after: state.afterTokens.toLocaleString(),
+    });
+  }
+  if (state.tokenCount != null) {
+    return t("chat.compressionPreparingStats", {
+      tokens: state.tokenCount.toLocaleString(),
+    });
+  }
+  if (state.messageCount != null) {
+    return t("chat.compressionMessageStats", {
+      count: state.messageCount.toLocaleString(),
+    });
+  }
+  return "";
+});
+
 function isNearBottom(threshold = LATEST_THRESHOLD): boolean {
   const el = listRef.value;
   if (!el) return true;
@@ -195,6 +231,37 @@ watch(
           <span class="branch-view-title">{{ chatStore.activeSession.title || chatStore.activeSession.id }}</span>
           <span class="branch-view-meta">{{ t("chat.branchActiveHint") }}</span>
         </div>
+        <div
+          v-if="chatStore.activeCompression"
+          class="compression-notice"
+          :class="compressionNoticeClass"
+          aria-live="polite"
+        >
+          <span class="compression-notice-icon" aria-hidden="true">
+            <svg v-if="chatStore.activeCompression.status === 'started'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2v4" />
+              <path d="M12 18v4" />
+              <path d="m4.93 4.93 2.83 2.83" />
+              <path d="m16.24 16.24 2.83 2.83" />
+              <path d="M2 12h4" />
+              <path d="M18 12h4" />
+              <path d="m4.93 19.07 2.83-2.83" />
+              <path d="m16.24 7.76 2.83-2.83" />
+            </svg>
+            <svg v-else-if="chatStore.activeCompression.status === 'failed'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 9v4" />
+              <path d="M12 17h.01" />
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            </svg>
+            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          </span>
+          <span class="compression-notice-copy">
+            <span class="compression-notice-title">{{ compressionNoticeTitle }}</span>
+            <span v-if="compressionNoticeMeta" class="compression-notice-meta">{{ compressionNoticeMeta }}</span>
+          </span>
+        </div>
         <div v-if="displayMessages.length === 0" class="empty-state">
           <img src="/logo.png" :alt="assistantName" class="empty-logo" />
           <p>{{ t("chat.emptyState") }}</p>
@@ -331,6 +398,92 @@ watch(
 .branch-view-meta {
   color: $text-muted;
   font-size: 11px;
+}
+
+.compression-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(100%, 820px);
+  border: 1px solid rgba(20, 184, 166, 0.22);
+  border-left: 3px solid rgba(20, 184, 166, 0.72);
+  border-radius: 10px;
+  background: rgba(20, 184, 166, 0.07);
+  color: $text-primary;
+  padding: 10px 12px;
+
+  .dark & {
+    border-color: rgba(45, 212, 191, 0.2);
+    border-left-color: rgba(45, 212, 191, 0.76);
+    background: rgba(45, 212, 191, 0.08);
+  }
+}
+
+.compression-notice--failed {
+  border-color: rgba(245, 158, 11, 0.22);
+  border-left-color: rgba(245, 158, 11, 0.75);
+  background: rgba(245, 158, 11, 0.07);
+
+  .dark & {
+    border-color: rgba(251, 191, 36, 0.2);
+    border-left-color: rgba(251, 191, 36, 0.72);
+    background: rgba(251, 191, 36, 0.08);
+  }
+}
+
+.compression-notice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  color: #0f766e;
+  background: rgba(20, 184, 166, 0.12);
+  flex-shrink: 0;
+
+  .dark & {
+    color: #5eead4;
+    background: rgba(45, 212, 191, 0.1);
+  }
+}
+
+.compression-notice--failed .compression-notice-icon {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+
+  .dark & {
+    color: #fcd34d;
+    background: rgba(251, 191, 36, 0.1);
+  }
+}
+
+.compression-notice--started .compression-notice-icon svg {
+  animation: compression-spin 1.1s linear infinite;
+}
+
+.compression-notice-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.compression-notice-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.compression-notice-meta {
+  color: $text-muted;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+@keyframes compression-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .run-placeholder {

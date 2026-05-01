@@ -76,6 +76,21 @@ export interface Session {
   isBranchSession?: boolean
 }
 
+export interface CompressionState {
+  status: 'started' | 'completed' | 'failed'
+  startedAt: number
+  updatedAt: number
+  messageCount?: number
+  tokenCount?: number
+  beforeTokens?: number
+  afterTokens?: number
+  totalMessages?: number
+  resultMessages?: number
+  summaryTokens?: number
+  verbatimCount?: number
+  error?: string
+}
+
 function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
@@ -147,6 +162,15 @@ function commandFromToolPayload(value: unknown): string | undefined {
 
 function firstPresent(...values: unknown[]): unknown {
   return values.find(value => value != null)
+}
+
+function numberFromRunEvent(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
 }
 
 function uniqueStrings(values: unknown[]): string[] {
@@ -544,6 +568,7 @@ const LEGACY_STORAGE_KEY = 'hermes_active_session'
 const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
 const POLL_INTERVAL_MS = 2000
+const COMPRESSION_NOTICE_TTL_MS = 15_000
 function isBridgeFallbackSession(detail: { source?: string; messages?: unknown[] } | null | undefined): boolean {
   return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
 }
@@ -795,8 +820,10 @@ export const useChatStore = defineStore('chat', () => {
   const dbBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const liveBranchesBySession = ref<Record<string, ConversationBranch[]>>({})
   const subagentActivityBySession = ref<Record<string, Record<string, ConversationMessage[]>>>({})
+  const compressionBySession = ref<Record<string, CompressionState>>({})
   const approvalPollers = new Map<string, ReturnType<typeof setInterval>>()
   const clarifyPollers = new Map<string, ReturnType<typeof setInterval>>()
+  const compressionNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
 
   const activeSession = ref<Session | null>(null)
@@ -807,6 +834,13 @@ export const useChatStore = defineStore('chat', () => {
     return mergedSessionBranches(sid)
   })
   const displayMessages = computed<Message[]>(() => messages.value)
+  const activeCompression = computed<CompressionState | null>(() => {
+    const sid = activeSessionId.value
+    if (!sid) return null
+    return compressionBySession.value[sid]
+      || (activeSession.value?.rootSessionId ? compressionBySession.value[activeSession.value.rootSessionId] : null)
+      || null
+  })
   const activeApproval = computed<ApprovalState | null>(() => {
     const sid = activeSessionId.value
     if (!sid) return null
@@ -1632,6 +1666,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     if (persistentSessionId && persistentSessionId !== sid) {
       setItemBestEffort(bridgePersistentSessionKey(sid), persistentSessionId)
       copySessionModelOverride(sid, persistentSessionId)
+      copyCompressionState(sid, persistentSessionId)
     }
   }
 
@@ -1646,6 +1681,55 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   function readBridgePersistentSessionId(sid: string) {
     return localStorage.getItem(bridgePersistentSessionKey(sid)) || null
+  }
+
+  function clearCompressionNoticeTimer(sid: string) {
+    const existing = compressionNoticeTimers.get(sid)
+    if (!existing) return
+    clearTimeout(existing)
+    compressionNoticeTimers.delete(sid)
+  }
+
+  function scheduleCompressionNoticeClear(sid: string) {
+    clearCompressionNoticeTimer(sid)
+    compressionNoticeTimers.set(sid, setTimeout(() => {
+      const next = { ...compressionBySession.value }
+      delete next[sid]
+      compressionBySession.value = next
+      compressionNoticeTimers.delete(sid)
+    }, COMPRESSION_NOTICE_TTL_MS))
+  }
+
+  function setCompressionForSession(sid: string, state: CompressionState) {
+    compressionBySession.value = {
+      ...compressionBySession.value,
+      [sid]: state,
+    }
+    if (state.status === 'started') {
+      clearCompressionNoticeTimer(sid)
+    } else {
+      scheduleCompressionNoticeClear(sid)
+    }
+  }
+
+  function copyCompressionState(fromSid: string, toSid: string) {
+    const state = compressionBySession.value[fromSid]
+    if (!state || fromSid === toSid) return
+    setCompressionForSession(toSid, state)
+  }
+
+  function setCompressionState(sid: string, patch: Partial<CompressionState> & { status: CompressionState['status'] }) {
+    const now = Date.now()
+    const prev = compressionBySession.value[sid]
+    const next: CompressionState = {
+      ...prev,
+      startedAt: prev?.startedAt ?? now,
+      updatedAt: now,
+      ...patch,
+    }
+    setCompressionForSession(sid, next)
+    const persistentSid = readBridgePersistentSessionId(sid)
+    if (persistentSid && persistentSid !== sid) setCompressionForSession(persistentSid, next)
   }
 
   function clearInFlight(sid: string) {
@@ -2247,6 +2331,29 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         switch (evt.event) {
           case 'run.started':
             break
+
+          case 'compression.started': {
+            setCompressionState(sid, {
+              status: 'started',
+              messageCount: numberFromRunEvent(evt.message_count),
+              tokenCount: numberFromRunEvent(evt.token_count),
+            })
+            break
+          }
+
+          case 'compression.completed': {
+            setCompressionState(sid, {
+              status: evt.error ? 'failed' : 'completed',
+              totalMessages: numberFromRunEvent(evt.totalMessages),
+              resultMessages: numberFromRunEvent(evt.resultMessages),
+              beforeTokens: numberFromRunEvent(evt.beforeTokens),
+              afterTokens: numberFromRunEvent(evt.afterTokens),
+              summaryTokens: numberFromRunEvent(evt.summaryTokens),
+              verbatimCount: numberFromRunEvent(evt.verbatimCount),
+              error: typeof evt.error === 'string' ? evt.error : undefined,
+            })
+            break
+          }
 
           case 'subagent.spawn_requested':
           case 'subagent.start':
@@ -3383,6 +3490,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     focusMessageId,
     messages,
     displayMessages,
+    activeCompression,
     activeBranches,
     isStreaming,
     isRunActive,

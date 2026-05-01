@@ -396,6 +396,48 @@ describe('Chat Store', () => {
     expect(latestToolMessage?.toolArgs).toBeUndefined()
   })
 
+  it('tracks context compression progress from run events', async () => {
+    const store = useChatStore()
+
+    await flushPromises()
+    await store.sendMessage('summarize the long context')
+    await flushPromises()
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    expect(typeof onEvent).toBe('function')
+
+    onEvent({
+      event: 'compression.started',
+      message_count: 24,
+      token_count: 120000,
+    })
+
+    expect(store.activeCompression).toMatchObject({
+      status: 'started',
+      messageCount: 24,
+      tokenCount: 120000,
+    })
+
+    onEvent({
+      event: 'compression.completed',
+      compressed: true,
+      totalMessages: 24,
+      resultMessages: 8,
+      beforeTokens: 120000,
+      afterTokens: 18000,
+      summaryTokens: 4200,
+    })
+
+    expect(store.activeCompression).toMatchObject({
+      status: 'completed',
+      totalMessages: 24,
+      resultMessages: 8,
+      beforeTokens: 120000,
+      afterTokens: 18000,
+      summaryTokens: 4200,
+    })
+  })
+
   it('backfills live tool details from session polling without replacing streamed text', async () => {
     vi.useFakeTimers()
 
