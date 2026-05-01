@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { NModal, NForm, NFormItem, NInput, NButton, NSelect, NInputNumber, useMessage } from 'naive-ui'
-import type { CreateJobRequest, UpdateJobRequest } from '@/api/hermes/jobs'
 import { useJobsStore } from '@/stores/hermes/jobs'
+import {
+  buildJobUpdateRequest,
+  getJob,
+  jobRepeatToEditValue,
+  scheduleToEditableInput,
+} from '@/api/hermes/jobs'
+import type { CreateJobRequest, Job } from '@/api/hermes/jobs'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -49,32 +55,19 @@ const targetOptions = computed(() => [
   { label: t('jobs.local'), value: 'local' },
 ])
 
-const originalSchedule = ref<{ kind: string; expr: string; display: string } | null>(null)
-const originalHiddenFields = ref<Pick<UpdateJobRequest, 'skills' | 'skill' | 'model' | 'provider' | 'base_url' | 'script' | 'enabled'>>({})
+const originalJob = ref<Job | null>(null)
 
 onMounted(async () => {
   if (props.jobId) {
     try {
-      const { getJob } = await import('@/api/hermes/jobs')
       const job = await getJob(props.jobId)
+      originalJob.value = job
       formData.value = {
         name: job.name,
-        schedule: typeof job.schedule === 'string' ? job.schedule : (job.schedule?.expr || job.schedule_display || ''),
+        schedule: scheduleToEditableInput(job.schedule, job.schedule_display || ''),
         prompt: job.prompt,
         deliver: job.deliver || 'origin',
-        repeat_times: typeof job.repeat === 'number' ? job.repeat : (typeof job.repeat === 'object' ? job.repeat.times : null),
-      }
-      if (typeof job.schedule === 'object' && job.schedule) {
-        originalSchedule.value = job.schedule
-      }
-      originalHiddenFields.value = {
-        skills: job.skills,
-        skill: job.skill,
-        model: job.model,
-        provider: job.provider,
-        base_url: job.base_url,
-        script: job.script,
-        enabled: job.enabled,
+        repeat_times: jobRepeatToEditValue(job.repeat),
       }
     } catch (e: any) {
       message.error(t('jobs.loadFailed') + ': ' + e.message)
@@ -95,22 +88,25 @@ async function handleSave() {
   loading.value = true
   try {
     if (isEdit.value) {
-      const payload: UpdateJobRequest = {
-        name: formData.value.name,
-        prompt: formData.value.prompt,
-        deliver: formData.value.deliver,
-        repeat: formData.value.repeat_times ?? undefined,
-        ...originalHiddenFields.value,
+      if (!originalJob.value) {
+        message.error(t('jobs.loadFailed'))
+        return
       }
-      if (originalSchedule.value) {
-        payload.schedule = {
-          kind: originalSchedule.value.kind,
-          expr: formData.value.schedule,
-          display: formData.value.schedule,
-        }
-      } else {
-        payload.schedule = formData.value.schedule
+      const payload = buildJobUpdateRequest(originalJob.value, formData.value)
+      if (Object.keys(payload).length === 0) {
+        message.success(t('jobs.jobUpdated'))
+        emit('saved')
+        return
       }
+      Object.assign(payload, {
+        skills: originalJob.value.skills,
+        skill: originalJob.value.skill,
+        model: originalJob.value.model,
+        provider: originalJob.value.provider,
+        base_url: originalJob.value.base_url,
+        script: originalJob.value.script,
+        enabled: originalJob.value.enabled,
+      })
       await jobsStore.updateJob(props.jobId!, payload)
       message.success(t('jobs.jobUpdated'))
     } else {

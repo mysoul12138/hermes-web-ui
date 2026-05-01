@@ -67,6 +67,8 @@ export default {
   // 사이드바
   sidebar: {
     chat: '채팅',
+    search: '검색',
+    history: '기록',
     jobs: '예약 작업',
     models: '모델',
     profiles: '프로필',
@@ -584,6 +586,21 @@ export default {
 
   // 변경 이력
   changelog: {
+
+    new_0_5_5_1: '🎉 노동절 감사합니다! 오늘은 쉬니까 양해 부탁드립니다',
+    new_0_5_5_2: 'Hermes 세션 기록 페이지 추가',
+    new_0_5_5_3: '기록 페이지는 독립적으로 세션 관리',
+    new_0_5_5_4: '기록 페이지는 첫 번째 CLI 세션 자동 선택',
+    new_0_5_5_5: 'HistoryMessageList 컴포넌트 추가',
+    new_0_5_5_6: '빈 메시지와 toolName 없는 tool 메시지 필터링',
+    new_0_5_5_7: 'localStorage 세션 캐시 제거, 백엔드에서 직접 가져오기',
+    new_0_5_5_8: '프로필 전환 최적화',
+    new_0_5_4_2: 'Fix concurrent chat sessions event cross-talk with WebSocket event routing refactoring',
+    new_0_5_4_3: 'Fix cron job edit payloads with partial PATCH to support long prompt name-only edits',
+    new_0_5_4_4: 'Fix web terminal Hermes CLI availability after Docker deployment',
+    new_0_5_4_5: 'Add workspace dialog i18n translations for title and improve session persistence',
+    new_0_5_4_6: 'Support code block copy feedback with user notifications',
+    new_0_5_4_7: 'Align usage analytics with Hermes state DB schema',
     new_0_5_3_1: 'Improve reasoning process display with persistence across page refreshes',
     new_0_5_3_2: 'Optimize stringified array format parsing to extract thinking/text/tool_calls',
     new_0_5_3_3: 'Improve log display by removing ellipsis and showing full content',

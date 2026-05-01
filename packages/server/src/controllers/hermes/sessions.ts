@@ -128,6 +128,38 @@ export async function listConversations(ctx: any) {
   const humanOnly = (ctx.query.humanOnly as string) !== 'false' && ctx.query.humanOnly !== '0'
   const limit = ctx.query.limit ? parseInt(ctx.query.limit as string, 10) : undefined
 
+  if (useLocalSessionStore()) {
+    const profile = getActiveProfileName()
+    const sessions = localListSessions(profile, source, limit && limit > 0 ? limit : 200)
+    const summaries: ConversationSummary[] = sessions.map(s => ({
+      id: s.id,
+      source: s.source,
+      model: s.model,
+      title: s.title,
+      started_at: s.started_at,
+      ended_at: s.ended_at,
+      last_active: s.last_active,
+      message_count: s.message_count,
+      tool_call_count: s.tool_call_count,
+      input_tokens: s.input_tokens,
+      output_tokens: s.output_tokens,
+      cache_read_tokens: s.cache_read_tokens,
+      cache_write_tokens: s.cache_write_tokens,
+      reasoning_tokens: s.reasoning_tokens,
+      billing_provider: s.billing_provider,
+      estimated_cost_usd: s.estimated_cost_usd,
+      actual_cost_usd: s.actual_cost_usd,
+      cost_status: s.cost_status,
+      preview: s.preview,
+      workspace: s.workspace || null,
+      is_active: s.ended_at == null && (Date.now() / 1000 - s.last_active) <= 300,
+      thread_session_count: 1,
+      branch_session_count: 0,
+    }))
+    ctx.body = { sessions: filterPendingDeletedConversationSummaries(summaries) }
+    return
+  }
+
   try {
     const sessions = await listConversationSummariesFromDb({ source, humanOnly, limit })
     ctx.body = { sessions: filterPendingDeletedConversationSummaries(sessions) }
@@ -197,6 +229,26 @@ export async function list(ctx: any) {
 
   const sessions = await hermesCli.listSessions(source, limit)
   ctx.body = { sessions: filterPendingDeletedSessions(sessions) }
+}
+
+/**
+ * List Hermes sessions only (exclude api_server source)
+ * GET /api/hermes/sessions/hermes?source=&limit=
+ */
+export async function listHermesSessions(ctx: any) {
+  const source = (ctx.query.source as string) || undefined
+  const limit = ctx.query.limit ? parseInt(ctx.query.limit as string, 10) : undefined
+
+  try {
+    const sessions = await listSessionSummaries(source, limit && limit > 0 ? limit : 2000)
+    ctx.body = { sessions: filterPendingDeletedSessions(sessions.filter(s => s.source !== 'api_server' && s.source !== 'cron')) }
+    return
+  } catch (err) {
+    logger.warn(err, 'Hermes Session DB: summary query failed, falling back to CLI')
+  }
+
+  const sessions = await hermesCli.listSessions(source, limit)
+  ctx.body = { sessions: filterPendingDeletedSessions(sessions.filter(s => s.source !== 'api_server')) }
 }
 
 export async function search(ctx: any) {
@@ -280,6 +332,27 @@ export async function get(ctx: any) {
       ctx.body = { session: createBridgeSessionFallback(ctx.params.id) }
       return
     }
+    ctx.status = 404
+    ctx.body = { error: 'Session not found' }
+    return
+  }
+  ctx.body = { session }
+}
+
+/**
+ * Get Hermes session detail only (exclude api_server source)
+ * GET /api/hermes/sessions/hermes/:id
+ */
+export async function getHermesSession(ctx: any) {
+
+  const session = await hermesCli.getSession(ctx.params.id)
+  if (!session) {
+    ctx.status = 404
+    ctx.body = { error: 'Session not found' }
+    return
+  }
+  // Filter out api_server sessions
+  if (session.source === 'api_server') {
     ctx.status = 404
     ctx.body = { error: 'Session not found' }
     return
@@ -379,6 +452,29 @@ export async function rename(ctx: any) {
   ctx.body = { ok: true }
 }
 
+export async function setWorkspace(ctx: any) {
+  const { workspace } = ctx.request.body as { workspace?: string }
+  if (workspace !== undefined && workspace !== null && typeof workspace !== 'string') {
+    ctx.status = 400
+    ctx.body = { error: 'workspace must be a string or null' }
+    return
+  }
+  if (useLocalSessionStore()) {
+    const { updateSession, getSession, createSession } = await import('../../db/hermes/session-store')
+    const { getActiveProfileName } = await import('../../services/hermes/hermes-profile')
+    const id = ctx.params.id
+    // Create session if it doesn't exist yet (user may set workspace before sending first message)
+    if (!getSession(id)) {
+      createSession({ id, profile: getActiveProfileName(), title: '' })
+    }
+    updateSession(id, { workspace: workspace || null } as any)
+    ctx.body = { ok: true }
+    return
+  }
+  ctx.status = 501
+  ctx.body = { error: 'Workspace setting only supported in local session store mode' }
+}
+
 export async function contextLength(ctx: any) {
   const profile = (ctx.query.profile as string) || undefined
   ctx.body = { context_length: getModelContextLength(profile) }
@@ -464,6 +560,51 @@ export async function usageStats(ctx: any) {
     period_days: days,
     model_usage: [...modelMap.values()].sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens)),
     daily_usage: [...dayMap.values()],
+  }
+}
+
+/**
+ * List folders under workspace base path for folder picker.
+ * GET /api/hermes/workspace/folders?path=<relative_path>
+ * Base: /opt/data/workspace (overridable via WORKSPACE_BASE env)
+ */
+export async function listWorkspaceFolders(ctx: any) {
+  const { resolve, join } = await import('path')
+  const { readdir } = await import('fs/promises')
+  const { existsSync } = await import('fs')
+
+  const WORKSPACE_BASE = process.env.WORKSPACE_BASE || '/opt/data/workspace'
+  const subPath = (ctx.query.path as string) || ''
+
+  // Security: prevent path traversal
+  const fullPath = resolve(join(WORKSPACE_BASE, subPath))
+  if (!fullPath.startsWith(resolve(WORKSPACE_BASE))) {
+    ctx.status = 403
+    ctx.body = { error: 'Access denied' }
+    return
+  }
+
+  if (!existsSync(fullPath)) {
+    ctx.status = 404
+    ctx.body = { error: 'Path not found', folders: [] }
+    return
+  }
+
+  try {
+    const entries = await readdir(fullPath, { withFileTypes: true })
+    const folders = entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+      .map(e => ({
+        name: e.name,
+        path: subPath ? `${subPath}/${e.name}` : e.name,
+        fullPath: join(fullPath, e.name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    ctx.body = { base: WORKSPACE_BASE, current: subPath, folders }
+  } catch (err: any) {
+    ctx.status = 500
+    ctx.body = { error: err.message }
   }
 }
 

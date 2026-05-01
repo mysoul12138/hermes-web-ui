@@ -67,6 +67,8 @@ export default {
   // Sidebar
   sidebar: {
     chat: 'Chat',
+    search: 'Suche',
+    history: 'Verlauf',
     jobs: 'Geplante Aufgaben',
     models: 'Modelle',
     profiles: 'Profile',
@@ -584,6 +586,21 @@ jobTriggered: 'Job ausgelost',
 
   // Anderungsprotokoll
   changelog: {
+
+    new_0_5_5_1: '🎉 Tag der Arbeit! Heute wird nicht gearbeitet, bitte habt Verständnis',
+    new_0_5_5_2: 'Verlaufsseite für Hermes-Sitzungshistorie hinzugefügt',
+    new_0_5_5_3: 'Verlaufsseite verwaltet Sitzungen unabhängig ohne Störung des aktiven Chats',
+    new_0_5_5_4: 'Verlaufsseite lädt automatisch erste CLI-Sitzung',
+    new_0_5_5_5: 'HistoryMessageList-Komponente mit Session-Prop-Injection',
+    new_0_5_5_6: 'Leere Nachrichten und Tool-Nachrichten ohne toolName gefiltert',
+    new_0_5_5_7: 'LocalStorage-Sitzungscache entfernt, Daten direkt vom Backend',
+    new_0_5_5_8: 'Profile-Umschaltung optimiert, veraltete Cache-Aufrufe entfernt',
+    new_0_5_4_2: 'Fix concurrent chat sessions event cross-talk with WebSocket event routing refactoring',
+    new_0_5_4_3: 'Fix cron job edit payloads with partial PATCH to support long prompt name-only edits',
+    new_0_5_4_4: 'Fix web terminal Hermes CLI availability after Docker deployment',
+    new_0_5_4_5: 'Add workspace dialog i18n translations for title and improve session persistence',
+    new_0_5_4_6: 'Support code block copy feedback with user notifications',
+    new_0_5_4_7: 'Align usage analytics with Hermes state DB schema',
     new_0_5_3_1: 'Improve reasoning process display with persistence across page refreshes',
     new_0_5_3_2: 'Optimize stringified array format parsing to extract thinking/text/tool_calls',
     new_0_5_3_3: 'Improve log display by removing ellipsis and showing full content',

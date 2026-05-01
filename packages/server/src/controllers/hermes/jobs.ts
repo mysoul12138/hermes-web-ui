@@ -103,6 +103,20 @@ async function adaptJobResponse(data: any, profile: string): Promise<any> {
 
 const TIMEOUT_MS = 30_000
 
+async function readUpstreamError(res: Response): Promise<unknown> {
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    try {
+      return await res.json()
+    } catch {
+      // Fall through to a stable error shape below.
+    }
+  }
+
+  const text = await res.text().catch(() => '')
+  return { error: { message: text || `Upstream error: ${res.status} ${res.statusText}` } }
+}
+
 async function proxyRequest(
   ctx: Context,
   upstreamPath: string,
@@ -122,17 +136,25 @@ async function proxyRequest(
     ? JSON.stringify(bodyOverride ?? ctx.request.body ?? {})
     : undefined
 
-  const res = await fetch(url, {
-    method: method || ctx.req.method,
-    headers,
-    body,
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  })
-
-  if (!res.ok) {
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: method || ctx.req.method,
+      headers,
+      body,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
+  } catch (e: any) {
     ctx.status = 502
     ctx.set('Content-Type', 'application/json')
-    ctx.body = { error: { message: `Upstream error: ${res.status} ${res.statusText}` } }
+    ctx.body = { error: { message: `Proxy error: ${e.message}` } }
+    return
+  }
+
+  if (!res.ok) {
+    ctx.status = res.status
+    ctx.set('Content-Type', 'application/json')
+    ctx.body = await readUpstreamError(res)
     return
   }
 

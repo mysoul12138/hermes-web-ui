@@ -13,6 +13,8 @@ import {
 } from '../../services/config-helpers'
 import { logger } from '../../services/logger'
 
+const OPTIONAL_API_KEY_PROVIDERS = new Set(['cliproxyapi'])
+
 function buildProviderEntry(name: string, base_url: string, api_key: string, model: string, context_length?: number) {
   const entry: any = { name, base_url, api_key, model }
   if (context_length && context_length > 0) {
@@ -36,7 +38,7 @@ export async function create(ctx: any) {
   if (!name || !base_url || !model) {
     ctx.status = 400; ctx.body = { error: 'Missing name, base_url, or model' }; return
   }
-  if (!api_key) {
+  if (!api_key && !OPTIONAL_API_KEY_PROVIDERS.has(String(providerKey || ''))) {
     ctx.status = 400; ctx.body = { error: 'Missing API key' }; return
   }
   try {

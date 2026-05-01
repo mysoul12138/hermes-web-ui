@@ -4,10 +4,14 @@ const listConversationsMock = vi.fn(async (ctx: any) => { ctx.body = { sessions:
 const getConversationMessagesMock = vi.fn(async (ctx: any) => { ctx.body = { session_id: ctx.params.id, messages: [] } })
 const getConversationMessagesPaginatedMock = vi.fn(async (ctx: any) => { ctx.body = { session_id: ctx.params.id, messages: [], pagination: {} } })
 const listMock = vi.fn(async (ctx: any) => { ctx.body = { sessions: [{ id: 's1' }] } })
+const listHermesSessionsMock = vi.fn(async (ctx: any) => { ctx.body = { sessions: [{ id: 'hermes-1' }] } })
+const getHermesSessionMock = vi.fn(async (ctx: any) => { ctx.body = { session: { id: ctx.params.id } } })
 const searchMock = vi.fn(async (ctx: any) => { ctx.body = { results: [{ id: 'search-1' }] } })
 const getMock = vi.fn(async (ctx: any) => { ctx.body = { session: { id: ctx.params.id } } })
 const removeMock = vi.fn(async (ctx: any) => { ctx.body = { ok: true } })
 const renameMock = vi.fn(async (ctx: any) => { ctx.body = { ok: true } })
+const setWorkspaceMock = vi.fn(async (ctx: any) => { ctx.body = { ok: true } })
+const listWorkspaceFoldersMock = vi.fn(async (ctx: any) => { ctx.body = { folders: [] } })
 const usageBatchMock = vi.fn(async (ctx: any) => { ctx.body = {} })
 const usageSingleMock = vi.fn(async (ctx: any) => { ctx.body = { input_tokens: 0, output_tokens: 0 } })
 const usageStatsMock = vi.fn(async (ctx: any) => { ctx.body = { total_input_tokens: 0, total_output_tokens: 0 } })
@@ -18,10 +22,14 @@ vi.mock('../../packages/server/src/controllers/hermes/sessions', () => ({
   getConversationMessages: getConversationMessagesMock,
   getConversationMessagesPaginated: getConversationMessagesPaginatedMock,
   list: listMock,
+  listHermesSessions: listHermesSessionsMock,
+  getHermesSession: getHermesSessionMock,
   search: searchMock,
   get: getMock,
   remove: removeMock,
   rename: renameMock,
+  setWorkspace: setWorkspaceMock,
+  listWorkspaceFolders: listWorkspaceFoldersMock,
   usageBatch: usageBatchMock,
   usageSingle: usageSingleMock,
   usageStats: usageStatsMock,

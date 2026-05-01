@@ -67,6 +67,8 @@ export default {
   // サイドバー
   sidebar: {
     chat: 'チャット',
+    search: '検索',
+    history: '履歴',
     jobs: 'ジョブ',
     models: 'モデル',
     profiles: 'プロファイル',
@@ -584,6 +586,21 @@ export default {
 
   // 更新履歴
   changelog: {
+
+    new_0_5_5_1: '🎉 労働者の日！今日はお休みです、何卒ご理解ください',
+    new_0_5_5_2: 'Hermesセッション履歴ページを追加',
+    new_0_5_5_3: '履歴ページはアクティブチャットに干渉せずにセッション管理',
+    new_0_5_5_4: '履歴ページは最初のCLIセッションを自動選択',
+    new_0_5_5_5: 'HistoryMessageListコンポーネントを追加',
+    new_0_5_5_6: '空のメッセージとtoolNameなしのtoolメッセージをフィルタリング',
+    new_0_5_5_7: 'localStorageセッションキャッシュを削除、バックエンドから直接取得',
+    new_0_5_5_8: 'プロフィール切り替えを最適化',
+    new_0_5_4_2: 'Fix concurrent chat sessions event cross-talk with WebSocket event routing refactoring',
+    new_0_5_4_3: 'Fix cron job edit payloads with partial PATCH to support long prompt name-only edits',
+    new_0_5_4_4: 'Fix web terminal Hermes CLI availability after Docker deployment',
+    new_0_5_4_5: 'Add workspace dialog i18n translations for title and improve session persistence',
+    new_0_5_4_6: 'Support code block copy feedback with user notifications',
+    new_0_5_4_7: 'Align usage analytics with Hermes state DB schema',
     new_0_5_3_1: 'Improve reasoning process display with persistence across page refreshes',
     new_0_5_3_2: 'Optimize stringified array format parsing to extract thinking/text/tool_calls',
     new_0_5_3_3: 'Improve log display by removing ellipsis and showing full content',

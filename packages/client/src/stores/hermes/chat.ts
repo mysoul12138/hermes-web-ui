@@ -69,6 +69,7 @@ export interface Session {
   outputTokens?: number
   endedAt?: number | null
   lastActiveAt?: number
+  workspace?: string | null
   branchSessionCount?: number
   parentSessionId?: string | null
   rootSessionId?: string | null
@@ -515,6 +516,7 @@ function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
     outputTokens: s.output_tokens,
     endedAt: s.ended_at != null ? Math.round(s.ended_at * 1000) : null,
     lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
+    workspace: (s as any).workspace || null,
     branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
   }
 }
