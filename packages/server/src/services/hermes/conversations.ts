@@ -7,6 +7,7 @@ const LIVE_WINDOW_SECONDS = 300
 const EXPORT_CACHE_TTL_MS = 30000
 const DEFAULT_CONVERSATION_LIMIT = 200
 const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
+const BRIDGE_CURRENT_USER_MARKER = 'current user message:'
 const SYNTHETIC_USER_PREFIXES = [
   '[system:',
   "you've reached the maximum number of tool-calling iterations allowed.",
@@ -260,6 +261,16 @@ function isBridgeContextPrompt(value: unknown): boolean {
   return normalizeText(value).startsWith(BRIDGE_CONTEXT_PROMPT_PREFIX)
 }
 
+function bridgeContextDisplayText(value: unknown): string | null {
+  const text = textFromContent(value).trim()
+  if (!isBridgeContextPrompt(text)) return null
+  const normalized = text.toLowerCase()
+  const markerIndex = normalized.lastIndexOf(BRIDGE_CURRENT_USER_MARKER)
+  if (markerIndex < 0) return null
+  const currentUserText = text.slice(markerIndex + BRIDGE_CURRENT_USER_MARKER.length).trim()
+  return currentUserText || null
+}
+
 function isLikelyOrphanContinuation(parent: ConversationSession, child: ConversationSession): boolean {
   if (child.id === parent.id || child.source !== parent.source || child.source === 'tool') return false
   if (parent.ended_at == null) return false
@@ -371,7 +382,10 @@ function sessionMessages(session: HermesSessionFull): HermesMessageLike[] {
 function normalizeVisibleMessage(message: HermesMessageLike, session: HermesSessionFull, index: number): ConversationMessage | null {
   if (!visibleHumanMessage(message)) return null
   const role = safeText(message.role)
-  const content = textFromContent(message.content).trim()
+  const rawContent = textFromContent(message.content).trim()
+  const content = role === 'user'
+    ? (bridgeContextDisplayText(rawContent) || rawContent)
+    : rawContent
   if (role !== 'user' && role !== 'assistant') return null
   if (!content) return null
 

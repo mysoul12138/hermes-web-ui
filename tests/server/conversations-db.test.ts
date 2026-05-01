@@ -540,12 +540,17 @@ describe('conversation DB service', () => {
     expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
 
     const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
-    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
-    expect(detail?.branches?.[0]?.thread_session_count).toBe(2)
-    expect(detail?.branches?.[0]?.messages.map((message: any) => message.session_id)).toEqual([
-      'branch-placeholder',
-      'context-continuation',
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['context-continuation'])
+    expect(detail?.branches?.[0]?.thread_session_count).toBe(1)
+    expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
+    expect(detail?.branches?.[0]?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
+    expect(detail?.branches?.[0]?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+      'branch work before compaction',
     ])
+
+    const continuationDetail = await mod.getConversationDetailFromDb('context-continuation', { humanOnly: true })
+    expect(continuationDetail?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
+    expect(continuationDetail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
   })
 
   it('treats branched children as their own visible conversations', async () => {
