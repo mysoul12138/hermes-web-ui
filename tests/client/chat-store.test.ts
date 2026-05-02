@@ -554,6 +554,39 @@ describe('Chat Store', () => {
     expect(store.sessions.some(session => session.id === backingId)).toBe(false)
   })
 
+  it('drops stale cached persistent bridge sessions that are no longer visible summaries', async () => {
+    const staleId = '20260502_120953_713358'
+    const visibleId = '20260502_135857_2f594e'
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: staleId,
+      title: 'Earlier continuation',
+      source: 'tui',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2,
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(staleId), '1')
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(visibleId, 'Latest continuation'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: visibleId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(visibleId, []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.sessions.map(session => session.id)).toEqual([visibleId])
+    expect(window.localStorage.getItem(bridgeLocalSessionKey(staleId))).toBeNull()
+  })
+
   it('backfills live tool details from session polling without replacing streamed text', async () => {
     vi.useFakeTimers()
 

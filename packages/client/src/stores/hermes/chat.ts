@@ -2207,7 +2207,14 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
           return false
         }
         if (readInFlight(s.id)) return true
-        if (isBridgeLocalSession(s.id)) return true
+        if (isBridgeLocalSession(s.id)) {
+          if (isLocalRunActive(s.id) || !isPersistentTuiSessionId(s.id)) return true
+          removeItemWithLegacy(msgsCacheKey(s.id), legacyMsgsCacheKey(s.id))
+          removeItemWithLegacy(inFlightKey(s.id), legacyInFlightKey(s.id))
+          clearSessionModelOverride(s.id)
+          clearBridgeLocalSession(s.id)
+          return false
+        }
         if (s.isBranchSession) {
           return !!s.rootSessionId && hasLoadedBranches(s.rootSessionId, fresh)
         }
