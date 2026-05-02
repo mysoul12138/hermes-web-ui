@@ -422,12 +422,6 @@ async function handleWorkspaceConfirm() {
           </NButton>
         </div>
       </div>
-      <div v-if="showSessions" class="session-scope-note">
-        <span>{{ t('chat.sessionScopeHint') }}</span>
-        <RouterLink class="session-scope-link" :to="{ name: 'hermes.history' }">
-          {{ t('chat.openHistory') }}
-        </RouterLink>
-      </div>
       <div v-if="showSessions" class="session-items">
         <div v-if="chatStore.isLoadingSessions && chatStore.sessions.length === 0" class="session-loading">{{ t('common.loading') }}</div>
         <div v-else-if="chatStore.sessions.length === 0" class="session-empty">{{ t('chat.noSessions') }}</div>
@@ -753,29 +747,6 @@ async function handleWorkspaceConfirm() {
   color: $text-muted;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-}
-
-.session-scope-note {
-  margin: 0 12px 10px;
-  padding: 8px 10px;
-  border: 1px solid rgba($accent-primary, 0.16);
-  border-radius: $radius-sm;
-  background: rgba($accent-primary, 0.06);
-  color: $text-secondary;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.session-scope-link {
-  display: inline-block;
-  margin-left: 4px;
-  color: $accent-primary;
-  font-weight: 500;
-  text-decoration: none;
-
-  &:hover {
-    text-decoration: underline;
-  }
 }
 
 .session-group-header {

@@ -109,8 +109,6 @@ export default {
     contextUsed: '사용된 컨텍스트:',
     sessions: '세션',
     webUiSessions: 'Web UI/API Server 세션',
-    sessionScopeHint: '채팅에는 Web UI/API Server 세션만 표시됩니다. CLI, Telegram, Discord, Cron 등 채널 세션은 기록에서 읽기 전용으로 볼 수 있습니다.',
-    openHistory: '기록 열기',
     hermesHistory: 'Hermes 기록',
     historyScopeHint: '소스별로 그룹화된 Hermes 기록 세션을 읽기 전용으로 봅니다.',
     noSessions: '세션 없음',

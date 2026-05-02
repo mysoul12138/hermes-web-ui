@@ -109,8 +109,6 @@ export default {
     contextUsed: 'コンテキスト使用量:',
     sessions: 'セッション',
     webUiSessions: 'Web UI/API Server セッション',
-    sessionScopeHint: 'チャットには Web UI/API Server セッションのみ表示されます。CLI、Telegram、Discord、Cron などのチャンネルセッションは履歴で読み取り専用として表示されます。',
-    openHistory: '履歴を開く',
     hermesHistory: 'Hermes 履歴',
     historyScopeHint: 'ソース別にグループ化された Hermes 履歴セッションを読み取り専用で表示します。',
     noSessions: 'セッションがありません',

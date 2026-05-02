@@ -109,8 +109,6 @@ export default {
     contextUsed: 'Contexto utilizado:',
     sessions: 'Sessoes',
     webUiSessions: 'Sessões da Web UI/API Server',
-    sessionScopeHint: 'O chat mostra apenas sessões da Web UI/API Server. Sessões de CLI, Telegram, Discord, Cron e outros canais são somente leitura no Histórico.',
-    openHistory: 'Abrir histórico',
     hermesHistory: 'Histórico Hermes',
     historyScopeHint: 'Sessões do histórico Hermes somente leitura, agrupadas por origem.',
     noSessions: 'Sem sessoes',

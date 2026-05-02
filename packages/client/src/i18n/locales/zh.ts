@@ -119,8 +119,6 @@ export default {
     contextUsed: '上下文已用:',
     sessions: '会话',
     webUiSessions: 'Web UI/API Server 会话',
-    sessionScopeHint: '这里只显示 Web UI/API Server 会话；CLI、Telegram、Discord、Cron 等通道会话在历史中只读查看。',
-    openHistory: '打开历史',
     hermesHistory: 'Hermes 历史',
     historyScopeHint: '这里按来源只读查看 Hermes 历史会话。',
     noSessions: '暂无会话',
