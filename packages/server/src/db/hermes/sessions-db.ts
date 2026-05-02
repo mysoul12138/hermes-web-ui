@@ -612,6 +612,24 @@ function projectSearchRow(
   if (!root) return null
   if (source && matchedSession.source !== source) return null
 
+  const canonicalChain = collectSessionChain(root, idx)
+  const isCanonicalMatch = canonicalChain.some(session => session.id === matchedSession.id)
+  if (root.id !== matchedSession.id && !isCanonicalMatch) {
+    const latest = latestSessionInChain(chain)
+    const projectedBranch = projectSessionSummary(root, chain)
+    return {
+      ...projectedBranch,
+      id: matchedSession.id,
+      source: latest.source || root.source,
+      title: latest.title || root.title,
+      preview: latest.preview || root.preview || projectedBranch.preview,
+      last_active: Math.max(...chain.map(session => session.last_active || session.started_at || 0)),
+      matched_message_id: normalizeNullableNumber(row.matched_message_id),
+      snippet: String(row.snippet || row.preview || ''),
+      rank: Number.isFinite(Number(row.rank)) ? Number(row.rank) : 0,
+    }
+  }
+
   const projected = projectSessionSummary(root, chain)
   return {
     ...projected,
@@ -1067,10 +1085,8 @@ export async function searchSessionSummaries(
     return items.slice(0, limit)
   } catch (_err) {
     // FTS queries can fail for various inputs (pure numbers, special syntax, etc.)
-    // Fall back to title-only LIKE results + literal content search for CJK
-    const likeRows = containsCjk(normalized)
-      ? runLiteralContentSearch(db, source, trimmed, candidateLimit)
-      : []
+    // Fall back to title-only LIKE results + literal content search.
+    const likeRows = runLiteralContentSearch(db, source, trimmed, candidateLimit)
     const idx2 = loadAllSessions(db)
     const merged = new Map<string, HermesSessionSearchRow>()
     for (const row of titleRows) {

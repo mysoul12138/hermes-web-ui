@@ -19,7 +19,7 @@ export interface SpeechState {
  * Web Speech API 语音播放 Composable
  */
 export function useSpeech() {
-  const synth = window.speechSynthesis
+  const synth = typeof window !== 'undefined' ? window.speechSynthesis : undefined
   const availableVoices = ref<SpeechSynthesisVoice[]>([])
   const state = ref<SpeechState>({
     isPlaying: false,
@@ -33,11 +33,11 @@ export function useSpeech() {
 
   // 加载可用语音列表
   function loadVoices() {
-    availableVoices.value = synth.getVoices()
+    availableVoices.value = synth?.getVoices?.() ?? []
   }
 
   // 浏览器会在语音列表变化时触发 voiceschanged 事件
-  synth.addEventListener('voiceschanged', loadVoices)
+  synth?.addEventListener?.('voiceschanged', loadVoices)
   loadVoices() // 初始加载
 
   /**
@@ -69,7 +69,7 @@ export function useSpeech() {
    * 检查浏览器是否支持 Web Speech API
    */
   const isSupported = computed(() => {
-    return 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
+    return !!synth && 'SpeechSynthesisUtterance' in window
   })
 
   /**
@@ -102,7 +102,7 @@ export function useSpeech() {
    * 停止当前播放
    */
   function stop() {
-    if (synth.speaking) {
+    if (synth?.speaking) {
       synth.cancel()
     }
     if (utterance) {
@@ -205,14 +205,14 @@ export function useSpeech() {
 
     // 开始播放
     console.log('[useSpeech] Calling synth.speak()')
-    synth.speak(utterance)
+    synth?.speak(utterance)
   }
 
   /**
    * 暂停播放
    */
   function pause() {
-    if (synth.speaking && !state.value.isPaused) {
+    if (synth?.speaking && !state.value.isPaused) {
       synth.pause()
       state.value.isPaused = true
     }
@@ -223,7 +223,7 @@ export function useSpeech() {
    */
   function resume() {
     if (state.value.isPaused) {
-      synth.resume()
+      synth?.resume()
       state.value.isPaused = false
     }
   }
@@ -246,7 +246,7 @@ export function useSpeech() {
   // 清理
   onUnmounted(() => {
     stop()
-    synth.removeEventListener('voiceschanged', loadVoices)
+    synth?.removeEventListener?.('voiceschanged', loadVoices)
   })
 
   return {

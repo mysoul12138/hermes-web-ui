@@ -31,6 +31,8 @@ function createStateDb(path: string) {
       cache_write_tokens INTEGER,
       reasoning_tokens INTEGER,
       billing_provider TEXT,
+      billing_base_url TEXT,
+      billing_mode TEXT,
       estimated_cost_usd REAL,
       actual_cost_usd REAL,
       cost_status TEXT,
@@ -83,9 +85,9 @@ function insertSession(
     INSERT INTO sessions (
       id, source, user_id, model, title, started_at, ended_at, end_reason,
       message_count, tool_call_count, input_tokens, output_tokens,
-      cache_read_tokens, cache_write_tokens, reasoning_tokens, billing_provider,
+      cache_read_tokens, cache_write_tokens, reasoning_tokens, billing_provider, billing_base_url, billing_mode,
       estimated_cost_usd, actual_cost_usd, cost_status, parent_session_id
-    ) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, '', 0, NULL, '', ?)
+    ) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, '', '', '', 0, NULL, '', ?)
   `).run(
     row.id,
     row.source || 'api_server',

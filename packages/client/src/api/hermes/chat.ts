@@ -1,12 +1,17 @@
 import { request, getBaseUrlValue, getApiKey } from '../client'
 
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; name: string; path: string; media_type: string }
+  | { type: 'file'; name: string; path: string; media_type?: string }
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
-  content: string
+  content: string | ContentBlock[]
 }
 
 export interface StartRunRequest {
-  input: string | ChatMessage[]
+  input: string | ContentBlock[]
   instructions?: string
   conversation_history?: ChatMessage[]
   session_id?: string
