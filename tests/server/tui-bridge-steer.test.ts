@@ -11,12 +11,16 @@ import { TuiBridgeService } from '../../packages/server/src/services/hermes/tui-
 
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
+  supportsSessionSteer = false
   private createdSessions = 0
   private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
 
   async request<T = any>(method: string, params: Record<string, any> = {}): Promise<T> {
     this.requests.push({ method, params })
-    if (method === 'session.steer') throw new Error('unknown method: session.steer')
+    if (method === 'session.steer') {
+      if (this.supportsSessionSteer) return { status: 'queued', text: params.text } as T
+      throw new Error('unknown method: session.steer')
+    }
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
     if (method === 'prompt.submit') return { ok: true } as T
     if (method === 'config.set') throw new Error('config.set should not be called during bridge runs')
@@ -38,6 +42,35 @@ class FakeGatewayClient extends EventEmitter {
 describe('TuiBridgeService steer compatibility', () => {
   beforeEach(() => {
     mockUpdateUsage.mockClear()
+  })
+
+  it('uses session.steer directly when the bridge supports it', async () => {
+    const client = new FakeGatewayClient()
+    client.supportsSessionSteer = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_1')
+    ;(bridge as any).runs.set('bridge_run_1', {
+      runId: 'bridge_run_1',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+    })
+
+    const result = await bridge.steer('web-session', 'adjust direction')
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'queued',
+      text: 'adjust direction',
+    })
+    expect(client.requests).toEqual([
+      { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
+    ])
+    ;(bridge as any).closeRun('bridge_run_1')
   })
 
   it('falls back to command.dispatch /steer when the bridge lacks session.steer', async () => {

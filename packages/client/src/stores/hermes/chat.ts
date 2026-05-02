@@ -3439,6 +3439,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     const sid = activeSessionId.value!
     if (isRunActive.value) {
       const settingsStore = useSettingsStore()
+      if (!settingsStore.loaded && !settingsStore.loading && !settingsStore.display.busy_input_mode) {
+        await settingsStore.fetchSettings()
+      }
       const busyMode = settingsStore.display.busy_input_mode || 'queue'
       if (busyMode === 'steer') {
         await steerBusyInput(sid, content, attachments)

@@ -303,13 +303,33 @@ function isLikelyBridgeContextBranchContinuation(parent: ConversationSessionRow,
   return startedDelta <= DUPLICATE_CONTINUATION_WINDOW_SECONDS || activeGap <= LINEAGE_TOLERANCE_SECONDS
 }
 
+function isLikelyBridgeContextRootContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
+  if (child.parent_session_id != null && child.parent_session_id !== parent.id) return false
+  if (!isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
+  if (!parent.has_visible_messages && Number(parent.tool_call_count || 0) <= 0) return false
+
+  const childStarted = Number(child.started_at || 0)
+  const parentStarted = Number(parent.started_at || 0)
+  if (childStarted < parentStarted) return false
+
+  const activeGap = childStarted - Number(parent.last_active || parent.started_at || 0)
+  return activeGap >= -LINEAGE_TOLERANCE_SECONDS && activeGap <= DUPLICATE_CONTINUATION_WINDOW_SECONDS
+}
+
 function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) {
   const parentless = sessions.filter(session => session.parent_session_id == null && session.source !== 'tool')
   const assignments = new Map<string, string | null>()
 
   for (const parent of sessions) {
     if (!isCompressionEndReason(parent.end_reason) || parent.ended_at == null) continue
+    const hasExplicitContinuation = sessions.some(session =>
+      session.parent_session_id === parent.id
+      && session.source === parent.source
+      && isLikelyOrphanContinuation(parent, session),
+    )
     const candidates = parentless.filter(child => {
+      if (hasExplicitContinuation && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
       return isLikelyOrphanContinuation(parent, child)
     })
     if (candidates.length !== 1) continue
@@ -323,6 +343,29 @@ function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) 
     if (!parentId) continue
     const child = sessions.find(session => session.id === childId)
     if (child && child.parent_session_id == null) child.parent_session_id = parentId
+  }
+}
+
+function linkOrphanBridgeContextRootContinuations(sessions: ConversationSessionRow[]) {
+  const parentless = sessions.filter(session =>
+    session.parent_session_id == null
+    && session.source === 'tui'
+    && isBridgeContextPrompt(session.raw_preview || session.preview || session.title),
+  )
+  const candidates = sessions.filter(session =>
+    session.source === 'tui'
+  )
+
+  for (const child of parentless) {
+    const parent = candidates
+      .filter(candidate => isLikelyBridgeContextRootContinuation(candidate, child))
+      .sort((a, b) => {
+        const aGap = Math.abs(Number(child.started_at || 0) - Number(a.last_active || a.started_at || 0))
+        const bGap = Math.abs(Number(child.started_at || 0) - Number(b.last_active || b.started_at || 0))
+        if (aGap !== bGap) return aGap - bGap
+        return b.last_active - a.last_active
+      })[0]
+    if (parent) child.parent_session_id = parent.id
   }
 }
 
@@ -359,7 +402,8 @@ function continuationCandidates(parent: ConversationSessionRow, byId: Map<string
     .filter(child => child.source === parent.source)
     .filter(child => isCompressionEndReason(parent.end_reason)
       ? isLikelyOrphanContinuation(parent, child)
-      : isLikelyBridgeContextBranchContinuation(parent, child))
+      : !isCompressionLineageChild(parent, byId)
+        && (isLikelyBridgeContextBranchContinuation(parent, child) || isLikelyBridgeContextRootContinuation(parent, child)))
     .sort((a, b) => {
       const anchor = isCompressionEndReason(parent.end_reason)
         ? Number(parent.ended_at || 0)
@@ -397,7 +441,8 @@ function isCompressionContinuationChild(session: ConversationSessionRow | undefi
 function isBridgeContextBranchContinuationChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
-  return !!parent && isLikelyBridgeContextBranchContinuation(parent, session)
+  return !!parent
+    && (isLikelyBridgeContextBranchContinuation(parent, session) || isLikelyBridgeContextRootContinuation(parent, session))
 }
 
 function bridgeContextHistoryPathToRoot(session: ConversationSessionRow, byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {
@@ -475,6 +520,8 @@ function isLatestCompressionContinuation(session: ConversationSessionRow | undef
 function isLatestBridgeContextContinuation(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): boolean {
   if (!session || session.source === 'tool') return false
   if (!isBridgeContextBranchContinuationChild(session, byId)) return false
+  const parent = session.parent_session_id ? byId.get(session.parent_session_id) : null
+  if (parent && isCompressionLineageChild(parent, byId)) return false
   return collectConversationChain(session.id, byId, childrenByParent).at(-1)?.id === session.id
 }
 
@@ -924,6 +971,7 @@ async function loadConversationSessions(source?: string, includeTool = false): P
     const nowSeconds = Date.now() / 1000
     const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
     linkOrphanCompressionContinuations(sessions)
+    linkOrphanBridgeContextRootContinuations(sessions)
     linkOrphanBridgeContextBranchContinuations(sessions)
     if (source && source !== 'tui') return sessions
 

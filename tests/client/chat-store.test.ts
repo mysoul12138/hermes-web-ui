@@ -32,11 +32,17 @@ const mockClarifyApi = vi.hoisted(() => ({
   respondClarify: vi.fn(),
 }))
 
+const mockConfigApi = vi.hoisted(() => ({
+  fetchConfig: vi.fn(),
+  updateConfigSection: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
 vi.mock('@/api/hermes/conversations', () => mockConversationsApi)
 vi.mock('@/api/hermes/approval', () => mockApprovalApi)
 vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
+vi.mock('@/api/hermes/config', () => mockConfigApi)
 
 import { useChatStore } from '@/stores/hermes/chat'
 import { useSettingsStore } from '@/stores/hermes/settings'
@@ -107,6 +113,8 @@ describe('Chat Store', () => {
     mockApprovalApi.respondApproval.mockResolvedValue({ ok: true, choice: 'once' })
     mockClarifyApi.getPendingClarify.mockResolvedValue({ pending: null, pending_count: 0 })
     mockClarifyApi.respondClarify.mockResolvedValue({ ok: true, answer: 'ok' })
+    mockConfigApi.fetchConfig.mockResolvedValue({ display: {} })
+    mockConfigApi.updateConfigSection.mockResolvedValue(undefined)
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
     mockChatApi.cancelRun.mockResolvedValue(undefined)
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
@@ -1062,6 +1070,36 @@ describe('Chat Store', () => {
         }),
       ]),
     )
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('loads display settings before deciding whether busy input should steer', async () => {
+    mockConfigApi.fetchConfig.mockResolvedValue({ display: { busy_input_mode: 'steer' } })
+    const sid = 'web-session'
+    const backingId = '20260502_203836_1522aa'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Running bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(bridgePersistentSessionKey(sid), backingId)
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockConfigApi.fetchConfig).toHaveBeenCalled()
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(backingId, 'adjust direction')
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 

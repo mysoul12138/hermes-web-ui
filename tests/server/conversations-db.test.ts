@@ -136,6 +136,111 @@ describe('conversation DB service', () => {
     if (profileDirState.value) rmSync(profileDirState.value, { recursive: true, force: true })
   })
 
+  it('folds parentless bridge context continuations into the latest continuation conversation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'cont-1',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 200,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'cont-2',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 260,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 5,
+      output_tokens: 6,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'root', role: 'user', content: 'root request', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'root', role: 'assistant', content: 'root answer', timestamp: 190 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'cont-1',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: root answer\n\nCurrent user message:\ncontinue one',
+      timestamp: 201,
+    })
+    insertMessage(db, { id: 4, session_id: 'cont-1', role: 'assistant', content: 'continuation one answer', timestamp: 250 })
+    insertMessage(db, {
+      id: 5,
+      session_id: 'cont-2',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: continuation one answer\n\nCurrent user message:\ncontinue two',
+      timestamp: 261,
+    })
+    insertMessage(db, { id: 6, session_id: 'cont-2', role: 'assistant', content: 'continuation two answer', timestamp: 262 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['cont-2'])
+
+    const detail = await mod.getConversationDetailFromDb('cont-2', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual(['continue two', 'continuation two answer'])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
+      'root answer',
+      'continue one',
+      'continuation one answer',
+    ])
+  })
+
   it('aggregates a compression continuation without using full CLI export', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
