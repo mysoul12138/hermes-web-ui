@@ -3451,7 +3451,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
     const sid = activeSessionId.value!
     if (isRunActive.value) {
       const settingsStore = useSettingsStore()
-      if (!settingsStore.loaded && !settingsStore.loading && !settingsStore.display.busy_input_mode) {
+      if (!settingsStore.loaded && !settingsStore.loading) {
         await settingsStore.fetchSettings()
       }
       const busyMode = settingsStore.display.busy_input_mode || 'queue'

@@ -1034,6 +1034,7 @@ describe('Chat Store', () => {
   it('steers busy input for a resumed active bridge session', async () => {
     const settings = useSettingsStore()
     settings.display.busy_input_mode = 'steer'
+    settings.loaded = true
     const sid = 'web-session'
     const backingId = '20260502_203836_1522aa'
     window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
@@ -1076,6 +1077,7 @@ describe('Chat Store', () => {
   it('sends a new turn instead of queueing when bridge steer reports the run is already done', async () => {
     const settings = useSettingsStore()
     settings.display.busy_input_mode = 'steer'
+    settings.loaded = true
     const sid = 'web-session'
     window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
     window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
@@ -1127,6 +1129,36 @@ describe('Chat Store', () => {
     }]))
     window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
     window.localStorage.setItem(bridgePersistentSessionKey(sid), backingId)
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockConfigApi.fetchConfig).toHaveBeenCalled()
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('reloads display settings before busy input even when a stale default queue value exists', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'queue'
+    mockConfigApi.fetchConfig.mockResolvedValue({ display: { busy_input_mode: 'steer' } })
+    const sid = 'web-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Running bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
     window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
     mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
 

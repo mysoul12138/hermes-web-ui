@@ -113,6 +113,7 @@ interface RunState {
   closed: boolean
   idleTimer?: ReturnType<typeof setTimeout>
   completeTimer?: ReturnType<typeof setTimeout>
+  lastActivityAt?: number
   pendingApproval?: boolean
   pendingClarify?: boolean
   contextInputTokens?: number
@@ -139,6 +140,7 @@ const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
 const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
+const COMPLETE_FALLBACK_QUIET_MS = Math.max(COMPLETE_GRACE_MS, Number(process.env.HERMES_TUI_COMPLETE_FALLBACK_QUIET_MS || 15000))
 
 function resolveHermesHome(): string {
   return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
@@ -444,6 +446,7 @@ export class TuiBridgeService {
       events: [],
       waiters: [],
       closed: false,
+      lastActivityAt: Date.now(),
       contextInputTokens: countTokens(contextPrompt),
     }
     this.runs.set(runId, state)
@@ -557,6 +560,11 @@ export class TuiBridgeService {
     if (!bridgeSessionId) throw new Error('bridge session not found')
     const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
     if (!runId) throw new Error('session is not running')
+    const running = await this.readBridgeSessionRunning(bridgeSessionId)
+    if (running === false) {
+      this.closeRun(runId)
+      throw new Error('session is not running')
+    }
     let result: { status?: string, text?: string }
     try {
       result = await this.client.request<{ status?: string, text?: string }>('session.steer', {
@@ -772,6 +780,7 @@ export class TuiBridgeService {
     if (!runId) return
     const payload = event.payload || {}
     const timestamp = Date.now() / 1000
+    if (event.type !== 'message.complete') this.markRunActivity(runId)
 
     if (typeof event.type === 'string' && event.type.startsWith('subagent.')) {
       this.push(runId, {
@@ -935,6 +944,29 @@ export class TuiBridgeService {
     state.completeTimer = undefined
   }
 
+  private markRunActivity(runId: string) {
+    const state = this.runs.get(runId)
+    if (!state || state.closed) return
+    state.lastActivityAt = Date.now()
+    this.clearCompleteTimer(state)
+  }
+
+  private async readBridgeSessionRunning(bridgeSessionId: string): Promise<boolean | null> {
+    try {
+      const result = await this.client.request<{ running?: boolean, status?: string }>('session.status', {
+        session_id: bridgeSessionId,
+      })
+      if (typeof result?.running === 'boolean') return result.running
+      if (typeof result?.status === 'string') {
+        return !/^(idle|done|complete|completed|stopped|failed|error)$/i.test(result.status.trim())
+      }
+    } catch (error) {
+      if (isUnknownBridgeMethod(error, 'session.status')) return null
+      return null
+    }
+    return null
+  }
+
   private completedEventWithUsage(state: RunState, event: BridgeRunEvent): BridgeRunEvent {
     const normalized = event.usage || normalizeUsagePayload(event as Record<string, any>)
     if (normalized && normalized.input_tokens + normalized.output_tokens > 0) {
@@ -978,9 +1010,25 @@ export class TuiBridgeService {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
     this.clearCompleteTimer(state)
-    state.completeTimer = setTimeout(() => {
-      const completedEvent = this.completedEventWithUsage(state, event)
-      this.persistCompletedUsage(state, completedEvent)
+    state.completeTimer = setTimeout(async () => {
+      state.completeTimer = undefined
+      const current = this.runs.get(runId)
+      if (!current || current.closed) return
+      const running = await this.readBridgeSessionRunning(current.bridgeSessionId)
+      if (running === true) {
+        this.scheduleRunCompleted(runId, event)
+        return
+      }
+      if (running === null) {
+        const quietMs = Date.now() - (current.lastActivityAt || Date.now())
+        if (quietMs < COMPLETE_FALLBACK_QUIET_MS) {
+          const remainingMs = Math.max(COMPLETE_GRACE_MS, COMPLETE_FALLBACK_QUIET_MS - quietMs)
+          current.completeTimer = setTimeout(() => this.scheduleRunCompleted(runId, event), remainingMs)
+          return
+        }
+      }
+      const completedEvent = this.completedEventWithUsage(current, event)
+      this.persistCompletedUsage(current, completedEvent)
       this.push(runId, completedEvent)
       this.closeRun(runId)
     }, COMPLETE_GRACE_MS)

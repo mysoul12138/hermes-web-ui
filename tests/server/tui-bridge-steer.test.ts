@@ -12,6 +12,8 @@ import { TuiBridgeService } from '../../packages/server/src/services/hermes/tui-
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
   supportsSessionSteer = false
+  supportsSessionStatus = false
+  sessionRunning = true
   private createdSessions = 0
   private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
 
@@ -20,6 +22,10 @@ class FakeGatewayClient extends EventEmitter {
     if (method === 'session.steer') {
       if (this.supportsSessionSteer) return { status: 'queued', text: params.text } as T
       throw new Error('unknown method: session.steer')
+    }
+    if (method === 'session.status') {
+      if (this.supportsSessionStatus) return { running: this.sessionRunning } as T
+      throw new Error('unknown method: session.status')
     }
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
     if (method === 'prompt.submit') return { ok: true } as T
@@ -68,6 +74,7 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
+      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
@@ -98,6 +105,7 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
+      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
@@ -126,6 +134,7 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
+      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
       { method: 'command.dispatch', params: { session_id: 'tui-session', command: '/steer adjust direction' } },
     ])
@@ -290,6 +299,8 @@ describe('TuiBridgeService steer compatibility', () => {
   it('uses content/message fields as final output for bridge completion events', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = false
     const bridge = new TuiBridgeService(client as any)
 
     ;(bridge as any).webSessionsByBridgeSession.set('tui-session', 'web-session')
@@ -323,9 +334,90 @@ describe('TuiBridgeService steer compatibility', () => {
     vi.useRealTimers()
   })
 
+  it('keeps bridge runs steerable while gateway status is still running after message.complete', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    client.supportsSessionSteer = true
+    client.supportsSessionStatus = true
+    client.sessionRunning = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_running')
+    ;(bridge as any).runs.set('bridge_run_running', {
+      runId: 'bridge_run_running',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+      lastActivityAt: Date.now(),
+    })
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'message.complete',
+      payload: { content: 'partial assistant segment' },
+    })
+
+    await vi.advanceTimersByTimeAsync(1600)
+
+    expect((bridge as any).runs.get('bridge_run_running').closed).toBe(false)
+    expect((bridge as any).activeRunsByBridgeSession.get('tui-session')).toBe('bridge_run_running')
+
+    const result = await bridge.steer('web-session', 'adjust direction')
+    expect(result).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge_run_running' })
+    expect(client.requests).toContainEqual({
+      method: 'session.steer',
+      params: { session_id: 'tui-session', text: 'adjust direction' },
+    })
+
+    ;(bridge as any).closeRun('bridge_run_running')
+    vi.useRealTimers()
+  })
+
+  it('does not close bridge runs on early message.complete when status RPC is unavailable', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    client.supportsSessionSteer = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_no_status')
+    ;(bridge as any).runs.set('bridge_run_no_status', {
+      runId: 'bridge_run_no_status',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+      lastActivityAt: Date.now(),
+    })
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'message.complete',
+      payload: { content: 'maybe final' },
+    })
+
+    await vi.advanceTimersByTimeAsync(1600)
+
+    expect((bridge as any).runs.get('bridge_run_no_status').closed).toBe(false)
+    expect((bridge as any).activeRunsByBridgeSession.get('tui-session')).toBe('bridge_run_no_status')
+
+    const result = await bridge.steer('web-session', 'adjust direction')
+    expect(result).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge_run_no_status' })
+    ;(bridge as any).closeRun('bridge_run_no_status')
+    vi.useRealTimers()
+  })
+
   it('adds server-tokenizer usage when bridge completion has no provider usage', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = false
     const bridge = new TuiBridgeService(client as any)
     vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
 
@@ -399,6 +491,8 @@ describe('TuiBridgeService steer compatibility', () => {
   it('preserves provider usage from bridge completion payloads', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = false
     const bridge = new TuiBridgeService(client as any)
 
     ;(bridge as any).webSessionsByBridgeSession.set('tui-session', 'web-session')
