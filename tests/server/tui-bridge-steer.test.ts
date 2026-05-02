@@ -7,7 +7,10 @@ vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
   updateUsage: mockUpdateUsage,
 }))
 
-import { TuiBridgeService } from '../../packages/server/src/services/hermes/tui-bridge'
+import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { TuiBridgeService, resolveBridgeRoot } from '../../packages/server/src/services/hermes/tui-bridge'
 
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
@@ -48,6 +51,24 @@ class FakeGatewayClient extends EventEmitter {
 describe('TuiBridgeService steer compatibility', () => {
   beforeEach(() => {
     mockUpdateUsage.mockClear()
+    delete process.env.HERMES_TUI_ROOT
+    delete process.env.HERMES_PYTHON_SRC_ROOT
+    delete process.env.HERMES_AGENT_ROOT
+    delete process.env.HERMES_HOME
+  })
+
+  it('prefers the live hermes-agent tree over the old publish snapshot by default', () => {
+    const hermesHome = join(tmpdir(), `hermes-webui-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(join(hermesHome, 'hermes-agent', 'tui_gateway'), { recursive: true })
+    mkdirSync(join(hermesHome, 'hermes-publish.HkvvHk', 'tui_gateway'), { recursive: true })
+    writeFileSync(join(hermesHome, 'hermes-agent', 'tui_gateway', 'entry.py'), '')
+    writeFileSync(join(hermesHome, 'hermes-publish.HkvvHk', 'tui_gateway', 'entry.py'), '')
+    process.env.HERMES_HOME = hermesHome
+    try {
+      expect(resolveBridgeRoot()).toBe(join(hermesHome, 'hermes-agent'))
+    } finally {
+      rmSync(hermesHome, { recursive: true, force: true })
+    }
   })
 
   it('uses session.steer directly when the bridge supports it', async () => {
@@ -377,12 +398,11 @@ describe('TuiBridgeService steer compatibility', () => {
     vi.useRealTimers()
   })
 
-  it('does not close bridge runs on early message.complete when status RPC is unavailable', async () => {
+  it('completes bridge runs without extra delay when status RPC is unavailable', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
     client.supportsSessionSteer = true
     const bridge = new TuiBridgeService(client as any)
-    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
 
     ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
     ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_no_status')
@@ -404,12 +424,14 @@ describe('TuiBridgeService steer compatibility', () => {
 
     await vi.advanceTimersByTimeAsync(1600)
 
-    expect((bridge as any).runs.get('bridge_run_no_status').closed).toBe(false)
-    expect((bridge as any).activeRunsByBridgeSession.get('tui-session')).toBe('bridge_run_no_status')
-
-    const result = await bridge.steer('web-session', 'adjust direction')
-    expect(result).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge_run_no_status' })
-    ;(bridge as any).closeRun('bridge_run_no_status')
+    expect((bridge as any).runs.get('bridge_run_no_status').events).toEqual([
+      expect.objectContaining({
+        event: 'run.completed',
+        output: 'maybe final',
+      }),
+    ])
+    expect((bridge as any).runs.get('bridge_run_no_status').closed).toBe(true)
+    expect((bridge as any).activeRunsByBridgeSession.has('tui-session')).toBe(false)
     vi.useRealTimers()
   })
 

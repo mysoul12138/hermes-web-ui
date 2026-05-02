@@ -140,7 +140,6 @@ const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
 const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
-const COMPLETE_FALLBACK_QUIET_MS = Math.max(COMPLETE_GRACE_MS, Number(process.env.HERMES_TUI_COMPLETE_FALLBACK_QUIET_MS || 15000))
 
 function resolveHermesHome(): string {
   return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
@@ -170,11 +169,13 @@ function resolvePython(root: string): string {
   return hit || (process.platform === 'win32' ? 'python' : 'python3')
 }
 
-function resolveBridgeRoot(): string {
+export function resolveBridgeRoot(): string {
+  const hermesHome = resolveHermesHome()
   return process.env.HERMES_TUI_ROOT?.trim()
     || process.env.HERMES_PYTHON_SRC_ROOT?.trim()
     || process.env.HERMES_AGENT_ROOT?.trim()
-    || resolve(resolveHermesHome(), 'hermes-publish.HkvvHk')
+    || (existsSync(resolve(hermesHome, 'hermes-agent/tui_gateway/entry.py')) ? resolve(hermesHome, 'hermes-agent') : '')
+    || resolve(hermesHome, 'hermes-publish.HkvvHk')
 }
 
 function parseBridgeFlag(value: unknown): boolean | null {
@@ -1018,14 +1019,6 @@ export class TuiBridgeService {
       if (running === true) {
         this.scheduleRunCompleted(runId, event)
         return
-      }
-      if (running === null) {
-        const quietMs = Date.now() - (current.lastActivityAt || Date.now())
-        if (quietMs < COMPLETE_FALLBACK_QUIET_MS) {
-          const remainingMs = Math.max(COMPLETE_GRACE_MS, COMPLETE_FALLBACK_QUIET_MS - quietMs)
-          current.completeTimer = setTimeout(() => this.scheduleRunCompleted(runId, event), remainingMs)
-          return
-        }
       }
       const completedEvent = this.completedEventWithUsage(current, event)
       this.persistCompletedUsage(current, completedEvent)

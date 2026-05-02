@@ -6,7 +6,7 @@ Enable with:
 
 ```bash
 export HERMES_WEBUI_BRIDGE=1
-export HERMES_TUI_ROOT=/home/xl/.hermes/hermes-publish.HkvvHk
+export HERMES_TUI_ROOT=/home/xl/.hermes/hermes-agent
 export HERMES_PYTHON=/home/xl/.hermes/hermes-agent/venv/bin/python
 ```
 
