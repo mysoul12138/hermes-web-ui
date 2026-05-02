@@ -232,12 +232,15 @@ describe('conversation DB service', () => {
 
     const detail = await mod.getConversationDetailFromDb('cont-2', { humanOnly: true })
     expect(detail?.messages.map((message: any) => message.content)).toEqual(['continue two', 'continuation two answer'])
-    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['cont-1'])
     expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
-      'root request',
-      'root answer',
       'continue one',
       'continuation one answer',
+    ])
+    expect(detail?.branches?.[0]?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.[0]?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
+      'root answer',
     ])
   })
 
@@ -731,10 +734,13 @@ describe('conversation DB service', () => {
 
     const detail = await mod.getConversationDetailFromDb('context-continuation', { humanOnly: true })
     expect(detail?.messages.map((message: any) => message.content)).toEqual(['continue branch'])
-    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-placeholder'])
     expect(detail?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
-      'root request',
       'branch work before compaction',
+    ])
+    expect(detail?.branches?.[0]?.branches?.map((branch: any) => branch.session_id)).toEqual(['root'])
+    expect(detail?.branches?.[0]?.branches?.[0]?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
     ])
   })
 

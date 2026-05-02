@@ -632,7 +632,7 @@ function aggregateSummary(rootId: string, byId: Map<string, ConversationSessionR
   const costStatuses = Array.from(new Set(chain.map(session => safeText(session.cost_status)).filter(Boolean)))
   const branchSessionCount = countConversationBranchSessions(chain, byId, childrenByParent)
     + (compressionHistory.length ? 1 + countConversationBranchSessions(compressionHistory, byId, childrenByParent) : 0)
-    + (bridgeContextHistory.length ? 1 + countConversationBranchSessions(bridgeContextHistory, byId, childrenByParent) : 0)
+    + (bridgeContextHistory.length ? bridgeContextHistory.length + countConversationBranchSessions(bridgeContextHistory, byId, childrenByParent) : 0)
 
   return {
     ...toSummary(root),
@@ -832,8 +832,56 @@ function buildBridgeContextHistoryBranch(
   if (!visibleRoot || !isBridgeContextBranchContinuationChild(visibleRoot, byId)) return null
   const historyChain = bridgeContextHistoryPathToRoot(visibleRoot, byId)
   if (!historyChain.length) return null
-  for (const session of historyChain) seen.add(session.id)
-  return buildHistoryBranchFromChain(db, historyChain, visibleRoot, byId, childrenByParent, seen)
+  return buildBridgeContextHistoryBranchForSession(
+    db,
+    historyChain[historyChain.length - 1],
+    visibleRoot,
+    byId,
+    childrenByParent,
+    seen,
+  )
+}
+
+function buildBridgeContextHistoryBranchForSession(
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+  historySession: ConversationSessionRow | undefined,
+  visibleRoot: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  seen: Set<string>,
+): ConversationBranch | null {
+  if (!historySession) return null
+  if (seen.has(historySession.id)) return null
+  if (!historySession.has_visible_messages && Number(historySession.tool_call_count || 0) <= 0) return null
+
+  seen.add(historySession.id)
+  const olderParent = historySession.parent_session_id ? byId.get(historySession.parent_session_id) : undefined
+  const olderHistoryBranch = olderParent && olderParent.source === historySession.source
+    ? buildBridgeContextHistoryBranchForSession(db, olderParent, historySession, byId, childrenByParent, seen)
+    : null
+  const sideBranches = collectConversationBranches(db, [historySession], byId, childrenByParent, seen, false)
+  const messages = loadVisibleMessagesForSessions(db, [historySession])
+
+  return {
+    session_id: historySession.id,
+    parent_session_id: visibleRoot.id,
+    source: safeText(historySession.source),
+    model: safeText(historySession.model),
+    title: historySession.title || historySession.preview || historySession.id,
+    started_at: Number(historySession.started_at || 0),
+    ended_at: historySession.ended_at ?? null,
+    last_active: Number(historySession.last_active || historySession.started_at || 0),
+    is_active: historySession.is_active,
+    messages,
+    visible_count: messages.length,
+    thread_session_count: 1,
+    input_tokens: Number(historySession.input_tokens || 0),
+    output_tokens: Number(historySession.output_tokens || 0),
+    branches: [
+      ...(olderHistoryBranch ? [olderHistoryBranch] : []),
+      ...sideBranches,
+    ],
+  }
 }
 
 function buildCompressionContinuationAlternativeBranches(
