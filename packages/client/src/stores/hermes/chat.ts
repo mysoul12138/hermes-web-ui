@@ -1187,6 +1187,50 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function detailMessagesBelongToBranch(detail: SessionDetail, branchId: string): boolean {
+    if (detail.id && detail.id !== branchId) return false
+    const ids = new Set((detail.messages || [])
+      .map(message => message.session_id)
+      .filter(Boolean))
+    return ids.size === 0 || (ids.size === 1 && ids.has(branchId))
+  }
+
+  function branchToSessionDetail(branch: ConversationBranch): SessionDetail {
+    return {
+      id: branch.session_id,
+      source: branch.source === 'webui-bridge' ? 'tui' : branch.source,
+      model: branch.model,
+      title: branch.title,
+      started_at: branch.started_at,
+      ended_at: branch.ended_at,
+      last_active: branch.last_active,
+      message_count: branch.messages.length,
+      tool_call_count: 0,
+      input_tokens: branch.input_tokens ?? 0,
+      output_tokens: branch.output_tokens ?? 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      messages: branch.messages.map(message => ({
+        id: message.id as number,
+        session_id: branch.session_id,
+        role: message.role,
+        content: message.content,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: message.timestamp,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      })),
+    }
+  }
+
   function syncBranchSessionFromBranch(rootSessionId: string, branch: ConversationBranch) {
     const existing = sessions.value.find(session => session.id === branch.session_id)
     if (!existing) return
@@ -1279,6 +1323,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const detail = await fetchResolvedSessionDetail(branchId)
       if (!detail || isBridgeFallbackSession(detail)) return
+      if (!detailMessagesBelongToBranch(detail, branchId)) return
       const mapped = mapHermesMessages(detail.messages || [])
       const mappedOnlySubagentStatus = mapped.length > 0 && mapped.every(message => isSubagentStatusText(message.content))
       if (branch.is_active && mappedOnlySubagentStatus) return
@@ -1313,7 +1358,7 @@ export const useChatStore = defineStore('chat', () => {
       let prefetchedDetail: SessionDetail | null = null
       try {
         const detail = await fetchResolvedSessionDetail(branchId)
-        if (detail && detail.messages && !isBridgeFallbackSession(detail)) {
+        if (detail && detail.messages && !isBridgeFallbackSession(detail) && detailMessagesBelongToBranch(detail, branchId)) {
           prefetchedDetail = detail
           const mapped = mapHermesMessages(detail.messages)
           if (mapped.length > 0) {
@@ -1329,6 +1374,9 @@ export const useChatStore = defineStore('chat', () => {
         }
       } catch {
         // Branch session prefetch is best-effort; fall back to branch summary messages.
+      }
+      if (!prefetchedDetail) {
+        prefetchedDetail = branchToSessionDetail(branch)
       }
       const existing = sessions.value.find(session => session.id === branchId)
       if (existing) {
@@ -2340,6 +2388,21 @@ function isStaleBridgeRunError(error: unknown): boolean {
     }
   }
 
+  async function refreshSessionAfterRunSettled(sid: string) {
+    const persistentSid = readBridgeBackingSessionId(sid)
+    if (persistentSid && persistentSid !== sid) {
+      await loadSessions()
+      await refreshSessionBranches(rootSessionIdFor(persistentSid))
+      return
+    }
+    if (sid === activeSessionId.value) {
+      await refreshActiveSession()
+      await refreshSessionBranches(rootSessionIdFor(sid))
+      return
+    }
+    await refreshSessionBranches(rootSessionIdFor(sid))
+  }
+
 
   function attachRunStream(sid: string, runId: string) {
     markInFlight(sid, runId)
@@ -2721,13 +2784,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
             stopClarifyPolling(sid)
             clearApproval(sid)
             clearClarify(sid)
-            if (sid === activeSessionId.value) {
-              void refreshActiveSession().finally(() => {
-                void refreshSessionBranches(rootSessionIdFor(sid))
-              })
-            } else {
-              void refreshSessionBranches(rootSessionIdFor(sid))
-            }
+            void refreshSessionAfterRunSettled(sid)
             break
           }
 

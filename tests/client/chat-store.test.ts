@@ -2541,6 +2541,147 @@ describe('Chat Store', () => {
     await refresh
   })
 
+  it('keeps lineage branch messages when session detail resolves to continuation root content', async () => {
+    const rootId = '20260502_135857_2f594e'
+    const historyId = '20260502_120953_713358'
+
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: rootId,
+      messages: [
+        { id: 10, session_id: rootId, role: 'user', content: 'Continue after compression', timestamp: 1710000200 },
+        { id: 11, session_id: rootId, role: 'assistant', content: 'Continuation answer', timestamp: 1710000201 },
+      ],
+      visible_count: 2,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: historyId,
+        parent_session_id: rootId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Compressed history',
+        started_at: 1710000100,
+        ended_at: 1710000102,
+        last_active: 1710000102,
+        is_active: false,
+        visible_count: 2,
+        thread_session_count: 1,
+        messages: [
+          { id: 1, session_id: historyId, role: 'user', content: 'Original question before compression', timestamp: 1710000100 },
+          { id: 2, session_id: historyId, role: 'assistant', content: 'Original answer before compression', timestamp: 1710000101 },
+        ],
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(rootId, [
+      { id: 10, session_id: rootId, role: 'user', content: 'Continue after compression', timestamp: 1710000200 },
+      { id: 11, session_id: rootId, role: 'assistant', content: 'Continuation answer', timestamp: 1710000201 },
+    ]))
+
+    const store = useChatStore()
+    store.sessions = [{
+      id: rootId,
+      title: 'Continuation',
+      source: 'tui',
+      messages: [],
+      createdAt: 1710000200000,
+      updatedAt: 1710000201000,
+      branchSessionCount: 1,
+    }]
+    store.activeSessionId = rootId
+    store.activeSession = store.sessions[0]
+
+    await store.refreshSessionBranches(rootId)
+    await store.switchBranchSession(rootId, historyId)
+
+    expect(store.activeSessionId).toBe(historyId)
+    expect(store.messages.map(message => message.content)).toEqual([
+      'Original question before compression',
+      'Original answer before compression',
+    ])
+  })
+
+  it('refreshes continuation summaries after a bridge run settles', async () => {
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    const localId = 'local-continuation'
+    const persistentId = '20260502_135857_2f594e'
+    const historyId = '20260502_120953_713358'
+
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_settled',
+      status: 'queued',
+      bridge: true,
+      session_id: persistentId,
+      context_handoff: true,
+      context_message_count: 12,
+      context_token_count: 42000,
+    })
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(persistentId, 'Continuation'), source: 'tui', branch_session_count: 1 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: persistentId,
+      messages: [
+        { id: 10, session_id: persistentId, role: 'user', content: 'Continue', timestamp: 1710000200 },
+        { id: 11, session_id: persistentId, role: 'assistant', content: 'Done', timestamp: 1710000201 },
+      ],
+      visible_count: 2,
+      thread_session_count: 1,
+      branch_session_count: 1,
+      branches: [{
+        session_id: historyId,
+        parent_session_id: persistentId,
+        source: 'tui',
+        model: 'gpt-5.5',
+        title: 'Compressed history',
+        started_at: 1710000100,
+        ended_at: 1710000102,
+        last_active: 1710000102,
+        is_active: false,
+        visible_count: 2,
+        thread_session_count: 1,
+        messages: [
+          { id: 1, session_id: historyId, role: 'user', content: 'Before compression', timestamp: 1710000100 },
+          { id: 2, session_id: historyId, role: 'assistant', content: 'History answer', timestamp: 1710000101 },
+        ],
+        branches: [],
+      }],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(persistentId, [
+      { id: 10, session_id: persistentId, role: 'user', content: 'Continue', timestamp: 1710000200 },
+      { id: 11, session_id: persistentId, role: 'assistant', content: 'Done', timestamp: 1710000201 },
+    ]))
+
+    const store = useChatStore()
+    store.sessions = [{
+      id: localId,
+      title: 'Local continuation',
+      source: 'tui',
+      messages: [],
+      createdAt: 1710000000000,
+      updatedAt: 1710000000000,
+    }]
+    store.activeSessionId = localId
+    store.activeSession = store.sessions[0]
+
+    await store.sendMessage('Continue')
+    onEvent?.({ event: 'message.delta', delta: 'Done' })
+    onEvent?.({ event: 'run.completed', content: 'Done' })
+    await flushPromises()
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(persistentId)
+    expect(store.sessionBranchCount(persistentId)).toBe(1)
+    expect(store.sessionBranches(persistentId).map(branch => branch.session_id)).toEqual([historyId])
+  })
+
   it('merges a live subagent branch into its persisted tui branch when the live title has a Subagent prefix', async () => {
     let onEvent: ((event: Record<string, any>) => void) | null = null
     mockChatApi.streamRunEvents.mockImplementation((

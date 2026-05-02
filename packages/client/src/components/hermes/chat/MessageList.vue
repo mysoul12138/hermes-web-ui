@@ -87,6 +87,18 @@ const compressionNoticeMeta = computed(() => {
   return "";
 });
 
+const compressionAnchorMessageId = computed(() => {
+  if (!chatStore.activeCompression) return null;
+  const messages = displayMessages.value;
+  return [...messages].reverse().find((msg) => msg.role === "assistant")?.id
+    || messages[messages.length - 1]?.id
+    || null;
+});
+
+function shouldShowCompressionAfter(msg: { id: string }): boolean {
+  return !!chatStore.activeCompression && msg.id === compressionAnchorMessageId.value;
+}
+
 function isNearBottom(threshold = LATEST_THRESHOLD): boolean {
   const el = listRef.value;
   if (!el) return true;
@@ -208,6 +220,7 @@ watch(
       last.toolResult?.length || 0,
       displayMessages.value.length,
       showRunPlaceholder.value ? "placeholder" : "",
+      chatStore.activeCompression?.status || "",
     ].join(":");
   },
   () => {
@@ -231,48 +244,48 @@ watch(
           <span class="branch-view-title">{{ chatStore.activeSession.title || chatStore.activeSession.id }}</span>
           <span class="branch-view-meta">{{ t("chat.branchActiveHint") }}</span>
         </div>
-        <div
-          v-if="chatStore.activeCompression"
-          class="compression-notice"
-          :class="compressionNoticeClass"
-          aria-live="polite"
-        >
-          <span class="compression-notice-icon" aria-hidden="true">
-            <svg v-if="chatStore.activeCompression.status === 'started'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2v4" />
-              <path d="M12 18v4" />
-              <path d="m4.93 4.93 2.83 2.83" />
-              <path d="m16.24 16.24 2.83 2.83" />
-              <path d="M2 12h4" />
-              <path d="M18 12h4" />
-              <path d="m4.93 19.07 2.83-2.83" />
-              <path d="m16.24 7.76 2.83-2.83" />
-            </svg>
-            <svg v-else-if="chatStore.activeCompression.status === 'failed'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 9v4" />
-              <path d="M12 17h.01" />
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
-            </svg>
-            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M20 6 9 17l-5-5" />
-            </svg>
-          </span>
-          <span class="compression-notice-copy">
-            <span class="compression-notice-title">{{ compressionNoticeTitle }}</span>
-            <span v-if="compressionNoticeMeta" class="compression-notice-meta">{{ compressionNoticeMeta }}</span>
-          </span>
-        </div>
         <div v-if="displayMessages.length === 0" class="empty-state">
           <img src="/logo.png" :alt="assistantName" class="empty-logo" />
           <p>{{ t("chat.emptyState") }}</p>
         </div>
         <div v-else class="message-list-stack">
-          <MessageItem
-            v-for="msg in displayMessages"
-            :key="msg.id"
-            :message="msg"
-            :highlight="chatStore.focusMessageId === msg.id"
-          />
+          <template v-for="msg in displayMessages" :key="msg.id">
+            <MessageItem
+              :message="msg"
+              :highlight="chatStore.focusMessageId === msg.id"
+            />
+            <div
+              v-if="shouldShowCompressionAfter(msg)"
+              class="compression-notice"
+              :class="compressionNoticeClass"
+              aria-live="polite"
+            >
+              <span class="compression-notice-icon" aria-hidden="true">
+                <svg v-if="chatStore.activeCompression?.status === 'started'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2v4" />
+                  <path d="M12 18v4" />
+                  <path d="m4.93 4.93 2.83 2.83" />
+                  <path d="m16.24 16.24 2.83 2.83" />
+                  <path d="M2 12h4" />
+                  <path d="M18 12h4" />
+                  <path d="m4.93 19.07 2.83-2.83" />
+                  <path d="m16.24 7.76 2.83-2.83" />
+                </svg>
+                <svg v-else-if="chatStore.activeCompression?.status === 'failed'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 9v4" />
+                  <path d="M12 17h.01" />
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                </svg>
+                <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+              </span>
+              <span class="compression-notice-copy">
+                <span class="compression-notice-title">{{ compressionNoticeTitle }}</span>
+                <span v-if="compressionNoticeMeta" class="compression-notice-meta">{{ compressionNoticeMeta }}</span>
+              </span>
+            </div>
+          </template>
           <div v-if="showRunPlaceholder" class="run-placeholder" aria-live="polite">
             <img :src="assistantAvatarUrl" :alt="assistantName" class="run-placeholder-avatar" />
             <div class="run-placeholder-content">
