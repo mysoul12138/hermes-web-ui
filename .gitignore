@@ -31,5 +31,7 @@ hermes-dependencies.md
 *.sln
 *.sw?
 .superpowers/
-# Preview artifacts
+# Preview & debug artifacts
 output/
+.playwright-cli/
+.tmp-debug-*/
