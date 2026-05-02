@@ -1,4 +1,4 @@
-import { cancelRun, startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import { cancelRun, startRun, steerSession, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
 import {
   getPendingApproval,
   respondApproval as respondApprovalApi,
@@ -17,6 +17,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useAppStore } from './app'
 import { useProfilesStore } from './profiles'
+import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 
 export interface Attachment {
@@ -1632,6 +1633,34 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   function getQueuedMessages(sid: string) {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
+  }
+
+  async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
+    const text = content.trim()
+    try {
+      const result = await steerSession(sid, text)
+      if (result?.ok) {
+        const userMsg: Message = {
+          id: uid(),
+          role: 'user',
+          content: text,
+          timestamp: Date.now(),
+          attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          steered: true,
+        }
+        addMessage(sid, userMsg)
+        updateSessionTitle(sid)
+        if (sid === activeSessionId.value) {
+          persistActiveMessages()
+          persistSessionsList()
+        }
+        return
+      }
+    } catch (err) {
+      console.warn('Steer failed, falling back to queue:', err)
+    }
+    // Fall back to queue
+    queueBusyInput(sid, content, attachments)
   }
 
   function queueBusyInput(sid: string, content: string, attachments?: Attachment[]) {
@@ -3359,6 +3388,12 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
     if (isStreaming.value) {
+      const settingsStore = useSettingsStore()
+      const busyMode = settingsStore.display.busy_input_mode || 'queue'
+      if (busyMode === 'steer') {
+        await steerBusyInput(sid, content, attachments)
+        return
+      }
       queueBusyInput(sid, content, attachments)
       return
     }

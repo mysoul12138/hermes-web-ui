@@ -448,7 +448,9 @@ export default {
       bellOnCompleteHint: 'AI 응답 완료 시 알림음 재생',
       busyInputMode: '바쁨 입력 모드',
       busyInputModeHint: 'AI 처리 중 /steer 주입 허용',
-      theme: '테마',
+
+      busyInputModeQueue: '대기열',
+      busyInputModeSteer: '주입',      theme: '테마',
       themeHint: '라이트, 다크 또는 시스템 설정 따르기',
       themeLight: '라이트',
       themeDark: '다크',

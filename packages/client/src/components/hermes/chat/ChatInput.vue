@@ -23,7 +23,21 @@ const dragCounter = ref(0)
 const isComposing = ref(false)
 const autoPlaySpeech = ref(false)
 
-const willQueueInput = computed(() => chatStore.isStreaming)
+const willQueueInput = computed(() => {
+  if (!chatStore.isStreaming) return false
+  const mode = settingsStore.display.busy_input_mode || 'queue'
+  return mode === 'queue'
+})
+const willSteerInput = computed(() => {
+  if (!chatStore.isStreaming) return false
+  const mode = settingsStore.display.busy_input_mode || 'queue'
+  return mode === 'steer'
+})
+const busyInputLabel = computed(() => {
+  if (willSteerInput.value) return t('chat.steerMessage')
+  if (willQueueInput.value) return t('chat.queueMessage')
+  return t('chat.send')
+})
 const queuedCount = computed(() => chatStore.messages.filter(message => message.queued).length)
 const canSend = computed(() => !!(inputText.value.trim() || attachments.value.length > 0))
 
@@ -330,6 +344,9 @@ function isImage(type: string): boolean {
         @input="handleInput"
         @paste="handlePaste"
       ></textarea>
+      <div v-if="chatStore.isStreaming" class="busy-input-hint">
+        {{ willSteerInput ? t('chat.busyInputWillSteer') : t('chat.busyInputWillQueue') }}
+      </div>
       <div class="input-actions">
         <NButton
           v-if="chatStore.isStreaming"
@@ -348,7 +365,7 @@ function isImage(type: string): boolean {
           <template #icon>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </template>
-          {{ willQueueInput ? t('chat.queueMessage') : t('chat.send') }}
+          {{ busyInputLabel }}
         </NButton>
       </div>
     </div>
@@ -583,5 +600,12 @@ function isImage(type: string): boolean {
   border-color: var(--accent-info);
   border-style: dashed;
   background-color: rgba(var(--accent-info-rgb), 0.04);
+}
+
+.busy-input-hint {
+  font-size: 12px;
+  color: $text-muted;
+  padding: 4px 0 2px;
+  font-style: italic;
 }
 </style>

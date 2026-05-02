@@ -20,6 +20,11 @@ const themeOptions = [
   { label: t('settings.display.themeSystem'), value: 'system' },
 ]
 
+const busyInputModeOptions = [
+  { label: t('settings.display.busyInputModeQueue'), value: 'queue' },
+  { label: t('settings.display.busyInputModeSteer'), value: 'steer' },
+]
+
 async function save(values: Record<string, any>) {
   try {
     await settingsStore.saveSection('display', values)
@@ -175,7 +180,7 @@ async function handleAvatarChange(event: Event) {
       <NSwitch :value="settingsStore.display.bell_on_complete" @update:value="v => save({ bell_on_complete: v })" />
     </SettingRow>
     <SettingRow :label="t('settings.display.busyInputMode')" :hint="t('settings.display.busyInputModeHint')">
-      <NSwitch :value="settingsStore.display.busy_input_mode === 'interrupt'" @update:value="v => save({ busy_input_mode: v ? 'interrupt' : 'off' })" />
+      <NSelect :value="settingsStore.display.busy_input_mode || 'queue'" :options="busyInputModeOptions" size="small" :consistent-menu-width="false" class="input-sm" @update:value="v => save({ busy_input_mode: v })" />
     </SettingRow>
   </section>
 </template>

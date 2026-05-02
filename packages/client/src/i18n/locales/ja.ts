@@ -448,7 +448,9 @@ export default {
       bellOnCompleteHint: 'AI の応答完了時に通知音を再生',
       busyInputMode: '処理中入力モード',
       busyInputModeHint: 'AI 処理中に /steer 注入を許可',
-      theme: 'テーマ',
+
+      busyInputModeQueue: 'キュー',
+      busyInputModeSteer: '注入',      theme: 'テーマ',
       themeHint: 'ライト、ダーク、またはシステム設定に従う',
       themeLight: 'ライト',
       themeDark: 'ダーク',
