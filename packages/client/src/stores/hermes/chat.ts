@@ -1632,6 +1632,11 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   return localSteered.length ? [...mapped, ...localSteered] : mapped
 }
 
+function isStaleBridgeRunError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error || '')
+  return /session is not running|bridge session not found|Bridge steer error/i.test(text)
+}
+
   function getQueuedMessages(sid: string) {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
   }
@@ -1658,6 +1663,14 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         return
       }
     } catch (err) {
+      if (isStaleBridgeRunError(err)) {
+        console.warn('Steer target is no longer running; sending as a new turn')
+        clearInFlight(sid)
+        streamStates.value.delete(sid)
+        resumingRuns.value.delete(sid)
+        await submitMessage(sid, content, attachments)
+        return
+      }
       console.warn('Steer failed, falling back to queue:', err)
     }
     // Fall back to queue

@@ -1073,6 +1073,45 @@ describe('Chat Store', () => {
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 
+  it('sends a new turn instead of queueing when bridge steer reports the run is already done', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'steer'
+    const sid = 'web-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Finished bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+    mockChatApi.steerSession.mockRejectedValue(new Error('API Error 502: {"error":{"message":"Bridge steer error: session is not running"}}'))
+    mockChatApi.startRun.mockResolvedValueOnce({
+      run_id: 'run-after-stale-steer',
+      status: 'queued',
+      bridge: true,
+      session_id: sid,
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('new request after finished run')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'new request after finished run')
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      input: 'new request after finished run',
+      session_id: sid,
+    }))
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
   it('loads display settings before deciding whether busy input should steer', async () => {
     mockConfigApi.fetchConfig.mockResolvedValue({ display: { busy_input_mode: 'steer' } })
     const sid = 'web-session'
