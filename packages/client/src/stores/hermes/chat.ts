@@ -1818,6 +1818,14 @@ function isStaleBridgeRunError(error: unknown): boolean {
     }
   }
 
+  /** Immediately clear compression state for a session (used when compressed=false). */
+  function clearCompressionForSession(sid: string) {
+    clearCompressionNoticeTimer(sid)
+    const next = { ...compressionBySession.value }
+    delete next[sid]
+    compressionBySession.value = next
+  }
+
   function copyCompressionState(fromSid: string, toSid: string) {
     const state = compressionBySession.value[fromSid]
     if (!state || fromSid === toSid) return
@@ -2516,16 +2524,22 @@ function isStaleBridgeRunError(error: unknown): boolean {
           }
 
           case 'compression.completed': {
-            setCompressionState(sid, {
-              status: evt.error ? 'failed' : 'completed',
-              totalMessages: numberFromRunEvent(evt.totalMessages),
-              resultMessages: numberFromRunEvent(evt.resultMessages),
-              beforeTokens: numberFromRunEvent(evt.beforeTokens),
-              afterTokens: numberFromRunEvent(evt.afterTokens),
-              summaryTokens: numberFromRunEvent(evt.summaryTokens),
-              verbatimCount: numberFromRunEvent(evt.verbatimCount),
-              error: typeof evt.error === 'string' ? evt.error : undefined,
-            })
+            // When compressed=false the compressor skipped the LLM call —
+            // clear the notice immediately instead of showing a misleading "completed" banner.
+            if (evt.compressed === false) {
+              clearCompressionForSession(sid)
+            } else {
+              setCompressionState(sid, {
+                status: evt.error ? 'failed' : 'completed',
+                totalMessages: numberFromRunEvent(evt.totalMessages),
+                resultMessages: numberFromRunEvent(evt.resultMessages),
+                beforeTokens: numberFromRunEvent(evt.beforeTokens),
+                afterTokens: numberFromRunEvent(evt.afterTokens),
+                summaryTokens: numberFromRunEvent(evt.summaryTokens),
+                verbatimCount: numberFromRunEvent(evt.verbatimCount),
+                error: typeof evt.error === 'string' ? evt.error : undefined,
+              })
+            }
             break
           }
 
