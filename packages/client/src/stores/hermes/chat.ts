@@ -806,6 +806,11 @@ export const useChatStore = defineStore('chat', () => {
   const focusMessageId = ref<string | null>(null)
   const streamStates = ref<Map<string, AbortController>>(new Map())
   const isStreaming = computed(() => activeSessionId.value != null && streamStates.value.has(activeSessionId.value))
+  const autoPlaySpeechEnabled = ref(false)
+
+  function setAutoPlaySpeech(enabled: boolean) {
+    autoPlaySpeechEnabled.value = enabled
+  }
   const isLoadingSessions = ref(false)
   const sessionsLoaded = ref(false)
   const isLoadingMessages = ref(false)
@@ -2606,6 +2611,14 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
                 timestamp: Date.now(),
               })
             }
+            if (autoPlaySpeechEnabled.value) {
+              const lastAssistant = [...getSessionMsgs(sid)].reverse().find(m => m.role === 'assistant')
+              if (lastAssistant?.content) {
+                window.setTimeout(() => {
+                  playMessageSpeech(lastAssistant.id, lastAssistant.content)
+                }, 300)
+              }
+            }
             finishLiveSubagentBranches(sid, 'complete')
             cleanup()
             updateSessionTitle(sid)
@@ -3506,6 +3519,15 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     // not make the displayed "observed x seconds" metadata disappear.
   }
 
+  // 播放消息语音
+  function playMessageSpeech(messageId: string, content: string) {
+    // 触发自定义事件，让 MessageItem 组件处理播放
+    const event = new CustomEvent('auto-play-speech', {
+      detail: { messageId, content }
+    })
+    window.dispatchEvent(event)
+  }
+
   return {
     sessions,
     activeSessionId,
@@ -3544,5 +3566,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
     noteReasoningStart,
     noteReasoningEnd,
     clearThinkingObservationFor,
+    setAutoPlaySpeech,
+    playMessageSpeech,
   }
 })

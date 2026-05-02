@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Message } from "@/stores/hermes/chat";
-import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import { useMessage } from "naive-ui";
 import { downloadFile } from "@/api/hermes/download";
@@ -15,6 +15,7 @@ import {
   handleCodeBlockCopyClick,
   renderHighlightedCodeBlock,
 } from "./highlight";
+import { useGlobalSpeech } from "@/composables/useSpeech";
 
 const TOOL_PAYLOAD_DISPLAY_LIMIT = 2000;
 const USER_LONG_FORM_CHAR_THRESHOLD = 420;
@@ -30,6 +31,7 @@ const previewUrl = ref<string | null>(null);
 
 const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
+const speech = useGlobalSpeech();
 
 function withAuthToken(url: string): string {
   if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
@@ -373,6 +375,88 @@ const renderedToolResult = computed(() => {
     toolResultPayload.value.language,
   );
 });
+
+// 语音播放相关
+const canPlaySpeech = computed(() => {
+  // 只有 assistant 消息可以播放，且浏览器支持 Web Speech API
+  return props.message.role === 'assistant' &&
+         speech.isSupported &&
+         copyableContent.value;
+});
+
+const isPlayingThisMessage = computed(() => {
+  return speech.currentMessageId.value === props.message.id && speech.isPlaying.value;
+});
+
+const isPausedThisMessage = computed(() => {
+  return speech.currentMessageId.value === props.message.id && speech.isPaused.value;
+});
+
+function handleSpeechToggle() {
+  if (!canPlaySpeech.value) {
+    console.log('Speech not supported or no content')
+    return
+  }
+  const content = props.message.content || ''
+  console.log('Toggling speech for message:', props.message.id)
+  console.log('Current playing:', speech.currentMessageId.value, speech.isPlaying.value)
+  console.log('Call stack:', new Error().stack)
+
+  // 尝试获取男声语音包
+  const allVoices = speech.getAllVoices()
+  let maleVoice = null
+
+  // 查找可能的男声语音包
+  for (const voice of allVoices) {
+    const name = voice.name.toLowerCase()
+    // 常见男声关键词
+    if (name.includes('male') || name.includes('david') || name.includes('daniel') ||
+        name.includes('mark') || name.includes('yaoyao') || name.includes('google')) {
+      // 优先选择中文男声
+      if (voice.lang.startsWith('zh')) {
+        maleVoice = voice
+        break
+      }
+      // 如果没有找到中文男声，记住第一个男声
+      if (!maleVoice) {
+        maleVoice = voice
+      }
+    }
+  }
+
+  console.log('Selected male voice:', maleVoice?.name, maleVoice?.lang)
+
+  // 快速男声：语速快、音调低
+  speech.toggle(props.message.id, content, {
+    pitch: 0.5,   // 低沉
+    rate: 1.2,    // 快速
+    voice: maleVoice || undefined, // 使用男声，如果没有就用默认
+  })
+}
+
+// 监听自动播放事件
+let autoPlayHandler: ((e: Event) => void) | null = null
+
+onMounted(() => {
+  autoPlayHandler = (e: Event) => {
+    const customEvent = e as CustomEvent<{ messageId: string; content: string }>
+    if (customEvent.detail.messageId === props.message.id && canPlaySpeech.value) {
+      console.log('Auto-play triggered for message:', props.message.id)
+      handleSpeechToggle()
+    }
+  }
+  window.addEventListener('auto-play-speech', autoPlayHandler)
+})
+
+// 组件卸载时停止播放并清理事件监听
+onBeforeUnmount(() => {
+  if (autoPlayHandler) {
+    window.removeEventListener('auto-play-speech', autoPlayHandler)
+  }
+  if (speech.currentMessageId.value === props.message.id) {
+    speech.stop();
+  }
+});
 </script>
 
 <template>
@@ -475,6 +559,7 @@ const renderedToolResult = computed(() => {
             class="message-bubble"
             :class="{
               system: isSystem,
+              'speech-playing': isPlayingThisMessage && !isPausedThisMessage,
               'has-header': showMessageHeader,
               'message-bubble--user': message.role === 'user',
               'message-bubble--user-palette-5': message.role === 'user',
@@ -576,6 +661,21 @@ const renderedToolResult = computed(() => {
             <span v-else-if="message.queued" class="queued-badge">{{ t('chat.messageQueued') }}</span>
             <div class="message-meta-hover">
               <button
+                v-if="canPlaySpeech"
+                class="speech-bubble-btn"
+                :class="{ playing: isPlayingThisMessage, paused: isPausedThisMessage }"
+                @click="handleSpeechToggle"
+                :title="isPlayingThisMessage ? (isPausedThisMessage ? t('chat.resumeSpeech') : t('chat.pauseSpeech')) : t('chat.playSpeech')"
+              >
+                <svg v-if="!isPlayingThisMessage || isPausedThisMessage" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="6" y="4" width="4" height="16"/>
+                  <rect x="14" y="4" width="4" height="16"/>
+                </svg>
+              </button>
+              <button
                 v-if="copyableContent"
                 class="copy-bubble-btn"
                 @click="copyBubbleContent"
@@ -610,6 +710,7 @@ const renderedToolResult = computed(() => {
 
   display: flex;
   flex-direction: column;
+  position: relative;
 
   &.user {
     align-items: flex-end;
@@ -720,6 +821,18 @@ const renderedToolResult = computed(() => {
   }
 }
 
+@keyframes gradient-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
 .msg-body {
   display: flex;
   align-items: flex-start;
@@ -818,6 +931,68 @@ const renderedToolResult = computed(() => {
   word-break: break-word;
   border-radius: 10px;
   max-width: 100%;
+  position: relative;
+  box-sizing: border-box;
+
+  &.system {
+    border-left: 3px solid $warning;
+    border-radius: $radius-sm;
+    max-width: 80%;
+    background-color: rgba(var(--warning-rgb), 0.06);
+  }
+
+  &.speech-playing {
+    box-shadow:
+      0 0 0 2px #ff6b6b,
+      0 0 10px rgba(255, 107, 107, 0.4),
+      0 0 20px rgba(255, 107, 107, 0.2);
+    animation: rainbow-glow 4s linear infinite;
+  }
+}
+
+@keyframes rainbow-glow {
+  0% {
+    box-shadow:
+      0 0 0 2px #ff6b6b,
+      0 0 10px rgba(255, 107, 107, 0.4),
+      0 0 20px rgba(255, 107, 107, 0.2);
+  }
+  16.66% {
+    box-shadow:
+      0 0 0 2px #feca57,
+      0 0 10px rgba(254, 202, 87, 0.4),
+      0 0 20px rgba(254, 202, 87, 0.2);
+  }
+  33.33% {
+    box-shadow:
+      0 0 0 2px #48dbfb,
+      0 0 10px rgba(72, 219, 251, 0.4),
+      0 0 20px rgba(72, 219, 251, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px #ff9ff3,
+      0 0 10px rgba(255, 159, 243, 0.4),
+      0 0 20px rgba(255, 159, 243, 0.2);
+  }
+  66.66% {
+    box-shadow:
+      0 0 0 2px #54a0ff,
+      0 0 10px rgba(84, 160, 255, 0.4),
+      0 0 20px rgba(84, 160, 255, 0.2);
+  }
+  83.33% {
+    box-shadow:
+      0 0 0 2px #5f27cd,
+      0 0 10px rgba(95, 39, 205, 0.4),
+      0 0 20px rgba(95, 39, 205, 0.2);
+  }
+  100% {
+    box-shadow:
+      0 0 0 2px #ff6b6b,
+      0 0 10px rgba(255, 107, 107, 0.4),
+      0 0 20px rgba(255, 107, 107, 0.2);
+  }
 }
 
 .msg-attachments {
@@ -976,9 +1151,15 @@ const renderedToolResult = computed(() => {
   .message:hover & {
     opacity: 1;
   }
+
+  // 移动端一直显示按钮
+  @media (max-width: 768px) {
+    opacity: 1;
+  }
 }
 
-.copy-bubble-btn {
+.copy-bubble-btn,
+.speech-bubble-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1002,7 +1183,7 @@ const renderedToolResult = computed(() => {
 
     &:hover {
       color: #cccccc;
-      background: rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.1);
     }
   }
 }
@@ -1016,6 +1197,27 @@ const renderedToolResult = computed(() => {
   background: rgba(var(--accent-primary-rgb), 0.12);
   color: $accent-primary;
   font-size: 10px;
+}
+
+.speech-bubble-btn {
+  &.playing {
+    color: var(--accent-primary);
+    animation: pulse 1.5s ease-in-out infinite;
+
+    &.paused {
+      animation: none;
+      opacity: 0.6;
+    }
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .message-time {
