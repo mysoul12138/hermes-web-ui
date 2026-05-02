@@ -459,6 +459,20 @@ describe('Chat Store', () => {
     })
   })
 
+  it('does not show compression feedback for a newly mapped bridge session', async () => {
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_new_session',
+      status: 'queued',
+      bridge: true,
+      session_id: '20260502_120953_713358',
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('start a new chat')
+
+    expect(store.activeCompression).toBeNull()
+  })
+
   it('does not fetch a persistent continuation root through a bridge backing session', async () => {
     const continuationId = '20260502_135857_2f594e'
     const backingId = '20260502_120953_713358'

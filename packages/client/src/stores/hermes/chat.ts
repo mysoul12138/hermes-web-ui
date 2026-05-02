@@ -3328,7 +3328,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         const target = sessions.value.find(s => s.id === sid)
         if (target) target.source = 'tui'
         markBridgeLocalSession(sid, run.session_id)
-        if (run.context_handoff || history.length > 0 || (typeof run.session_id === 'string' && run.session_id && run.session_id !== sid)) {
+        if (run.context_handoff || history.length > 0) {
           setCompressionState(sid, {
             status: 'completed',
             messageCount: run.context_message_count || history.length || undefined,

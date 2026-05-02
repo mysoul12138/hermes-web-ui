@@ -31,3 +31,5 @@ hermes-dependencies.md
 *.sln
 *.sw?
 .superpowers/
+# Preview artifacts
+output/
