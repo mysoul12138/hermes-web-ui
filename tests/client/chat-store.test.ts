@@ -1174,6 +1174,48 @@ describe('Chat Store', () => {
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 
+  it('treats a retained in-flight bridge run as active even after the SSE controller is gone', async () => {
+    mockConfigApi.fetchConfig.mockResolvedValue({ display: { busy_input_mode: 'steer' } })
+    let dropStream: (() => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      _eventHandler: (event: Record<string, any>) => void,
+      _doneHandler: () => void,
+      errorHandler: (error: Error) => void,
+    ) => {
+      dropStream = () => errorHandler(new Error('SSE connection error'))
+      return { abort: vi.fn() }
+    })
+    const sid = 'web-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Recovering bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_recovering', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+    dropStream?.()
+    await flushPromises()
+
+    expect(store.isRunActive).toBe(true)
+
+    await store.sendMessage('adjust direction while recovering')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction while recovering')
+    expect(mockChatApi.startRun).not.toHaveBeenCalled()
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
   it('coalesces rapid stream deltas before updating the active message', async () => {
     vi.useFakeTimers()
     let onEvent: ((event: Record<string, any>) => void) | null = null

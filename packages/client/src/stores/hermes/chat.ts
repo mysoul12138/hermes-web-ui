@@ -822,7 +822,7 @@ export const useChatStore = defineStore('chat', () => {
   const resumingRuns = ref<Set<string>>(new Set())
   const isRunActive = computed(() =>
     isStreaming.value
-    || (activeSessionId.value != null && isSessionLive(activeSessionId.value))
+    || (activeSessionId.value != null && (isSessionLive(activeSessionId.value) || !!readInFlight(activeSessionId.value)))
   )
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
