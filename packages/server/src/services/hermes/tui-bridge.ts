@@ -396,6 +396,7 @@ export class TuiBridgeService {
   private bridgeSessionsByWebSession = new Map<string, string>()
   private webSessionsByBridgeSession = new Map<string, string>()
   private persistentSessionsByWebSession = new Map<string, string>()
+  private webSessionsByPersistentSession = new Map<string, string>()
   private pendingPersistentResolutions = new Map<string, PendingPersistentResolution>()
   private activeRunsByBridgeSession = new Map<string, string>()
   private runs = new Map<string, RunState>()
@@ -417,6 +418,12 @@ export class TuiBridgeService {
 
   getPersistentSessionId(webSessionId: string): string | null {
     return this.persistentSessionsByWebSession.get(webSessionId) || null
+  }
+
+  private resolveWebSessionId(sessionId: string): string {
+    return this.bridgeSessionsByWebSession.has(sessionId)
+      ? sessionId
+      : this.webSessionsByPersistentSession.get(sessionId) || sessionId
   }
 
   async startRun(
@@ -545,6 +552,7 @@ export class TuiBridgeService {
 
   async steer(webSessionId: string, text: string) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
+    webSessionId = this.resolveWebSessionId(webSessionId)
     const bridgeSessionId = this.bridgeSessionsByWebSession.get(webSessionId)
     if (!bridgeSessionId) throw new Error('bridge session not found')
     const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
@@ -685,7 +693,12 @@ export class TuiBridgeService {
   }
 
   private rememberPersistentSessionId(webSessionId: string, persistentSessionId: string) {
+    const previousPersistentSessionId = this.persistentSessionsByWebSession.get(webSessionId)
+    if (previousPersistentSessionId && previousPersistentSessionId !== persistentSessionId) {
+      this.webSessionsByPersistentSession.delete(previousPersistentSessionId)
+    }
     this.persistentSessionsByWebSession.set(webSessionId, persistentSessionId)
+    this.webSessionsByPersistentSession.set(persistentSessionId, webSessionId)
     this.pendingPersistentResolutions.delete(webSessionId)
   }
 

@@ -1059,7 +1059,7 @@ describe('Chat Store', () => {
     await store.sendMessage('adjust direction')
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(backingId, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages).toEqual(
       expect.arrayContaining([
@@ -1099,7 +1099,7 @@ describe('Chat Store', () => {
     await flushPromises()
 
     expect(mockConfigApi.fetchConfig).toHaveBeenCalled()
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(backingId, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 

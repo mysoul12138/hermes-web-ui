@@ -1638,9 +1638,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const text = content.trim()
-    const steerSid = readBridgeBackingSessionId(sid) || sid
     try {
-      const result = await steerSession(steerSid, text)
+      const result = await steerSession(sid, text)
       if (result?.ok) {
         const userMsg: Message = {
           id: uid(),

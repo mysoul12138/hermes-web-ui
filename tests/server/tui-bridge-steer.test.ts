@@ -73,6 +73,36 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).closeRun('bridge_run_1')
   })
 
+  it('resolves persistent session ids back to the active web session before steering', async () => {
+    const client = new FakeGatewayClient()
+    client.supportsSessionSteer = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).rememberPersistentSessionId('web-session', 'persistent-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_1')
+    ;(bridge as any).runs.set('bridge_run_1', {
+      runId: 'bridge_run_1',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+    })
+
+    const result = await bridge.steer('persistent-session', 'adjust direction')
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'queued',
+      text: 'adjust direction',
+    })
+    expect(client.requests).toEqual([
+      { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
+    ])
+    ;(bridge as any).closeRun('bridge_run_1')
+  })
+
   it('falls back to command.dispatch /steer when the bridge lacks session.steer', async () => {
     const client = new FakeGatewayClient()
     const bridge = new TuiBridgeService(client as any)
