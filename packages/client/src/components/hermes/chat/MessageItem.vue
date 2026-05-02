@@ -118,6 +118,10 @@ const thinkingFullText = computed(() => {
   return parts.join("\n\n");
 });
 
+const renderThinkingAsPlainText = computed(() =>
+  props.message.isStreaming && thinkingStreamingNow.value,
+);
+
 const thinkingCharCount = computed(() => {
   let count = visibleThinkingSegments.value.reduce((sum, segment) => sum + [...segment].length, 0);
   if (visiblePendingThinking.value) count += [...visiblePendingThinking.value].length;
@@ -646,7 +650,8 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
                 <div v-if="thinkingExpanded" class="thinking-body">
-                  <MarkdownRenderer :content="thinkingFullText" />
+                  <pre v-if="renderThinkingAsPlainText" class="thinking-stream-text">{{ thinkingFullText }}</pre>
+                  <MarkdownRenderer v-else :content="thinkingFullText" />
                 </div>
               </div>
               <MarkdownRenderer
@@ -1130,6 +1135,13 @@ onBeforeUnmount(() => {
     :deep(p) {
       margin: 0.3em 0;
     }
+  }
+
+  .thinking-stream-text {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
   }
 }
 

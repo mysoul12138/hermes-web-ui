@@ -24,12 +24,12 @@ const isComposing = ref(false)
 const autoPlaySpeech = ref(false)
 
 const willQueueInput = computed(() => {
-  if (!chatStore.isStreaming) return false
+  if (!chatStore.isRunActive) return false
   const mode = settingsStore.display.busy_input_mode || 'queue'
   return mode === 'queue'
 })
 const willSteerInput = computed(() => {
-  if (!chatStore.isStreaming) return false
+  if (!chatStore.isRunActive) return false
   const mode = settingsStore.display.busy_input_mode || 'queue'
   return mode === 'steer'
 })
@@ -344,12 +344,12 @@ function isImage(type: string): boolean {
         @input="handleInput"
         @paste="handlePaste"
       ></textarea>
-      <div v-if="chatStore.isStreaming" class="busy-input-hint">
+      <div v-if="chatStore.isRunActive" class="busy-input-hint">
         {{ willSteerInput ? t('chat.busyInputWillSteer') : t('chat.busyInputWillQueue') }}
       </div>
       <div class="input-actions">
         <NButton
-          v-if="chatStore.isStreaming"
+          v-if="chatStore.isRunActive"
           size="small"
           type="error"
           @click="chatStore.stopStreaming()"

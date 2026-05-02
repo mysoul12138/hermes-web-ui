@@ -574,6 +574,7 @@ const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
 const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
 const POLL_INTERVAL_MS = 2000
 const COMPRESSION_NOTICE_TTL_MS = 15_000
+const STREAM_FLUSH_INTERVAL_MS = 50
 function isBridgeFallbackSession(detail: { source?: string; messages?: unknown[] } | null | undefined): boolean {
   return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
 }
@@ -1637,8 +1638,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
   async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const text = content.trim()
+    const steerSid = readBridgeBackingSessionId(sid) || sid
     try {
-      const result = await steerSession(sid, text)
+      const result = await steerSession(steerSid, text)
       if (result?.ok) {
         const userMsg: Message = {
           id: uid(),
@@ -2355,10 +2357,13 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         clearInterval(branchRefreshTimer)
         branchRefreshTimer = null
       }
+      flushStreamDeltas()
     }
 
     let persistTimer: ReturnType<typeof setTimeout> | null = null
     let branchRefreshTimer: ReturnType<typeof setInterval> | null = null
+    let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
+    const pendingStreamDeltas = new Map<string, { content: string; reasoning: string }>()
     let runProducedAssistantText = false
     let runHadToolActivity = false
     const schedulePersist = () => {
@@ -2368,6 +2373,48 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         persistSessionMessages(sid)
         persistSessionsList()
       }, 800)
+    }
+
+    const flushStreamDeltas = () => {
+      if (streamFlushTimer) {
+        clearTimeout(streamFlushTimer)
+        streamFlushTimer = null
+      }
+      if (pendingStreamDeltas.size === 0) return
+      const pending = Array.from(pendingStreamDeltas.entries())
+      pendingStreamDeltas.clear()
+      const msgs = getSessionMsgs(sid)
+      for (const [messageId, delta] of pending) {
+        const message = msgs.find(m => m.id === messageId)
+        if (!message) continue
+        const update: Partial<Message> = {}
+        if (delta.content) {
+          const prev = message.content || ''
+          const next = prev + delta.content
+          noteThinkingDelta(messageId, prev, next)
+          if (message.reasoning) noteReasoningEnd(messageId)
+          update.content = next
+        }
+        if (delta.reasoning) {
+          update.reasoning = (message.reasoning || '') + delta.reasoning
+          noteReasoningStart(messageId)
+        }
+        if (Object.keys(update).length > 0) updateMessage(sid, messageId, update)
+      }
+      schedulePersist()
+    }
+
+    const scheduleStreamFlush = () => {
+      if (streamFlushTimer) return
+      streamFlushTimer = setTimeout(flushStreamDeltas, STREAM_FLUSH_INTERVAL_MS)
+    }
+
+    const appendStreamDelta = (messageId: string, field: 'content' | 'reasoning', text: string) => {
+      if (!text) return
+      const existing = pendingStreamDeltas.get(messageId) || { content: '', reasoning: '' }
+      existing[field] += text
+      pendingStreamDeltas.set(messageId, existing)
+      scheduleStreamFlush()
     }
 
     if (runId.startsWith('bridge_run_')) {
@@ -2458,8 +2505,8 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
             if (last?.role === 'assistant' && last.isStreaming) {
-              updateMessage(sid, last.id, { reasoning: (last.reasoning || '') + text })
               noteReasoningStart(last.id)
+              appendStreamDelta(last.id, 'reasoning', text)
             } else {
               const newId = uid()
               addMessage(sid, {
@@ -2471,12 +2518,13 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
                 reasoning: text,
               })
               noteReasoningStart(newId)
+              schedulePersist()
             }
-            schedulePersist()
             break
           }
 
           case 'reasoning.available': {
+            flushStreamDeltas()
             const text = textFromRunEvent(evt)
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
@@ -2509,14 +2557,15 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
           case 'message.delta': {
             if (evt.delta) runProducedAssistantText = true
-            const msgs = getSessionMsgs(sid)
-            const last = msgs[msgs.length - 1]
+            let msgs = getSessionMsgs(sid)
+            let last = msgs[msgs.length - 1]
+            if (last?.role === 'assistant' && last.isStreaming && pendingStreamDeltas.get(last.id)?.reasoning) {
+              flushStreamDeltas()
+              msgs = getSessionMsgs(sid)
+              last = msgs[msgs.length - 1]
+            }
             if (last?.role === 'assistant' && last.isStreaming) {
-              const prev = last.content
-              const next = prev + (evt.delta || '')
-              noteThinkingDelta(last.id, prev, next)
-              if (last.reasoning) noteReasoningEnd(last.id)
-              updateMessage(sid, last.id, { content: next })
+              appendStreamDelta(last.id, 'content', evt.delta || '')
             } else {
               const newId = uid()
               const nextContent = evt.delta || ''
@@ -2528,13 +2577,14 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
                 isStreaming: true,
               })
               noteThinkingDelta(newId, '', nextContent)
+              schedulePersist()
             }
-            schedulePersist()
             break
           }
 
           case 'tool.start':
           case 'tool.started': {
+            flushStreamDeltas()
             runHadToolActivity = true
             const msgs = getSessionMsgs(sid)
             const last = msgs[msgs.length - 1]
@@ -3387,7 +3437,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
 
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
-    if (isStreaming.value) {
+    if (isRunActive.value) {
       const settingsStore = useSettingsStore()
       const busyMode = settingsStore.display.busy_input_mode || 'queue'
       if (busyMode === 'steer') {

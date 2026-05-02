@@ -1023,6 +1023,76 @@ describe('Chat Store', () => {
     )
   })
 
+  it('steers busy input for a resumed active bridge session', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'steer'
+    const sid = 'web-session'
+    const backingId = '20260502_203836_1522aa'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Running bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(bridgePersistentSessionKey(sid), backingId)
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.isRunActive).toBe(true)
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(backingId, 'adjust direction')
+    expect(mockChatApi.startRun).not.toHaveBeenCalled()
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+        }),
+      ]),
+    )
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('coalesces rapid stream deltas before updating the active message', async () => {
+    vi.useFakeTimers()
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('think fast')
+    await flushPromises()
+
+    onEvent?.({ event: 'reasoning.delta', text: 'A' })
+    onEvent?.({ event: 'reasoning.delta', text: 'B' })
+    onEvent?.({ event: 'reasoning.delta', text: 'C' })
+
+    expect(store.messages.find(message => message.role === 'assistant')?.reasoning).toBe('A')
+
+    await vi.advanceTimersByTimeAsync(49)
+    expect(store.messages.find(message => message.role === 'assistant')?.reasoning).toBe('A')
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(store.messages.find(message => message.role === 'assistant')?.reasoning).toBe('ABC')
+  })
+
   it('hydrates from default-profile legacy cache and migrates bulky storage to new keys only', async () => {
     const cachedSession = {
       id: 'legacy-1',
