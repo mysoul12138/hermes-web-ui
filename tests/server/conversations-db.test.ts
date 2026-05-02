@@ -241,6 +241,88 @@ describe('conversation DB service', () => {
     ])
   })
 
+  it('does not fold adjacent bridge context sessions when the child context references different history', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'previous-context-session',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'next-context-session',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 200.2,
+      ended_at: null,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, {
+      id: 7,
+      session_id: 'previous-context-session',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: browser tab crashes when loading this session\n\nCurrent user message:\ncontinue debugging render crash',
+      timestamp: 101,
+    })
+    insertMessage(db, { id: 8, session_id: 'previous-context-session', role: 'assistant', content: 'Inspecting the render crash', timestamp: 200 })
+    insertMessage(db, {
+      id: 9,
+      session_id: 'next-context-session',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: fast thinking stream overloads the UI\n\nCurrent user message:\nopen this project path',
+      timestamp: 200.2,
+    })
+    insertMessage(db, { id: 10, session_id: 'next-context-session', role: 'assistant', content: 'Reviewing your changes', timestamp: 201 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual([
+      'next-context-session',
+      'previous-context-session',
+    ])
+
+    const detail = await mod.getConversationDetailFromDb('next-context-session', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'open this project path',
+      'Reviewing your changes',
+    ])
+    expect(detail?.branches || []).toEqual([])
+  })
+
   it('aggregates a compression continuation without using full CLI export', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')

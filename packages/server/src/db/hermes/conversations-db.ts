@@ -62,6 +62,7 @@ interface ConversationSessionRow {
   actual_cost_usd: number | null
   cost_status: string
   raw_preview: string
+  raw_context_anchor: string
   preview: string
   last_active: number
   has_visible_messages: boolean
@@ -170,6 +171,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
   const startedAt = normalizeNumber(row.started_at)
   const endedAt = normalizeNullableNumber(row.ended_at)
   const rawPreview = safeText(row.raw_preview || row.preview || '')
+  const rawContextAnchor = safeText(row.raw_context_anchor || '')
   const preview = excerpt(bridgeContextDisplayText(rawPreview) || rawPreview)
   const rawTitle = normalizeNullableString(row.title)
   const title = rawTitle || (preview ? (preview.length > 40 ? `${preview.slice(0, 40)}...` : preview) : null)
@@ -199,6 +201,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
     raw_preview: rawPreview,
+    raw_context_anchor: rawContextAnchor,
     preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
     has_visible_messages: !!normalizeNumber(row.has_visible_messages) || isLiveTuiProcess,
@@ -231,6 +234,7 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     actual_cost_usd: null,
     cost_status: '',
     raw_preview: 'Running TUI session',
+    raw_context_anchor: 'Running TUI session',
     preview: 'Running TUI session',
     last_active: nowSeconds,
     has_visible_messages: true,
@@ -270,6 +274,29 @@ function bridgeContextDisplayText(value: unknown): string | null {
   return currentUserText || null
 }
 
+function bridgeContextHistoryText(value: unknown): string {
+  const text = textFromContent(value).trim()
+  if (!isBridgeContextPrompt(text)) return ''
+  const normalized = text.toLowerCase()
+  const markerIndex = normalized.lastIndexOf(BRIDGE_CURRENT_USER_MARKER)
+  const history = markerIndex >= 0 ? text.slice(0, markerIndex) : text
+  return normalizeText(history)
+}
+
+function contextReferencesParent(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  const history = bridgeContextHistoryText(child.raw_preview || child.preview || child.title)
+  if (!history) return false
+  const anchors = [
+    parent.raw_context_anchor,
+    parent.raw_preview,
+    parent.preview,
+    parent.title,
+  ]
+    .map(anchor => normalizeText(anchor))
+    .filter(anchor => anchor.length >= 8)
+  return anchors.some(anchor => history.includes(anchor) || anchor.includes(history))
+}
+
 function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
   if (child.id === parent.id || child.source !== parent.source || child.source === 'tool') return false
   if (parent.ended_at == null) return false
@@ -293,6 +320,7 @@ function isLikelyBridgeContextBranchContinuation(parent: ConversationSessionRow,
   if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
   if (!parent.parent_session_id) return false
   if (!isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
+  if (!contextReferencesParent(parent, child)) return false
 
   const childStarted = Number(child.started_at || 0)
   const parentStarted = Number(parent.started_at || 0)
@@ -307,6 +335,7 @@ function isLikelyBridgeContextRootContinuation(parent: ConversationSessionRow, c
   if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
   if (child.parent_session_id != null && child.parent_session_id !== parent.id) return false
   if (!isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
+  if (!contextReferencesParent(parent, child)) return false
   if (!parent.has_visible_messages && Number(parent.tool_call_count || 0) <= 0) return false
 
   const childStarted = Number(child.started_at || 0)
@@ -946,6 +975,17 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
         ),
         ''
       ) AS raw_preview,
+      COALESCE(
+        (
+          SELECT REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' ')
+          FROM messages m
+          WHERE m.session_id = s.id
+            AND ${VISIBLE_HUMAN_MESSAGE_SQL}
+          ORDER BY m.timestamp DESC, m.id DESC
+          LIMIT 1
+        ),
+        ''
+      ) AS raw_context_anchor,
       COALESCE((SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id), s.started_at) AS last_active,
       CASE WHEN EXISTS (
         SELECT 1
