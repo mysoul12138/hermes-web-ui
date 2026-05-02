@@ -20,6 +20,9 @@ export interface StartRunResponse {
   bridge?: boolean
   session_id?: string
   bridge_session_id?: string
+  context_handoff?: boolean
+  context_message_count?: number
+  context_token_count?: number
 }
 
 export interface SteerSessionResponse {

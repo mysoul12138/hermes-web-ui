@@ -75,6 +75,17 @@ export interface BridgeRunEvent {
   api_calls?: number
   cost_usd?: number
   duration_seconds?: number
+  message_count?: number
+  token_count?: number
+  compressed?: boolean
+  llmCompressed?: boolean
+  totalMessages?: number
+  resultMessages?: number
+  beforeTokens?: number
+  afterTokens?: number
+  summaryTokens?: number
+  verbatimCount?: number
+  compressedStartIndex?: number
   usage?: {
     input_tokens: number
     output_tokens: number
@@ -432,6 +443,32 @@ export class TuiBridgeService {
     setRunSession(runId, webSessionId)
     this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
     this.push(runId, { event: 'run.started', run_id: runId, timestamp: Date.now() / 1000 })
+    const contextTokenCount = countTokens(contextPrompt)
+    const contextMessageCount = conversationHistory.filter(item => item.content?.trim()).length
+    const usesContextHandoff = bridgeSession.created && contextPrompt !== input
+    if (usesContextHandoff) {
+      this.push(runId, {
+        event: 'compression.started',
+        run_id: runId,
+        timestamp: Date.now() / 1000,
+        message_count: contextMessageCount,
+        token_count: contextTokenCount,
+      })
+      this.push(runId, {
+        event: 'compression.completed',
+        run_id: runId,
+        timestamp: Date.now() / 1000,
+        compressed: true,
+        llmCompressed: false,
+        totalMessages: contextMessageCount,
+        resultMessages: Math.min(contextMessageCount, 8),
+        beforeTokens: contextTokenCount,
+        afterTokens: contextTokenCount,
+        summaryTokens: 0,
+        verbatimCount: Math.min(contextMessageCount, 8),
+        compressedStartIndex: 0,
+      })
+    }
     this.scheduleIdleHeartbeat(runId)
 
     const prompt = bridgeSession.created ? contextPrompt : input
@@ -464,6 +501,9 @@ export class TuiBridgeService {
       bridge: true,
       session_id: persistentSessionId,
       bridge_session_id: bridgeSessionId,
+      context_handoff: usesContextHandoff,
+      context_message_count: contextMessageCount,
+      context_token_count: contextTokenCount,
     }
   }
 

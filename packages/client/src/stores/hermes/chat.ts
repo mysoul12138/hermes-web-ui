@@ -95,6 +95,10 @@ function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
+function isPersistentTuiSessionId(sessionId: string): boolean {
+  return /^\d{8}_\d{6}_[0-9a-f]+$/i.test(sessionId)
+}
+
 async function uploadFiles(attachments: Attachment[]): Promise<{ name: string; path: string }[]> {
   if (attachments.length === 0) return []
   const formData = new FormData()
@@ -1680,6 +1684,12 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
   }
 
   function readBridgePersistentSessionId(sid: string) {
+    const persistent = localStorage.getItem(bridgePersistentSessionKey(sid)) || null
+    if (persistent && persistent !== sid && isPersistentTuiSessionId(sid)) return null
+    return persistent
+  }
+
+  function readBridgeBackingSessionId(sid: string) {
     return localStorage.getItem(bridgePersistentSessionKey(sid)) || null
   }
 
@@ -2146,7 +2156,7 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       )
       const bridgeLocalByPersistent = new Map<string, Session>()
       for (const s of sessions.value) {
-        const persistentId = readBridgePersistentSessionId(s.id)
+        const persistentId = readBridgeBackingSessionId(s.id)
         if (persistentId) bridgeLocalByPersistent.set(persistentId, s)
       }
       const isLocalRunActive = (sid: string) =>
@@ -2182,8 +2192,9 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
       // cleaned up along with their cached messages.
       const localOnly = sessions.value.filter(s => {
         if (freshIds.has(s.id)) return false
-        const persistentId = readBridgePersistentSessionId(s.id)
+        const persistentId = readBridgeBackingSessionId(s.id)
         if (persistentId && freshRawIds.has(persistentId)) {
+          if (isPersistentTuiSessionId(s.id) && persistentId !== s.id) return true
           if (isLocalRunActive(s.id)) return true
           if (activeSessionId.value === s.id) {
             activeSessionId.value = persistentId
@@ -3297,6 +3308,13 @@ function withLocalSteeredMessages(mapped: Message[], current: Message[]): Messag
         const target = sessions.value.find(s => s.id === sid)
         if (target) target.source = 'tui'
         markBridgeLocalSession(sid, run.session_id)
+        if (run.context_handoff || history.length > 0 || (typeof run.session_id === 'string' && run.session_id && run.session_id !== sid)) {
+          setCompressionState(sid, {
+            status: 'completed',
+            messageCount: run.context_message_count || history.length || undefined,
+            tokenCount: numberFromRunEvent(run.context_token_count),
+          })
+        }
         persistSessionsList()
       }
       attachRunStream(sid, runId)

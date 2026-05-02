@@ -301,6 +301,38 @@ describe('TuiBridgeService steer compatibility', () => {
     vi.useRealTimers()
   })
 
+  it('emits compression feedback when a new bridge session receives context history', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await bridge.startRun('current question', 'web-session-with-history', [
+      { role: 'user', content: 'hello from earlier context' },
+      { role: 'assistant', content: 'previous answer' },
+    ])
+
+    const events = (bridge as any).runs.get(result.run_id).events
+    expect(events).toEqual([
+      expect.objectContaining({ event: 'run.started' }),
+      expect.objectContaining({
+        event: 'compression.started',
+        message_count: 2,
+      }),
+      expect.objectContaining({
+        event: 'compression.completed',
+        compressed: true,
+        totalMessages: 2,
+      }),
+    ])
+    expect(result).toMatchObject({
+      bridge: true,
+      context_handoff: true,
+      context_message_count: 2,
+    })
+    expect(result.context_token_count).toBeGreaterThan(0)
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
   it('preserves provider usage from bridge completion payloads', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()

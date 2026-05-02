@@ -438,6 +438,122 @@ describe('Chat Store', () => {
     })
   })
 
+  it('shows bridge context handoff feedback from run creation', async () => {
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_context',
+      status: 'queued',
+      bridge: true,
+      session_id: '20260502_120953_713358',
+      context_handoff: true,
+      context_message_count: 8,
+      context_token_count: 42000,
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('continue with context')
+
+    expect(store.activeCompression).toMatchObject({
+      status: 'completed',
+      messageCount: 8,
+      tokenCount: 42000,
+    })
+  })
+
+  it('does not fetch a persistent continuation root through a bridge backing session', async () => {
+    const continuationId = '20260502_135857_2f594e'
+    const backingId = '20260502_120953_713358'
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_continuation',
+      status: 'queued',
+      bridge: true,
+      session_id: backingId,
+    })
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: continuationId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 2,
+      branch_session_count: 1,
+      branches: [{
+        session_id: backingId,
+        parent_session_id: continuationId,
+        source: 'tui',
+        model: 'gpt-4o',
+        title: 'Earlier context',
+        started_at: 1710000000,
+        ended_at: 1710000100,
+        last_active: 1710000100,
+        is_active: false,
+        messages: [],
+        visible_count: 0,
+        thread_session_count: 1,
+        branches: [],
+      }],
+    })
+
+    const store = useChatStore()
+    const session = {
+      id: continuationId,
+      title: 'Continuation',
+      source: 'tui',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2,
+      branchSessionCount: 1,
+    }
+    store.sessions = [session]
+    store.activeSessionId = continuationId
+    store.activeSession = session
+
+    await store.sendMessage('keep going')
+    await flushPromises()
+
+    expect(window.localStorage.getItem(bridgePersistentSessionKey(continuationId))).toBe(backingId)
+    expect(mockConversationsApi.fetchConversationDetail).toHaveBeenCalledWith(continuationId, { humanOnly: true })
+    expect(mockConversationsApi.fetchConversationDetail).not.toHaveBeenCalledWith(backingId, { humanOnly: true })
+    expect(store.activeSessionId).toBe(continuationId)
+    expect(store.sessionBranchCount(continuationId)).toBe(1)
+  })
+
+  it('keeps a persistent continuation session instead of replacing it with its bridge backing session', async () => {
+    const continuationId = '20260502_135857_2f594e'
+    const backingId = '20260502_120953_713358'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, continuationId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: continuationId,
+      title: 'Continuation',
+      source: 'tui',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2,
+      branchSessionCount: 1,
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(continuationId), '1')
+    window.localStorage.setItem(bridgePersistentSessionKey(continuationId), backingId)
+    window.localStorage.setItem(inFlightKey(continuationId), JSON.stringify({ runId: 'bridge_run_continuation', startedAt: Date.now() }))
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(backingId, 'Earlier context'), source: 'tui', branch_session_count: 0 },
+    ])
+    mockConversationsApi.fetchConversationDetail.mockResolvedValue({
+      session_id: continuationId,
+      messages: [],
+      visible_count: 0,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(continuationId, []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(continuationId)
+    expect(store.sessions.some(session => session.id === continuationId)).toBe(true)
+    expect(store.sessions.some(session => session.id === backingId)).toBe(false)
+  })
+
   it('backfills live tool details from session polling without replacing streamed text', async () => {
     vi.useFakeTimers()
 
