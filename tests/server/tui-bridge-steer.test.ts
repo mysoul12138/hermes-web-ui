@@ -88,6 +88,25 @@ describe('TuiBridgeService steer compatibility', () => {
     }
   })
 
+  it('ignores stale publish source-root env when the live hermes-agent tree exists', () => {
+    const hermesHome = join(tmpdir(), `hermes-webui-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    const liveRoot = join(hermesHome, 'hermes-agent')
+    const publishRoot = join(hermesHome, 'hermes-publish.HkvvHk')
+    mkdirSync(join(liveRoot, 'tui_gateway'), { recursive: true })
+    mkdirSync(join(publishRoot, 'tui_gateway'), { recursive: true })
+    writeFileSync(join(liveRoot, 'tui_gateway', 'entry.py'), '')
+    writeFileSync(join(publishRoot, 'tui_gateway', 'entry.py'), '')
+    process.env.HERMES_HOME = hermesHome
+    process.env.HERMES_TUI_ROOT = publishRoot
+    process.env.HERMES_PYTHON_SRC_ROOT = publishRoot
+    process.env.HERMES_AGENT_ROOT = publishRoot
+    try {
+      expect(resolveBridgeRoot()).toBe(liveRoot)
+    } finally {
+      rmSync(hermesHome, { recursive: true, force: true })
+    }
+  })
+
   it('uses session.steer directly when the bridge supports it', async () => {
     const client = new FakeGatewayClient()
     client.supportsSessionSteer = true

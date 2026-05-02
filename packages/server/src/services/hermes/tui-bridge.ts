@@ -169,6 +169,10 @@ function resolvePython(root: string): string {
   return hit || (process.platform === 'win32' ? 'python' : 'python3')
 }
 
+function isStalePublishRoot(root: string | undefined): boolean {
+  return !!root && /hermes-publish(?:[/.]|$)/.test(root)
+}
+
 export function resolveBridgeRoot(): string {
   const hermesHome = resolveHermesHome()
   const liveAgentRoot = existsSync(resolve(hermesHome, 'hermes-agent/tui_gateway/entry.py'))
@@ -178,9 +182,9 @@ export function resolveBridgeRoot(): string {
   const configuredSrcRoot = process.env.HERMES_PYTHON_SRC_ROOT?.trim()
   const configuredAgentRoot = process.env.HERMES_AGENT_ROOT?.trim()
   const configuredCandidates = [
-    configuredAgentRoot,
-    configuredSrcRoot,
-    configuredRoot && !/hermes-publish(?:[/.]|$)/.test(configuredRoot) ? configuredRoot : '',
+    !isStalePublishRoot(configuredAgentRoot) ? configuredAgentRoot : '',
+    !isStalePublishRoot(configuredSrcRoot) ? configuredSrcRoot : '',
+    !isStalePublishRoot(configuredRoot) ? configuredRoot : '',
   ].filter(Boolean) as string[]
   return configuredCandidates.find(root => existsSync(resolve(root, 'tui_gateway/entry.py')))
     || liveAgentRoot
@@ -305,9 +309,11 @@ class TuiGatewayClient extends EventEmitter {
     const env = { ...process.env }
     env.HERMES_PYTHON = python
     env.HERMES_TUI_ROOT = root
+    env.HERMES_PYTHON_SRC_ROOT = root
+    env.HERMES_AGENT_ROOT = root
     const pyPath = env.PYTHONPATH?.trim()
     const pyPathParts = pyPath
-      ? pyPath.split(delimiter).filter(part => part && part !== root && !/hermes-publish(?:[/.]|$)/.test(part))
+      ? pyPath.split(delimiter).filter(part => part && part !== root && !isStalePublishRoot(part))
       : []
     env.PYTHONPATH = [root, ...pyPathParts].join(delimiter)
     env.PATH = [
