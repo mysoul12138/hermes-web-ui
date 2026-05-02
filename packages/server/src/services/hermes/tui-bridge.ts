@@ -171,10 +171,20 @@ function resolvePython(root: string): string {
 
 export function resolveBridgeRoot(): string {
   const hermesHome = resolveHermesHome()
-  return process.env.HERMES_TUI_ROOT?.trim()
-    || process.env.HERMES_PYTHON_SRC_ROOT?.trim()
-    || process.env.HERMES_AGENT_ROOT?.trim()
-    || (existsSync(resolve(hermesHome, 'hermes-agent/tui_gateway/entry.py')) ? resolve(hermesHome, 'hermes-agent') : '')
+  const liveAgentRoot = existsSync(resolve(hermesHome, 'hermes-agent/tui_gateway/entry.py'))
+    ? resolve(hermesHome, 'hermes-agent')
+    : ''
+  const configuredRoot = process.env.HERMES_TUI_ROOT?.trim()
+  const configuredSrcRoot = process.env.HERMES_PYTHON_SRC_ROOT?.trim()
+  const configuredAgentRoot = process.env.HERMES_AGENT_ROOT?.trim()
+  const configuredCandidates = [
+    configuredAgentRoot,
+    configuredSrcRoot,
+    configuredRoot && !/hermes-publish(?:[/.]|$)/.test(configuredRoot) ? configuredRoot : '',
+  ].filter(Boolean) as string[]
+  return configuredCandidates.find(root => existsSync(resolve(root, 'tui_gateway/entry.py')))
+    || liveAgentRoot
+    || configuredRoot
     || resolve(hermesHome, 'hermes-publish.HkvvHk')
 }
 
@@ -294,8 +304,12 @@ class TuiGatewayClient extends EventEmitter {
     const cwd = process.env.HERMES_CWD || root
     const env = { ...process.env }
     env.HERMES_PYTHON = python
+    env.HERMES_TUI_ROOT = root
     const pyPath = env.PYTHONPATH?.trim()
-    env.PYTHONPATH = pyPath ? `${root}${delimiter}${pyPath}` : root
+    const pyPathParts = pyPath
+      ? pyPath.split(delimiter).filter(part => part && part !== root && !/hermes-publish(?:[/.]|$)/.test(part))
+      : []
+    env.PYTHONPATH = [root, ...pyPathParts].join(delimiter)
     env.PATH = [
       process.env.HERMES_EXTRA_PATH,
       resolve(process.env.HOME || '', '.local/bin'),
