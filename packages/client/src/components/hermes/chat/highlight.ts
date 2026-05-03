@@ -22,6 +22,24 @@ function sanitizeLanguageClass(value: string): string {
   return value.replace(/[^a-z0-9_-]/gi, '-') || 'plain'
 }
 
+function renderDiffLine(line: string): string {
+  let kind = 'context'
+  if (line.startsWith('+++') || line.startsWith('---')) kind = 'file'
+  else if (line.startsWith('@@')) kind = 'hunk'
+  else if (line.startsWith('+')) kind = 'add'
+  else if (line.startsWith('-')) kind = 'delete'
+  else if (line.startsWith('\\')) kind = 'meta'
+  return `<span class="diff-line diff-${kind}">${escapeHtml(line || ' ')}</span>`
+}
+
+function renderDiff(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(renderDiffLine)
+    .join('\n')
+}
+
 export function normalizeHighlightLanguage(lang?: string): string {
   const normalized = lang?.trim().toLowerCase() || ''
   return LANGUAGE_ALIASES[normalized] || normalized
@@ -55,7 +73,10 @@ export function renderHighlightedCodeBlock(
   let labelLanguage = requestedLanguage
 
   try {
-    if (normalizedLanguage && hljs.getLanguage(normalizedLanguage) && content.length <= highlightLimit) {
+    if (normalizedLanguage === 'diff' && content.length <= highlightLimit) {
+      highlighted = renderDiff(content)
+      codeClassLanguage = 'diff'
+    } else if (normalizedLanguage && hljs.getLanguage(normalizedLanguage) && content.length <= highlightLimit) {
       highlighted = hljs.highlight(content, {
         language: normalizedLanguage,
         ignoreIllegals: true,

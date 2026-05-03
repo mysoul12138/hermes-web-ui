@@ -84,6 +84,39 @@ describe('MessageItem tool details', () => {
     expect(diffSection.find('.code-lang').text()).toBe('diff')
     expect(diffSection.find('code.hljs').text()).toContain('-old value')
     expect(diffSection.find('code.hljs').text()).toContain('+new value')
+    expect(diffSection.find('.diff-delete').text()).toBe('-old value')
+    expect(diffSection.find('.diff-add').text()).toBe('+new value')
+    expect(diffSection.find('.diff-file').text()).toBe('--- a/src/file.ts')
+    expect(diffSection.find('.diff-hunk').text()).toBe('@@')
+
+    await diffSection.find('[data-copy-code="true"]').trigger('click')
+    expect(writeText).toHaveBeenCalledWith(inlineDiff)
+  })
+
+  it('truncates large inline diffs for display but copies the full diff', async () => {
+    const writeText = vi.mocked(navigator.clipboard.writeText)
+    const inlineDiff = Array.from({ length: 1200 }, (_, index) =>
+      index % 2 === 0 ? `-old value ${index}` : `+new value ${index}`,
+    ).join('\n')
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'tool-large-diff',
+          role: 'tool',
+          content: '',
+          timestamp: Date.now(),
+          toolName: 'patch',
+          toolInlineDiff: inlineDiff,
+          toolStatus: 'done',
+        } satisfies Message,
+      },
+    })
+
+    await wrapper.find('.tool-line').trigger('click')
+
+    const diffSection = wrapper.find('[data-copy-source="tool-inline-diff"]')
+    expect(diffSection.text()).toContain('chat.truncated')
+    expect(diffSection.findAll('.diff-line').length).toBeLessThan(220)
 
     await diffSection.find('[data-copy-code="true"]').trigger('click')
     expect(writeText).toHaveBeenCalledWith(inlineDiff)
