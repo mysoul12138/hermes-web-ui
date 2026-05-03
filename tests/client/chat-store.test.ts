@@ -324,6 +324,46 @@ describe('Chat Store', () => {
     )
   })
 
+  it('marks the run active while waiting for a slow startRun response', async () => {
+    let resolveStartRun: (value: { run_id: string; status: string }) => void = () => {}
+    mockChatApi.startRun.mockImplementationOnce(() => new Promise(resolve => {
+      resolveStartRun = resolve
+    }))
+
+    const store = useChatStore()
+    const sendPromise = store.sendMessage('slow cold start')
+    await flushPromises()
+
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'slow cold start',
+        }),
+      ]),
+    )
+    expect(store.isRunActive).toBe(true)
+    expect(mockChatApi.streamRunEvents).not.toHaveBeenCalled()
+
+    resolveStartRun({ run_id: 'run-slow-start', status: 'queued' })
+    await sendPromise
+    await flushPromises()
+
+    expect(mockChatApi.streamRunEvents).toHaveBeenCalledWith(
+      'run-slow-start',
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    )
+    expect(store.isRunActive).toBe(true)
+
+    const onDone = mockChatApi.streamRunEvents.mock.calls[0]?.[2]
+    expect(typeof onDone).toBe('function')
+    onDone()
+    await flushPromises()
+    expect(store.isRunActive).toBe(false)
+  })
+
   it('captures live tool payloads so tool cards can expand details', async () => {
     const store = useChatStore()
 

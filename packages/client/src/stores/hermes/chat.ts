@@ -807,6 +807,7 @@ export const useChatStore = defineStore('chat', () => {
   const activeSessionId = ref<string | null>(null)
   const focusMessageId = ref<string | null>(null)
   const streamStates = ref<Map<string, AbortController>>(new Map())
+  const pendingRunStarts = ref<Set<string>>(new Set())
   const isStreaming = computed(() => activeSessionId.value != null && streamStates.value.has(activeSessionId.value))
   const autoPlaySpeechEnabled = ref(false)
 
@@ -867,6 +868,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function isSessionLive(sessionId: string): boolean {
     return streamStates.value.has(sessionId)
+      || pendingRunStarts.value.has(sessionId)
       || resumingRuns.value.has(sessionId)
       || Object.values(liveBranchesBySession.value).some(branches => {
         const branch = findBranchById(branches, sessionId)
@@ -1850,6 +1852,10 @@ function isStaleBridgeRunError(error: unknown): boolean {
     removeItemWithLegacy(inFlightKey(sid), legacyInFlightKey(sid))
   }
 
+  function clearPendingRunStart(sid: string) {
+    pendingRunStarts.value.delete(sid)
+  }
+
   function readInFlight(sid: string): InFlightRun | null {
     const rec = loadJsonWithFallback<InFlightRun>(inFlightKey(sid), legacyInFlightKey(sid))
     if (!rec) return null
@@ -2264,7 +2270,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
         if (persistentId) bridgeLocalByPersistent.set(persistentId, s)
       }
       const isLocalRunActive = (sid: string) =>
-        streamStates.value.has(sid) || resumingRuns.value.has(sid) || !!readInFlight(sid)
+        streamStates.value.has(sid) || pendingRunStarts.value.has(sid) || resumingRuns.value.has(sid) || !!readInFlight(sid)
       const fresh = freshRaw.filter(s => {
         const localBridge = bridgeLocalByPersistent.get(s.id)
         return !(localBridge && isLocalRunActive(localBridge.id))
@@ -2413,6 +2419,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
 
 
   function attachRunStream(sid: string, runId: string) {
+    clearPendingRunStart(sid)
     markInFlight(sid, runId)
     stopPolling(sid)
     stopApprovalPolling(sid)
@@ -3433,6 +3440,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       persistActiveMessages()
       persistSessionsList()
     }
+    pendingRunStarts.value.add(sid)
 
     try {
 
@@ -3477,6 +3485,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
 
       const runId = (run as any).run_id || (run as any).id
       if (!runId) {
+        clearPendingRunStart(sid)
         addMessage(sid, {
           id: uid(),
           role: 'system',
@@ -3501,6 +3510,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       }
       attachRunStream(sid, runId)
     } catch (err: any) {
+      clearPendingRunStart(sid)
       addMessage(sid, {
         id: uid(),
         role: 'system',
@@ -3542,6 +3552,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
     if (!sid) return
     const inFlight = readInFlight(sid)
     const ctrl = streamStates.value.get(sid)
+    clearPendingRunStart(sid)
     if (ctrl) {
       ctrl.abort()
       const msgs = getSessionMsgs(sid)

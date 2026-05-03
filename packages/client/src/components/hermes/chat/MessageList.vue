@@ -500,6 +500,7 @@ watch(
 }
 
 .run-placeholder {
+  --run-placeholder-avatar-size: 48px;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -507,13 +508,21 @@ watch(
 }
 
 .run-placeholder-avatar {
-  width: 38px;
-  height: 38px;
+  width: var(--run-placeholder-avatar-size);
+  height: var(--run-placeholder-avatar-size);
+  min-width: var(--run-placeholder-avatar-size);
+  max-width: var(--run-placeholder-avatar-size);
+  min-height: var(--run-placeholder-avatar-size);
+  max-height: var(--run-placeholder-avatar-size);
+  aspect-ratio: 1 / 1;
+  display: block;
   border-radius: 999px;
   flex-shrink: 0;
   margin-top: 2px;
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: rgba(0, 0, 0, 0.04);
+  object-fit: cover;
+  object-position: center;
 
   .dark & {
     border-color: rgba(255, 255, 255, 0.08);

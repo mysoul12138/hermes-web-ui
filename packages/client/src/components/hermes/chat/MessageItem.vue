@@ -709,7 +709,8 @@ onBeforeUnmount(() => {
 @use "@/styles/variables" as *;
 
 .message {
-  --assistant-avatar-space: 48px;
+  --assistant-avatar-size: 48px;
+  --assistant-avatar-space: 58px;
   --assistant-body-max: 840px;
   --assistant-bubble-max: calc(var(--assistant-body-max) - var(--assistant-avatar-space));
 
@@ -850,14 +851,21 @@ onBeforeUnmount(() => {
 }
 
 .msg-avatar {
-  width: 38px;
-  height: 38px;
+  width: var(--assistant-avatar-size);
+  height: var(--assistant-avatar-size);
+  min-width: var(--assistant-avatar-size);
+  max-width: var(--assistant-avatar-size);
+  min-height: var(--assistant-avatar-size);
+  max-height: var(--assistant-avatar-size);
+  aspect-ratio: 1 / 1;
+  display: block;
   border-radius: 999px;
   flex-shrink: 0;
   margin-top: 2px;
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: rgba(0, 0, 0, 0.04);
   object-fit: cover;
+  object-position: center;
 
   .dark & {
     border-color: rgba(255, 255, 255, 0.08);
