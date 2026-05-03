@@ -3490,10 +3490,10 @@ function isStaleBridgeRunError(error: unknown): boolean {
         const target = sessions.value.find(s => s.id === sid)
         if (target) target.source = 'tui'
         markBridgeLocalSession(sid, run.session_id)
-        if (run.context_handoff || history.length > 0) {
+        if (run.context_handoff) {
           setCompressionState(sid, {
             status: 'completed',
-            messageCount: run.context_message_count || history.length || undefined,
+            messageCount: run.context_message_count || undefined,
             tokenCount: numberFromRunEvent(run.context_token_count),
           })
         }

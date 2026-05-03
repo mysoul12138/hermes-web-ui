@@ -481,6 +481,32 @@ describe('Chat Store', () => {
     expect(store.activeCompression).toBeNull()
   })
 
+  it('does not show compression feedback for a normal continued bridge turn without handoff', async () => {
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_continue',
+      status: 'queued',
+      bridge: true,
+      session_id: '20260503_111538_c59066',
+    })
+
+    const store = useChatStore()
+    store.newChat()
+    store.activeSession!.messages.push(
+      { id: 'u1', role: 'user', content: 'original prompt', timestamp: Date.now() - 2000 },
+      { id: 'a1', role: 'assistant', content: 'original answer', timestamp: Date.now() - 1000 },
+    )
+
+    await store.sendMessage('continue normally')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      conversation_history: expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: 'original prompt' }),
+        expect.objectContaining({ role: 'assistant', content: 'original answer' }),
+      ]),
+    }))
+    expect(store.activeCompression).toBeNull()
+  })
+
   it('does not fetch a persistent continuation root through a bridge backing session', async () => {
     const continuationId = '20260502_135857_2f594e'
     const backingId = '20260502_120953_713358'
