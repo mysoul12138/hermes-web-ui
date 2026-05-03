@@ -151,6 +151,7 @@ export default {
     renamed: 'Renamed',
     renameFailed: 'Rename failed',
     renameSession: 'Rename Session',
+    sessionNotFound: 'Session not found',
     enterNewTitle: 'Enter new title',
     workspace: 'Workspace',
     setWorkspace: 'Set Workspace',

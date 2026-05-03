@@ -312,7 +312,18 @@ export async function get(ctx: any) {
  * GET /api/hermes/sessions/hermes/:id
  */
 export async function getHermesSession(ctx: any) {
+  // Try database first (consistent with listHermesSessions)
+  try {
+    const session = await getSessionDetailFromDb(ctx.params.id)
+    if (session && session.source !== 'api_server' && session.source !== 'cron') {
+      ctx.body = { session }
+      return
+    }
+  } catch (err) {
+    logger.warn(err, 'Hermes Session DB: detail query failed, falling back to CLI')
+  }
 
+  // Fallback to CLI
   const session = await hermesCli.getSession(ctx.params.id)
   if (!session) {
     ctx.status = 404
