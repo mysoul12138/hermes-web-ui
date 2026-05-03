@@ -1127,6 +1127,16 @@ describe('Chat Store', () => {
     expect(store.isRunActive).toBe(true)
 
     await store.sendMessage('adjust direction')
+
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+        }),
+      ]),
+    )
     await flushPromises()
 
     expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
@@ -1172,7 +1182,17 @@ describe('Chat Store', () => {
     await store.loadSessions()
     await flushPromises()
 
-    await store.sendMessage('new request after finished run')
+    const pending = store.sendMessage('new request after finished run')
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'new request after finished run',
+          steered: true,
+        }),
+      ]),
+    )
+    await pending
     await flushPromises()
 
     expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'new request after finished run')
@@ -1180,6 +1200,7 @@ describe('Chat Store', () => {
       input: 'new request after finished run',
       session_id: sid,
     }))
+    expect(store.messages.some(message => message.steered && message.content === 'new request after finished run')).toBe(false)
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 

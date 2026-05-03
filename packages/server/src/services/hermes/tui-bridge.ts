@@ -583,11 +583,6 @@ export class TuiBridgeService {
     if (!bridgeSessionId) throw new Error('bridge session not found')
     const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
     if (!runId) throw new Error('session is not running')
-    const running = await this.readBridgeSessionRunning(bridgeSessionId)
-    if (running === false) {
-      this.closeRun(runId)
-      throw new Error('session is not running')
-    }
     let result: { status?: string, text?: string }
     try {
       result = await this.client.request<{ status?: string, text?: string }>('session.steer', {

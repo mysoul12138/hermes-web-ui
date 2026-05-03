@@ -131,7 +131,6 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
-      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
@@ -162,7 +161,6 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
-      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
@@ -191,7 +189,6 @@ describe('TuiBridgeService steer compatibility', () => {
       text: 'adjust direction',
     })
     expect(client.requests).toEqual([
-      { method: 'session.status', params: { session_id: 'tui-session' } },
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
       { method: 'command.dispatch', params: { session_id: 'tui-session', command: '/steer adjust direction' } },
     ])

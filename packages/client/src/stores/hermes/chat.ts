@@ -1711,28 +1711,46 @@ function isStaleBridgeRunError(error: unknown): boolean {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
   }
 
+  function addSteeredMessage(sid: string, content: string, attachments?: Attachment[]): string {
+    const text = content.trim()
+    const id = uid()
+    const userMsg: Message = {
+      id,
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      steered: true,
+    }
+    addMessage(sid, userMsg)
+    updateSessionTitle(sid)
+    if (sid === activeSessionId.value) {
+      persistActiveMessages()
+      persistSessionsList()
+    }
+    return id
+  }
+
+  function removeLocalSteeredMessage(sid: string, id: string) {
+    const target = sessions.value.find(session => session.id === sid)
+    if (!target) return
+    target.messages = target.messages.filter(message => message.id !== id)
+    if (sid === activeSessionId.value) {
+      persistActiveMessages()
+      persistSessionsList()
+    }
+  }
+
   async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
     const text = content.trim()
+    const optimisticId = addSteeredMessage(sid, text, attachments)
     try {
       const result = await steerSession(sid, text)
       if (result?.ok) {
-        const userMsg: Message = {
-          id: uid(),
-          role: 'user',
-          content: text,
-          timestamp: Date.now(),
-          attachments: attachments && attachments.length > 0 ? attachments : undefined,
-          steered: true,
-        }
-        addMessage(sid, userMsg)
-        updateSessionTitle(sid)
-        if (sid === activeSessionId.value) {
-          persistActiveMessages()
-          persistSessionsList()
-        }
         return
       }
     } catch (err) {
+      removeLocalSteeredMessage(sid, optimisticId)
       if (isStaleBridgeRunError(err)) {
         console.warn('Steer target is no longer running; sending as a new turn')
         clearInFlight(sid)
@@ -1744,6 +1762,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       console.warn('Steer failed, falling back to queue:', err)
     }
     // Fall back to queue
+    removeLocalSteeredMessage(sid, optimisticId)
     queueBusyInput(sid, content, attachments)
   }
 
