@@ -689,6 +689,7 @@ export default {
     connectionFailed: '终端服务连接失败',
     connectionClosed: '终端连接已关闭',
     connectionError: '终端连接错误',
+    reconnecting: '正在重新连接终端...',
   },
 
   // 群聊

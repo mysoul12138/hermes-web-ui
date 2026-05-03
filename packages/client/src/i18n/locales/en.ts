@@ -687,6 +687,7 @@ export default {
     connectionFailed: 'Terminal service connection failed',
     connectionClosed: 'Terminal connection closed',
     connectionError: 'Terminal connection error',
+    reconnecting: 'Reconnecting terminal...',
   },
 
   // Group Chat

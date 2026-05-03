@@ -193,6 +193,25 @@ function connect() {
   };
 }
 
+function retryConnect() {
+  if (isConnecting.value) return;
+  reconnectAttempts = 0;
+  connectionError.value = null;
+  isConnecting.value = true;
+  message.info(t('terminal.reconnecting'));
+  if (ws) {
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close();
+    } catch {}
+    ws = null;
+  }
+  connect();
+}
+
 function send(data: object | string) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(typeof data === "string" ? data : JSON.stringify(data));
@@ -421,7 +440,7 @@ onUnmounted(() => {
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
           <span>{{ connectionError }}</span>
-          <NButton size="tiny" @click="connect">{{ t("common.retry") }}</NButton>
+          <NButton size="tiny" :loading="isConnecting" @click="retryConnect">{{ t("common.retry") }}</NButton>
         </div>
         <div v-else-if="sessions.length === 0" class="session-empty">
           <template v-if="isConnecting">

@@ -234,6 +234,8 @@ const showSessions = ref(true);
 const sessions = ref<SessionInfo[]>([]);
 const activeSessionId = ref<string | null>(null);
 const selectedTheme = ref(localStorage.getItem(STORAGE_KEY_THEME) || "default");
+const connectionError = ref<string | null>(null);
+const isConnecting = ref(false);
 
 let ws: WebSocket | null = null;
 // Keep all terminal instances alive, only dispose on close
@@ -245,6 +247,8 @@ let activeTerm: Terminal | null = null;
 let activeFitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let mobileQuery: MediaQueryList | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 3;
 
 // ─── Computed ──────────────────────────────────────────────────
 
@@ -288,11 +292,32 @@ function buildWsUrl(): string {
 }
 
 function connect() {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    connectionError.value = t("terminal.connectionFailed");
+    isConnecting.value = false;
+    return;
+  }
+
   const url = buildWsUrl();
+  connectionError.value = null;
+  isConnecting.value = true;
+  reconnectAttempts++;
   ws = new WebSocket(url);
 
   ws.onopen = () => {
-    // Server auto-creates the first session and sends 'created'
+    reconnectAttempts = 0;
+    isConnecting.value = false;
+    connectionError.value = null;
+    // Server auto-creates the first session.
+  };
+
+  ws.onclose = () => {
+    isConnecting.value = false;
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => {
+    connectionError.value = t("terminal.connectionError");
   };
 
   ws.onmessage = (event) => {
@@ -305,20 +330,25 @@ function connect() {
       activeTerm?.write(data);
     }
   };
+}
 
-  // On reconnect, recreate all terminals for existing sessions
-  ws.onopen = () => {
-    // Server will auto-create the first session again
-  };
-
-  ws.onclose = () => {
-    // Reconnect after delay
-    setTimeout(connect, 3000);
-  };
-
-  ws.onerror = () => {
-    // let onclose handle reconnect
-  };
+function retryConnect() {
+  if (isConnecting.value) return;
+  reconnectAttempts = 0;
+  connectionError.value = null;
+  isConnecting.value = true;
+  message.info(t("terminal.reconnecting"));
+  if (ws) {
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close();
+    } catch {}
+    ws = null;
+  }
+  connect();
 }
 
 function send(data: object | string) {
@@ -577,8 +607,17 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-if="showSessions" class="session-items">
-        <div v-if="sessions.length === 0" class="session-empty">
-          {{ t("common.loading") }}
+        <div v-if="connectionError" class="session-empty session-error">
+          <span>{{ connectionError }}</span>
+          <NButton size="tiny" :loading="isConnecting" @click="retryConnect">{{ t("common.retry") }}</NButton>
+        </div>
+        <div v-else-if="sessions.length === 0" class="session-empty">
+          <template v-if="isConnecting">
+            {{ t("common.loading") }}
+          </template>
+          <template v-else>
+            {{ t("terminal.noSessions") }}
+          </template>
         </div>
         <button
           v-for="s in sessions"
