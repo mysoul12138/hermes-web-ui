@@ -192,6 +192,11 @@ describe('isPlaceholderThinkingText', () => {
     expect(isPlaceholderThinkingText('( •_•)>⌐■-■ deliberating…')).toBe(true)
     expect(isPlaceholderThinkingText('🧠 analyzing…')).toBe(true)
     expect(isPlaceholderThinkingText('⏳ reviewing...')).toBe(true)
+    expect(isPlaceholderThinkingText('(⌐■_■) cogitating…')).toBe(true)
+    expect(isPlaceholderThinkingText('(⌐■_■) ruminating…')).toBe(true)
+    expect(isPlaceholderThinkingText('٩(๑❛ᴗ❛๑)۶ reflecting…')).toBe(true)
+    expect(isPlaceholderThinkingText('٩(๑❛ᴗ❛๑)۶ analyzing…')).toBe(true)
+    expect(isPlaceholderThinkingText('(¬_¬) mulling...')).toBe(true)
   })
 
   it('keeps real reasoning visible', () => {

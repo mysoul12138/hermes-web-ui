@@ -16,7 +16,10 @@ const PLACEHOLDER_THINKING_PATTERNS = [
   /^synthes(?:is|izing|ising|ized|ised)?$/i,
   /^generat(?:e|ing|ed|or|ion|ions)?$/i,
   /^mus(?:e|ing|ings?)?$/i,
+  /^mull(?:ing|ed|s)?$/i,
   /^ponder(?:ing|ed|s)?$/i,
+  /^cogitat(?:e|ing|ed|ion|ions)?$/i,
+  /^ruminat(?:e|ing|ed|ion|ions)?$/i,
   /^deliberat(?:e|ing|ed|ion|ions)?$/i,
   /^process(?:ing|ed|es)?$/i,
   /^analy(?:s(?:is|ing|ed)?|z(?:e|ing|ed|er|ers)?|sis)$/i,
@@ -98,8 +101,7 @@ export function isPlaceholderThinkingText(text: string): boolean {
   if (!cleaned) return true
   if (/^[.\s…]+$/.test(cleaned)) return true
 
-  const words = cleaned
-    .split(' ')
+  const words = (cleaned.match(/[a-z]+/gi) || [])
     .map(word => word.replace(/[.]+$/g, ''))
     .filter(Boolean)
 
