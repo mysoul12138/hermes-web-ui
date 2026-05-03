@@ -410,7 +410,14 @@ function isBuggyReasoningPreview(reasoningText: string, assistantContent: string
   const r = reasoningText.trim()
   const c = assistantContent.trim()
   if (!r || !c) return false
-  return c === r || c.startsWith(r)
+  return c === r || c.startsWith(r) || r.startsWith(c)
+}
+
+function scrubBuggyReasoning(message: Message): Message {
+  if (message.role !== 'assistant' || !message.reasoning || !message.content) return message
+  if (!isBuggyReasoningPreview(message.reasoning, message.content)) return message
+  const { reasoning: _drop, ...rest } = message
+  return rest as Message
 }
 
 function extractPendingApprovalFromMessages(messages: Message[]): PendingApproval | null {
@@ -539,13 +546,13 @@ function mapHermesMessages(msgs: HermesMessage[]): Message[] {
     }
 
     // Normal user/assistant messages
-    result.push({
+    result.push(scrubBuggyReasoning({
       id: String(msg.id),
       role: msg.role,
       content: msg.content || '',
       timestamp: Math.round(msg.timestamp * 1000),
       reasoning: msg.reasoning ? msg.reasoning : undefined,
-    })
+    }))
   }
   return result
 }
@@ -810,17 +817,7 @@ function sanitizeForCache(msgs: Message[]): Message[] {
 // Legitimate reasoning is almost never a prefix of the final answer.
 function scrubBuggyReasoningInCache(msgs: Message[] | null | undefined): Message[] {
   if (!msgs) return []
-  return msgs.map(m => {
-    if (m.role !== 'assistant' || !m.reasoning || !m.content) return m
-    const r = m.reasoning.trim()
-    const c = m.content.trim()
-    if (!r || !c) return m
-    if (c === r || c.startsWith(r)) {
-      const { reasoning: _drop, ...rest } = m
-      return rest as Message
-    }
-    return m
-  })
+  return msgs.map(scrubBuggyReasoning)
 }
 
 export const useChatStore = defineStore('chat', () => {

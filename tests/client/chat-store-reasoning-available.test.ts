@@ -204,4 +204,73 @@ describe('chat store — reasoning.available should not clobber content', () => 
     expect(a.reasoning).toBeUndefined()
     expect(b.reasoning).toBe('Real thinking that happens before the answer.')
   })
+
+  it('drops clobbered reasoning from fetched session history', async () => {
+    const sid = 'sess-history'
+    mockSessionsApi.fetchSessions.mockResolvedValue([{
+      id: sid,
+      source: 'api_server',
+      title: 'History',
+      started_at: 1,
+      ended_at: 2,
+      last_active: 2,
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    }])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'api_server',
+      title: 'History',
+      started_at: 1,
+      ended_at: 2,
+      last_active: 2,
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+      messages: [
+        { id: 'u', session_id: sid, role: 'user', content: 'ask', timestamp: 1, tool_call_id: null, tool_calls: null, tool_name: null, token_count: null, finish_reason: null, reasoning: null },
+        {
+          id: 'a',
+          session_id: sid,
+          role: 'assistant',
+          content: '我再把这次踩到的坑补进 release-notes-monitor 技能。',
+          timestamp: 2,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          token_count: null,
+          finish_reason: 'stop',
+          reasoning: '我再把这次踩到的坑补进 release-notes-monitor 技能。',
+        },
+      ],
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.switchSession(sid)
+    await flush()
+
+    const asst = store.messages.find(m => m.id === 'a')
+    expect(asst?.content).toBe('我再把这次踩到的坑补进 release-notes-monitor 技能。')
+    expect(asst?.reasoning).toBeUndefined()
+  })
 })

@@ -156,6 +156,23 @@ describe('MessageItem tool details', () => {
     expect(toolWrapper.find('.tool-status-badge').exists()).toBe(true)
   })
 
+  it('does not render a thinking block when reasoning duplicates assistant content', () => {
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-duplicate-reasoning',
+          role: 'assistant',
+          content: '我再把这次踩到的坑补进 release-notes-monitor 技能。',
+          reasoning: '我再把这次踩到的坑补进 release-notes-monitor 技能。',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(wrapper.find('.thinking-block').exists()).toBe(false)
+    expect(wrapper.find('.msg-content').text()).toContain('release-notes-monitor')
+  })
+
   it('expands preview-only tool messages', async () => {
     const wrapper = mount(MessageItem, {
       props: {

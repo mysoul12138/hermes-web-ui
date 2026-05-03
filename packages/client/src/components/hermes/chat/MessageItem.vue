@@ -86,7 +86,9 @@ const isLongUserMessage = computed(() => {
 
 const displayReasoning = computed(() => {
   const reasoning = props.message.reasoning?.trim() || "";
+  const content = props.message.content?.trim() || "";
   if (!reasoning || isPlaceholderThinkingText(reasoning)) return "";
+  if (content && (content === reasoning || content.startsWith(reasoning) || reasoning.startsWith(content))) return "";
   return reasoning;
 });
 
