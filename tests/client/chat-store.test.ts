@@ -37,12 +37,18 @@ const mockConfigApi = vi.hoisted(() => ({
   updateConfigSection: vi.fn(),
 }))
 
+const mockCompletionBell = vi.hoisted(() => ({
+  unlockCompletionBell: vi.fn(),
+  playCompletionBell: vi.fn(),
+}))
+
 vi.mock('@/api/hermes/chat', () => mockChatApi)
 vi.mock('@/api/hermes/sessions', () => mockSessionsApi)
 vi.mock('@/api/hermes/conversations', () => mockConversationsApi)
 vi.mock('@/api/hermes/approval', () => mockApprovalApi)
 vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 vi.mock('@/api/hermes/config', () => mockConfigApi)
+vi.mock('@/utils/completion-bell', () => mockCompletionBell)
 
 import { useChatStore } from '@/stores/hermes/chat'
 import { useSettingsStore } from '@/stores/hermes/settings'
@@ -115,6 +121,8 @@ describe('Chat Store', () => {
     mockClarifyApi.respondClarify.mockResolvedValue({ ok: true, answer: 'ok' })
     mockConfigApi.fetchConfig.mockResolvedValue({ display: {} })
     mockConfigApi.updateConfigSection.mockResolvedValue(undefined)
+    mockCompletionBell.unlockCompletionBell.mockClear()
+    mockCompletionBell.playCompletionBell.mockClear()
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
     mockChatApi.cancelRun.mockResolvedValue(undefined)
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
@@ -445,6 +453,40 @@ describe('Chat Store', () => {
     latestToolMessage = store.messages.filter(m => m.role === 'tool').at(-1)
     expect(latestToolMessage?.toolPreview).toContain('python3')
     expect(latestToolMessage?.toolArgs).toBeUndefined()
+  })
+
+  it('plays the completion bell when the display setting is enabled', async () => {
+    const settings = useSettingsStore()
+    settings.display.bell_on_complete = true
+    settings.loaded = true
+    const store = useChatStore()
+
+    await store.sendMessage('notify when done')
+    await flushPromises()
+
+    expect(mockCompletionBell.unlockCompletionBell).toHaveBeenCalledTimes(1)
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    onEvent({ event: 'message.delta', delta: 'done' })
+    onEvent({ event: 'run.completed' })
+
+    expect(mockCompletionBell.playCompletionBell).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not play the completion bell when the display setting is disabled', async () => {
+    const settings = useSettingsStore()
+    settings.display.bell_on_complete = false
+    settings.loaded = true
+    const store = useChatStore()
+
+    await store.sendMessage('finish silently')
+    await flushPromises()
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    onEvent({ event: 'message.delta', delta: 'done' })
+    onEvent({ event: 'run.completed' })
+
+    expect(mockCompletionBell.playCompletionBell).not.toHaveBeenCalled()
   })
 
   it('tracks context compression progress from run events', async () => {

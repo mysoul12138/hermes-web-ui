@@ -19,6 +19,7 @@ import { useAppStore } from './app'
 import { useProfilesStore } from './profiles'
 import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
+import { playCompletionBell, unlockCompletionBell } from '@/utils/completion-bell'
 
 export interface Attachment {
   id: string
@@ -2838,6 +2839,9 @@ function isStaleBridgeRunError(error: unknown): boolean {
                 }, 300)
               }
             }
+            if (useSettingsStore().display.bell_on_complete) {
+              playCompletionBell()
+            }
             finishLiveSubagentBranches(sid, 'complete')
             cleanup()
             updateSessionTitle(sid)
@@ -3566,6 +3570,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
 
   async function sendMessage(content: string, attachments?: Attachment[]) {
     if (!content.trim() && !(attachments && attachments.length > 0)) return
+    unlockCompletionBell()
 
     if (!activeSession.value) {
       const session = createSession()
