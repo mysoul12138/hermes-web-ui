@@ -15,6 +15,14 @@ import { logger } from '../../services/logger'
 
 const OPTIONAL_API_KEY_PROVIDERS = new Set(['cliproxyapi'])
 
+interface AuthJson {
+  version?: number
+  active_provider?: string
+  providers?: Record<string, any>
+  credential_pool?: Record<string, any[]>
+  updated_at?: string
+}
+
 function buildProviderEntry(name: string, base_url: string, api_key: string, model: string, context_length?: number) {
   const entry: any = { name, base_url, api_key, model }
   if (context_length && context_length > 0) {
@@ -31,6 +39,82 @@ function removeLegacyCustomProvider(config: Record<string, any>, slug: string) {
   if (config.custom_providers.length === 0) delete config.custom_providers
 }
 
+async function readAuthJson(): Promise<AuthJson> {
+  const authPath = getActiveAuthPath()
+  if (!existsSync(authPath)) return {}
+  try {
+    return JSON.parse(readFileSync(authPath, 'utf-8')) as AuthJson
+  } catch {
+    return {}
+  }
+}
+
+async function writeAuthJson(auth: AuthJson): Promise<void> {
+  auth.updated_at = new Date().toISOString()
+  await writeFile(getActiveAuthPath(), JSON.stringify(auth, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '')
+}
+
+function buildPoolEntry(poolKey: string, label: string, baseUrl: string, apiKey: string, existing?: any) {
+  return {
+    id: typeof existing?.id === 'string' && existing.id ? existing.id : `${poolKey}-${Date.now()}`,
+    label: label.trim() || poolKey.replace(/^custom:/, ''),
+    auth_type: 'api_key',
+    priority: 0,
+    source: `config:${label.trim() || poolKey.replace(/^custom:/, '')}`,
+    access_token: apiKey.trim(),
+    last_status: null,
+    last_status_at: null,
+    last_error_code: null,
+    last_error_reason: null,
+    last_error_message: null,
+    last_error_reset_at: null,
+    base_url: normalizeBaseUrl(baseUrl),
+    request_count: 0,
+  }
+}
+
+async function syncCustomCredentialPool(poolKey: string, label: string, baseUrl: string, apiKey: string) {
+  const token = apiKey.trim()
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+  if (!poolKey.startsWith('custom:') || !token || !normalizedBaseUrl) return
+
+  const auth = await readAuthJson()
+  if (!auth.credential_pool || typeof auth.credential_pool !== 'object' || Array.isArray(auth.credential_pool)) {
+    auth.credential_pool = {}
+  }
+
+  const existingEntries = Array.isArray(auth.credential_pool[poolKey]) ? auth.credential_pool[poolKey] : []
+  const reusableConfigEntry = existingEntries.find(entry =>
+    typeof entry?.source === 'string' && entry.source.startsWith('config:'),
+  )
+  const preserved = existingEntries.filter(entry => {
+    const source = typeof entry?.source === 'string' ? entry.source : ''
+    const entryBaseUrl = normalizeBaseUrl(String(entry?.base_url || ''))
+    return !source.startsWith('config:') && entryBaseUrl !== normalizedBaseUrl
+  })
+
+  auth.credential_pool[poolKey] = [
+    buildPoolEntry(poolKey, label, normalizedBaseUrl, token, reusableConfigEntry),
+    ...preserved.map((entry, index) => ({ ...entry, priority: index + 1 })),
+  ]
+  await writeAuthJson(auth)
+}
+
+async function removeCustomCredentialPool(poolKey: string) {
+  if (!poolKey.startsWith('custom:')) return
+  const authPath = getActiveAuthPath()
+  if (!existsSync(authPath)) return
+  const auth = await readAuthJson()
+  if (auth.credential_pool?.[poolKey]) {
+    delete auth.credential_pool[poolKey]
+    await writeAuthJson(auth)
+  }
+}
+
 export async function create(ctx: any) {
   const { name, base_url, api_key, model, context_length, providerKey } = ctx.request.body as {
     name: string; base_url: string; api_key: string; model: string; context_length?: number; providerKey?: string | null
@@ -45,6 +129,7 @@ export async function create(ctx: any) {
     const poolKey = providerKey || `custom:${name.trim().toLowerCase().replace(/ /g, '-')}`
     const isBuiltin = poolKey in PROVIDER_ENV_MAP
     const config = await readConfigYaml()
+    let customPoolToSync: { poolKey: string; label: string; baseUrl: string; apiKey: string } | null = null
     if (typeof config.model !== 'object' || config.model === null) { config.model = {} }
     if (!isBuiltin) {
       const slug = normalizeCustomProviderSlug(poolKey)
@@ -54,6 +139,7 @@ export async function create(ctx: any) {
       removeLegacyCustomProvider(config, slug)
       config.model.default = model
       config.model.provider = `custom:${slug}`
+      customPoolToSync = { poolKey: `custom:${slug}`, label: name, baseUrl: base_url, apiKey: api_key }
     } else {
       if (PROVIDER_ENV_MAP[poolKey].api_key_env) {
         await saveEnvValue(PROVIDER_ENV_MAP[poolKey].api_key_env, api_key)
@@ -84,6 +170,9 @@ export async function create(ctx: any) {
     delete config.model.base_url
     delete config.model.api_key
     await writeConfigYaml(config)
+    if (customPoolToSync) {
+      await syncCustomCredentialPool(customPoolToSync.poolKey, customPoolToSync.label, customPoolToSync.baseUrl, customPoolToSync.apiKey)
+    }
     try { await hermesCli.restartGateway() } catch (e: any) { logger.error(e, 'Gateway restart failed') }
     ctx.body = { success: true }
   } catch (err: any) {
@@ -114,6 +203,14 @@ export async function update(ctx: any) {
           existingProvider.models = Array.from(new Set([model, ...(Array.isArray(existingProvider.models) ? existingProvider.models : [])]))
         }
         await writeConfigYaml(config)
+        if (api_key !== undefined) {
+          await syncCustomCredentialPool(
+            `custom:${slug}`,
+            String(existingProvider.name || slug),
+            String(existingProvider.api || existingProvider.url || existingProvider.base_url || ''),
+            api_key,
+          )
+        }
         try { await hermesCli.restartGateway() } catch (e: any) { logger.error(e, 'Gateway restart failed') }
         ctx.body = { success: true }
         return
@@ -132,6 +229,14 @@ export async function update(ctx: any) {
       if (api_key !== undefined) entry.api_key = api_key
       if (model !== undefined) entry.model = model
       await writeConfigYaml(config)
+      if (api_key !== undefined) {
+        await syncCustomCredentialPool(
+          `custom:${slug}`,
+          String(entry.name || slug),
+          String(entry.base_url || ''),
+          api_key,
+        )
+      }
     } else {
       const envMapping = PROVIDER_ENV_MAP[poolKey]
       if (!envMapping?.api_key_env) {
@@ -172,6 +277,7 @@ export async function remove(ctx: any) {
         ctx.status = 404; ctx.body = { error: `Custom provider "${poolKey}" not found` }; return
       }
       await writeConfigYaml(config)
+      await removeCustomCredentialPool(`custom:${slug}`)
     } else {
       const envMapping = PROVIDER_ENV_MAP[poolKey]
       if (envMapping?.api_key_env) {
