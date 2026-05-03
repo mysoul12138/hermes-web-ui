@@ -13,6 +13,7 @@ import ChatInput from './ChatInput.vue'
 import ConversationMonitorPane from './ConversationMonitorPane.vue'
 import MessageList from './MessageList.vue'
 import SessionListItem from './SessionListItem.vue'
+import DrawerPanel from './DrawerPanel.vue'
 
 const chatStore = useChatStore()
 const sessionBrowserPrefsStore = useSessionBrowserPrefsStore()
@@ -20,6 +21,8 @@ const message = useMessage()
 const { t } = useI18n()
 
 const currentMode = ref<'chat' | 'live'>('chat')
+const showDrawer = ref(false)
+const drawerActiveTab = ref<'terminal' | 'files'>('files')
 const BRANCH_TREE_VISIBLE_LIMIT = 2
 
 // Initialize synchronously from the media query so first paint is correct.
@@ -639,6 +642,18 @@ async function handleWorkspaceConfirm() {
       </template>
       <ConversationMonitorPane v-else :human-only="sessionBrowserPrefsStore.humanOnly" />
     </div>
+
+    <div class="drawer-button-wrapper">
+      <button type="button" class="drawer-button" @click="showDrawer = true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <line x1="9" y1="3" x2="9" y2="21" />
+          <line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
+      </button>
+    </div>
+
+    <DrawerPanel v-model:show="showDrawer" :active-tab="drawerActiveTab" />
   </div>
 </template>
 
@@ -1238,5 +1253,116 @@ async function handleWorkspaceConfirm() {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: default;
+}
+
+.drawer-button-wrapper {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 100;
+}
+
+.drawer-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 2px solid #ff6b6b;
+  border-radius: 50%;
+  background: $bg-card;
+  color: #ff6b6b;
+  cursor: pointer;
+  box-shadow:
+    0 0 0 2px #ff6b6b,
+    0 0 10px rgba(255, 107, 107, 0.4),
+    0 0 20px rgba(255, 107, 107, 0.2);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+  animation: drawer-rainbow 6s linear infinite;
+
+  &:hover {
+    transform: scale(1.08);
+  }
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+@keyframes drawer-rainbow {
+  0% {
+    box-shadow:
+      0 0 0 2px #ff6b6b,
+      0 0 10px rgba(255, 107, 107, 0.4),
+      0 0 20px rgba(255, 107, 107, 0.2);
+    border-color: #ff6b6b;
+    color: #ff6b6b;
+  }
+  16.66% {
+    box-shadow:
+      0 0 0 2px #feca57,
+      0 0 10px rgba(254, 202, 87, 0.4),
+      0 0 20px rgba(254, 202, 87, 0.2);
+    border-color: #feca57;
+    color: #feca57;
+  }
+  33.33% {
+    box-shadow:
+      0 0 0 2px #48dbfb,
+      0 0 10px rgba(72, 219, 251, 0.4),
+      0 0 20px rgba(72, 219, 251, 0.2);
+    border-color: #48dbfb;
+    color: #48dbfb;
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px #ff9ff3,
+      0 0 10px rgba(255, 159, 243, 0.4),
+      0 0 20px rgba(255, 159, 243, 0.2);
+    border-color: #ff9ff3;
+    color: #ff9ff3;
+  }
+  66.66% {
+    box-shadow:
+      0 0 0 2px #54a0ff,
+      0 0 10px rgba(84, 160, 255, 0.4),
+      0 0 20px rgba(84, 160, 255, 0.2);
+    border-color: #54a0ff;
+    color: #54a0ff;
+  }
+  83.33% {
+    box-shadow:
+      0 0 0 2px #5f27cd,
+      0 0 10px rgba(95, 39, 205, 0.4),
+      0 0 20px rgba(95, 39, 205, 0.2);
+    border-color: #5f27cd;
+    color: #5f27cd;
+  }
+  100% {
+    box-shadow:
+      0 0 0 2px #ff6b6b,
+      0 0 10px rgba(255, 107, 107, 0.4),
+      0 0 20px rgba(255, 107, 107, 0.2);
+    border-color: #ff6b6b;
+    color: #ff6b6b;
+  }
+}
+
+@media (max-width: $breakpoint-mobile) {
+  .drawer-button-wrapper {
+    right: 12px;
+  }
+
+  .drawer-button {
+    width: 36px;
+    height: 36px;
+
+    svg {
+      width: 16px;
+      height: 16px;
+    }
+  }
 }
 </style>
