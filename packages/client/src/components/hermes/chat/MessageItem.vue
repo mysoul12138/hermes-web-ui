@@ -317,6 +317,12 @@ async function handleToolDetailClick(event: MouseEvent): Promise<void> {
     else toast.error(t("chat.copyFailed"));
     return;
   }
+  if (source === "tool-inline-diff" && fullToolInlineDiff.value) {
+    const ok = await copyTextToClipboard(fullToolInlineDiff.value);
+    if (ok) toast.success(t("common.copied"));
+    else toast.error(t("chat.copyFailed"));
+    return;
+  }
 
   const copyResult = await handleCodeBlockCopyClick(event);
   if (copyResult) toast.success(t("common.copied"));
@@ -341,6 +347,7 @@ const hasToolDetails = computed(
     props.message.toolArgs ||
     props.message.toolResult ||
     props.message.toolPreview ||
+    props.message.toolInlineDiff ||
     props.message.content
   ),
 );
@@ -348,6 +355,7 @@ const hasToolDetails = computed(
 const toolPreviewPayload = computed(() => formatToolPayload(props.message.toolPreview || props.message.content));
 const toolArgsPayload = computed(() => formatToolPayload(props.message.toolArgs));
 const toolResultPayload = computed(() => formatToolPayload(props.message.toolResult));
+const toolInlineDiffPayload = computed(() => formatToolPayload(props.message.toolInlineDiff));
 
 const fullToolPreview = computed(() => toolPreviewPayload.value.full);
 const formattedToolPreview = computed(() => toolPreviewPayload.value.display);
@@ -355,6 +363,8 @@ const fullToolArgs = computed(() => toolArgsPayload.value.full);
 const formattedToolArgs = computed(() => toolArgsPayload.value.display);
 const fullToolResult = computed(() => toolResultPayload.value.full);
 const formattedToolResult = computed(() => toolResultPayload.value.display);
+const fullToolInlineDiff = computed(() => toolInlineDiffPayload.value.full);
+const formattedToolInlineDiff = computed(() => toolInlineDiffPayload.value.display);
 
 const renderedToolPreview = computed(() => {
   if (!formattedToolPreview.value) return "";
@@ -378,6 +388,11 @@ const renderedToolResult = computed(() => {
     formattedToolResult.value,
     toolResultPayload.value.language,
   );
+});
+
+const renderedToolInlineDiff = computed(() => {
+  if (!formattedToolInlineDiff.value) return "";
+  return renderToolPayload(formattedToolInlineDiff.value, "diff");
 });
 
 // 语音播放相关
@@ -534,6 +549,10 @@ onBeforeUnmount(() => {
           <div v-if="formattedToolArgs" class="tool-detail-section" data-copy-source="tool-args">
             <div class="tool-detail-label">{{ t("chat.arguments") }}</div>
             <div class="tool-detail-code-block" v-html="renderedToolArgs"></div>
+          </div>
+          <div v-if="formattedToolInlineDiff" class="tool-detail-section" data-copy-source="tool-inline-diff">
+            <div class="tool-detail-label">{{ t("chat.inlineDiff") }}</div>
+            <div class="tool-detail-code-block" v-html="renderedToolInlineDiff"></div>
           </div>
           <div v-if="formattedToolResult" class="tool-detail-section" data-copy-source="tool-result">
             <div class="tool-detail-label">{{ t("chat.result") }}</div>

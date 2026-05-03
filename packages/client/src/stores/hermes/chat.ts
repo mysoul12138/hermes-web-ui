@@ -38,6 +38,7 @@ export interface Message {
   toolPreview?: string
   toolArgs?: string
   toolResult?: string
+  toolInlineDiff?: string
   toolCallId?: string
   toolStatus?: 'running' | 'done' | 'error'
   isStreaming?: boolean
@@ -303,6 +304,25 @@ function pickToolResult(evt: RunEvent): string | undefined {
     evt.message ??
     evt.summary,
   )
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+}
+
+function normalizeInlineDiff(value: unknown): string | undefined {
+  const text = stringifyToolPayload(value)
+  if (!text) return undefined
+  const cleaned = stripAnsi(text)
+    .split(/\r?\n/)
+    .map(line => line.trimStart().replace(/^┊\s*review diff\s*$/i, ''))
+    .join('\n')
+    .trim()
+  return cleaned || undefined
+}
+
+function pickInlineDiff(evt: RunEvent): string | undefined {
+  return normalizeInlineDiff(evt.inline_diff ?? (evt.payload as Record<string, any> | undefined)?.inline_diff)
 }
 
 function toolEventDetails(evt: RunEvent): string | undefined {
@@ -2032,6 +2052,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
     if (message.toolPreview) score += 1
     if (message.toolArgs) score += 3
     if (message.toolResult) score += 4
+    if (message.toolInlineDiff) score += 5
     if (message.toolCallId) score += 1
     return score
   }
@@ -2048,7 +2069,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       ) || localTools[idx]
 
       if (!localTool) {
-        if (serverTool.toolArgs || serverTool.toolResult || serverTool.toolPreview) return true
+        if (serverTool.toolArgs || serverTool.toolResult || serverTool.toolPreview || serverTool.toolInlineDiff) return true
         continue
       }
 
@@ -2067,6 +2088,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       toolPreview: betterToolText(local.toolPreview, server.toolPreview),
       toolArgs: betterToolText(local.toolArgs, server.toolArgs),
       toolResult: mergeToolResult(local.toolResult, server.toolResult),
+      toolInlineDiff: betterToolText(local.toolInlineDiff, server.toolInlineDiff),
       toolCallId: local.toolCallId || server.toolCallId,
       toolStatus: server.toolResult ? (server.toolStatus || 'done') : (local.toolStatus || server.toolStatus),
     }
@@ -2115,6 +2137,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       if ((left.toolPreview || '') !== (right.toolPreview || '')) return false
       if ((left.toolArgs || '') !== (right.toolArgs || '')) return false
       if ((left.toolResult || '') !== (right.toolResult || '')) return false
+      if ((left.toolInlineDiff || '') !== (right.toolInlineDiff || '')) return false
       if ((left.toolCallId || '') !== (right.toolCallId || '')) return false
       if ((left.toolStatus || '') !== (right.toolStatus || '')) return false
       if ((left.reasoning || '') !== (right.reasoning || '')) return false
@@ -2717,6 +2740,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
                 toolPreview: betterToolText(last.toolPreview, pickToolPreview(evt)),
                 toolArgs: betterToolText(last.toolArgs, pickToolArgs(evt)),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+                toolInlineDiff: betterToolText(last.toolInlineDiff, pickInlineDiff(evt)),
                 toolCallId: last.toolCallId || eventToolCallId,
               })
             }
@@ -2740,6 +2764,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
                 toolPreview: betterToolText(last.toolPreview, pickToolPreview(evt)),
                 toolArgs: betterToolText(last.toolArgs, pickToolArgs(evt)),
                 toolResult: mergeToolResult(last.toolResult, pickToolResult(evt) || toolEventDetails(evt)),
+                toolInlineDiff: betterToolText(last.toolInlineDiff, pickInlineDiff(evt)),
                 toolCallId: last.toolCallId || eventToolCallId,
               })
             }

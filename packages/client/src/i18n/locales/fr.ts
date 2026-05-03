@@ -144,6 +144,7 @@ export default {
     error: 'Erreur',
     tool: 'Outil',
     arguments: 'Arguments',
+    inlineDiff: 'Diff en ligne',
     result: 'Resultat',
     truncated: '... (tronque)',
     executionDuration: 'Execution time',    thinkingLabel: 'Raisonnement',

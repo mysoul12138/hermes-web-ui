@@ -170,6 +170,7 @@ export default {
     error: 'Error',
     tool: 'Tool',
     arguments: 'Arguments',
+    inlineDiff: 'Inline diff',
     result: 'Result',
     truncated: '... (truncated)',
     executionDuration: 'Execution time',

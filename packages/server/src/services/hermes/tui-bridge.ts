@@ -69,6 +69,7 @@ export interface BridgeRunEvent {
   model?: string
   tool_name?: string
   tool_preview?: string
+  inline_diff?: string
   input_tokens?: number
   output_tokens?: number
   reasoning_tokens?: number
@@ -255,6 +256,7 @@ function toolPayloadFields(payload: Record<string, any>): Record<string, unknown
     'duration_ms',
     'status',
     'summary',
+    'inline_diff',
     'message',
     'content',
   ]) {

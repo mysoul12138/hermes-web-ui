@@ -93,6 +93,7 @@ export interface RunEvent {
   model?: string
   tool_name?: string
   tool_preview?: string
+  inline_diff?: string
   output_tail?: Array<Record<string, unknown>>
   files_read?: string[]
   files_written?: string[]

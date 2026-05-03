@@ -405,6 +405,7 @@ describe('Chat Store', () => {
       output_tail: [{ text: 'all passed' }],
       files_written: ['coverage.txt'],
       exit_code: 0,
+      inline_diff: '\u001b[90m┊ review diff\u001b[0m\n--- a/coverage.txt\n+++ b/coverage.txt\n@@\n-old\n+all passed',
     })
 
     toolMessage = store.messages.find(m => m.role === 'tool')
@@ -416,6 +417,8 @@ describe('Chat Store', () => {
     expect(toolMessage?.toolResult).toContain('"output_tail":[{"text":"all passed"}]')
     expect(toolMessage?.toolResult).toContain('"files_written":["coverage.txt"]')
     expect(toolMessage?.toolResult).toContain('"exit_code":0')
+    expect(toolMessage?.toolResult).not.toContain('inline_diff')
+    expect(toolMessage?.toolInlineDiff).toBe('--- a/coverage.txt\n+++ b/coverage.txt\n@@\n-old\n+all passed')
 
     onEvent({
       event: 'tool.started',

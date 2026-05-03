@@ -323,6 +323,7 @@ describe('TuiBridgeService steer compatibility', () => {
         files_written: ['coverage.txt'],
         exit_code: 0,
         duration_s: 1.2,
+        inline_diff: '--- a/coverage.txt\n+++ b/coverage.txt\n@@\n-old\n+all passed',
       },
     })
 
@@ -348,6 +349,7 @@ describe('TuiBridgeService steer compatibility', () => {
         exit_code: 0,
         duration: 1.2,
         duration_s: 1.2,
+        inline_diff: '--- a/coverage.txt\n+++ b/coverage.txt\n@@\n-old\n+all passed',
       }),
     ])
     ;(bridge as any).closeRun('bridge_run_tool')

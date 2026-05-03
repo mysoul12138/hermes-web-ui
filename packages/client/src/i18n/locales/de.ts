@@ -144,6 +144,7 @@ export default {
     error: 'Fehler',
     tool: 'Werkzeug',
     arguments: 'Argumente',
+    inlineDiff: 'Inline-Diff',
     result: 'Ergebnis',
     truncated: '... (abgeschnitten)',
     executionDuration: 'Execution time',    thinkingLabel: 'Denkprozess',

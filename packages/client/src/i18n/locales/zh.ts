@@ -170,6 +170,7 @@ export default {
     error: '错误',
     tool: '工具',
     arguments: '参数',
+    inlineDiff: '内联差异',
     result: '结果',
     truncated: '... (已截断)',
     executionDuration: '执行时长',

@@ -144,6 +144,7 @@ export default {
     error: '오류',
     tool: '도구',
     arguments: '인수',
+    inlineDiff: '인라인 변경사항',
     result: '결과',
     truncated: '... (잘림)',
     executionDuration: 'Execution time',    thinkingLabel: '사고 과정',

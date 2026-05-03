@@ -144,6 +144,7 @@ export default {
     error: 'エラー',
     tool: 'ツール',
     arguments: '引数',
+    inlineDiff: 'インライン差分',
     result: '結果',
     truncated: '... (省略)',
     executionDuration: 'Execution time',    thinkingLabel: '思考過程',

@@ -60,6 +60,35 @@ describe('MessageItem tool details', () => {
     expect(blocks[1].find('.code-lang').text()).toBe('json')
   })
 
+  it('renders inline diffs as a separate tool detail section', async () => {
+    const writeText = vi.mocked(navigator.clipboard.writeText)
+    const inlineDiff = '--- a/src/file.ts\n+++ b/src/file.ts\n@@\n-old value\n+new value'
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'tool-diff',
+          role: 'tool',
+          content: '',
+          timestamp: Date.now(),
+          toolName: 'patch',
+          toolInlineDiff: inlineDiff,
+          toolStatus: 'done',
+        } satisfies Message,
+      },
+    })
+
+    await wrapper.find('.tool-line').trigger('click')
+
+    const diffSection = wrapper.find('[data-copy-source="tool-inline-diff"]')
+    expect(diffSection.find('.tool-detail-label').text()).toBe('chat.inlineDiff')
+    expect(diffSection.find('.code-lang').text()).toBe('diff')
+    expect(diffSection.find('code.hljs').text()).toContain('-old value')
+    expect(diffSection.find('code.hljs').text()).toContain('+new value')
+
+    await diffSection.find('[data-copy-code="true"]').trigger('click')
+    expect(writeText).toHaveBeenCalledWith(inlineDiff)
+  })
+
   it('renders modernized assistant and tool chrome for the content area', async () => {
     const assistantWrapper = mount(MessageItem, {
       props: {
