@@ -1697,7 +1697,23 @@ export const useChatStore = defineStore('chat', () => {
 function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
   const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
   const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
-  return localSteered.length ? [...mapped, ...localSteered] : mapped
+  if (!localSteered.length) return mapped
+  // Insert each steered message at the position matching its timestamp
+  // instead of appending all at the end
+  const result = [...mapped]
+  for (const steered of localSteered) {
+    const ts = steered.timestamp || 0
+    let insertIdx = result.length
+    for (let i = 0; i < result.length; i++) {
+      const msgTs = result[i].timestamp || 0
+      if (msgTs > ts) {
+        insertIdx = i
+        break
+      }
+    }
+    result.splice(insertIdx, 0, steered)
+  }
+  return result
 }
 
 function isStaleBridgeRunError(error: unknown): boolean {
