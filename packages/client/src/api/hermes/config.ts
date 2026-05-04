@@ -47,6 +47,11 @@ export interface WebUiConfig {
   bridge_effective_enabled?: boolean
 }
 
+export interface ApprovalConfig {
+  mode?: 'off' | 'manual'
+  timeout?: number
+}
+
 export interface AppConfig {
   display?: DisplayConfig
   agent?: AgentConfig
@@ -54,6 +59,7 @@ export interface AppConfig {
   session_reset?: SessionResetConfig
   privacy?: PrivacyConfig
   webui?: WebUiConfig
+  approvals?: ApprovalConfig
   telegram?: Record<string, any>
   discord?: Record<string, any>
   slack?: Record<string, any>
