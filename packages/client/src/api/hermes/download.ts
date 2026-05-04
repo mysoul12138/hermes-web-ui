@@ -1,13 +1,27 @@
 import { getApiKey, getBaseUrlValue } from '../client'
 
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 /**
  * Construct a download URL with auth token as query parameter.
  * Token is passed via query param because <a> tags cannot set headers.
  */
 export function getDownloadUrl(filePath: string, fileName?: string): string {
   const base = getBaseUrlValue()
-  const params = new URLSearchParams({ path: filePath })
-  if (fileName) params.set('name', fileName)
+  // Decode the path first in case it's already encoded (e.g., from AI responses)
+  // URLSearchParams will encode it again, so we need to start with decoded text
+  const decodedPath = safeDecodeURIComponent(filePath)
+  const params = new URLSearchParams({ path: decodedPath })
+  if (fileName) {
+    const decodedName = safeDecodeURIComponent(fileName)
+    params.set('name', decodedName)
+  }
   const token = getApiKey()
   if (token) params.set('token', token)
   return `${base}/api/hermes/download?${params.toString()}`

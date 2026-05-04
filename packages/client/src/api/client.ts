@@ -26,6 +26,16 @@ export function hasApiKey(): boolean {
   return !!getApiKey()
 }
 
+/**
+ * Get current active profile name.
+ * The profiles store synchronizes this value into localStorage immediately.
+ * Keep this helper store-free because this API module is imported by the
+ * profiles API itself; importing the store here creates a browser bundle cycle.
+ */
+function getActiveProfileName(): string | null {
+  return localStorage.getItem('hermes_active_profile_name')
+}
+
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const base = getBaseUrl()
   const url = `${base}${path}`
@@ -40,7 +50,7 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   }
 
   // Inject active profile header for proxied gateway requests
-  const profileName = localStorage.getItem('hermes_active_profile_name')
+  const profileName = getActiveProfileName()
   if (profileName && profileName !== 'default') {
     headers['X-Hermes-Profile'] = profileName
   }
