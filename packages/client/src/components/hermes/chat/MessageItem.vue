@@ -259,9 +259,31 @@ type ToolPayload = {
   language?: string;
 };
 
+const DIFF_HUNK_RE_TOOL = /^@@\s*-\d*/
+
+function isDiffLikeContent(raw: string): boolean {
+  let hunks = 0
+  let changes = 0
+  for (const line of raw.split('\n')) {
+    if (DIFF_HUNK_RE_TOOL.test(line)) hunks++
+    else if (line.startsWith('+') || line.startsWith('-')) changes++
+  }
+  if (hunks > 0 && changes > 0) return true
+  return changes >= 6
+}
+
 function formatToolPayload(raw?: string): ToolPayload {
   if (!raw) {
     return { full: "", display: "" };
+  }
+
+  // Detect diff content before JSON.stringify mangles the +/- lines
+  if (isDiffLikeContent(raw)) {
+    const display =
+      raw.length > TOOL_PAYLOAD_DISPLAY_LIMIT
+        ? raw.slice(0, TOOL_PAYLOAD_DISPLAY_LIMIT) + "\n" + t("chat.truncated")
+        : raw
+    return { full: raw, display, language: "diff" }
   }
 
   try {
