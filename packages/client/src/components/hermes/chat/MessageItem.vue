@@ -443,7 +443,12 @@ const renderedToolResult = computed(() => {
 
 const renderedToolInlineDiff = computed(() => {
   if (!formattedToolInlineDiff.value) return "";
-  return renderToolPayload(formattedToolInlineDiff.value, "diff");
+  return renderHighlightedCodeBlock(
+    formattedToolInlineDiff.value,
+    "diff",
+    t("common.copy"),
+    { maxHighlightLength: Infinity },
+  );
 });
 
 // 语音播放相关
