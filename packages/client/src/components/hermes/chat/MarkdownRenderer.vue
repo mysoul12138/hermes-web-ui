@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import type MarkdownIt from 'markdown-it'
 import MarkdownItConstructor from 'markdown-it'
-import { handleCodeBlockCopyClick, renderHighlightedCodeBlock } from './highlight'
+import { autoConvertDiffParagraphs, handleCodeBlockCopyClick, renderHighlightedCodeBlock } from './highlight'
 import { repairNestedMarkdownFences } from './markdownFenceRepair'
 import {
   MERMAID_MAX_DIAGRAMS_PER_MESSAGE,
@@ -140,6 +140,10 @@ const renderedHtml = computed(() => {
     const re = new RegExp(`(?<=[\\s>]|^)@(${escaped.join('|')})(?=\\s|$)`, 'gi')
     html = html.replace(re, '<span class="mention-highlight">@$1</span>')
   }
+
+  // Auto-detect and highlight inline diffs that aren't wrapped in ```diff
+  html = autoConvertDiffParagraphs(html)
+
   return html
 })
 
