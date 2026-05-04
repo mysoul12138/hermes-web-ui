@@ -262,6 +262,7 @@ type ToolPayload = {
 const DIFF_HUNK_RE_TOOL = /^@@\s*-\d*/
 
 function isDiffLikeContent(raw: string): boolean {
+  // Check raw lines first (direct diff content)
   let hunks = 0
   let changes = 0
   for (const line of raw.split('\n')) {
@@ -269,7 +270,19 @@ function isDiffLikeContent(raw: string): boolean {
     else if (line.startsWith('+') || line.startsWith('-')) changes++
   }
   if (hunks > 0 && changes > 0) return true
-  return changes >= 6
+  if (changes >= 6) return true
+
+  // Also check inside JSON values (pickToolResult wraps content in JSON)
+  try {
+    const parsed = JSON.parse(raw)
+    if (typeof parsed === 'object' && parsed !== null) {
+      for (const val of Object.values(parsed)) {
+        if (typeof val === 'string' && isDiffLikeContent(val)) return true
+      }
+    }
+  } catch { /* not JSON */ }
+
+  return false
 }
 
 function formatToolPayload(raw?: string): ToolPayload {
@@ -279,11 +292,25 @@ function formatToolPayload(raw?: string): ToolPayload {
 
   // Detect diff content before JSON.stringify mangles the +/- lines
   if (isDiffLikeContent(raw)) {
+    // If diff is inside a JSON wrapper, extract the actual diff text
+    let diffText = raw
+    try {
+      const parsed = JSON.parse(raw)
+      if (typeof parsed === 'object' && parsed !== null) {
+        for (const val of Object.values(parsed)) {
+          if (typeof val === 'string' && isDiffLikeContent(val)) {
+            diffText = val
+            break
+          }
+        }
+      }
+    } catch { /* not JSON, use raw */ }
+
     const display =
-      raw.length > TOOL_PAYLOAD_DISPLAY_LIMIT
-        ? raw.slice(0, TOOL_PAYLOAD_DISPLAY_LIMIT) + "\n" + t("chat.truncated")
-        : raw
-    return { full: raw, display, language: "diff" }
+      diffText.length > TOOL_PAYLOAD_DISPLAY_LIMIT
+        ? diffText.slice(0, TOOL_PAYLOAD_DISPLAY_LIMIT) + "\n" + t("chat.truncated")
+        : diffText
+    return { full: diffText, display, language: "diff" }
   }
 
   try {
