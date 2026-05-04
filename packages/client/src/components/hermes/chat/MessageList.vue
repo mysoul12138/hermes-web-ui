@@ -14,12 +14,16 @@ const listRef = ref<HTMLElement>();
 const scrollbarThumbTop = ref(0);
 const scrollbarThumbHeight = ref(0);
 const showCustomScrollbar = ref(false);
+const isDraggingScrollbar = ref(false);
+const isHoveringScrollbar = ref(false);
 const isAtLatest = ref(true);
 const LATEST_THRESHOLD = 120;
 const scrollPositions = new Map<string, number>();
 let scrollRequestToken = 0;
 let scrollbarHideTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | null = null;
+let scrollbarDragStartY = 0;
+let scrollbarDragStartScrollTop = 0;
 
 const displayMessages = computed(() => chatStore.displayMessages);
 
@@ -134,15 +138,76 @@ function updateCustomScrollbar() {
   scrollbarThumbTop.value = 14 + Math.round((scrollTop / scrollRange) * maxTop);
 }
 
+function scheduleScrollbarHide() {
+  if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
+  if (isDraggingScrollbar.value || isHoveringScrollbar.value) return;
+  scrollbarHideTimer = setTimeout(() => {
+    showCustomScrollbar.value = false;
+  }, 900);
+}
+
 function revealCustomScrollbar() {
   updateCustomScrollbar();
   const el = listRef.value;
   if (!el || el.scrollHeight <= el.clientHeight + 1) return;
   showCustomScrollbar.value = true;
+  scheduleScrollbarHide();
+}
+
+function scrollTopFromThumbDelta(deltaY: number) {
+  const el = listRef.value;
+  if (!el) return scrollbarDragStartScrollTop;
+  const trackHeight = Math.max(0, el.clientHeight - 28);
+  const maxThumbTop = Math.max(1, trackHeight - scrollbarThumbHeight.value);
+  const scrollRange = Math.max(0, el.scrollHeight - el.clientHeight);
+  return scrollbarDragStartScrollTop + (deltaY / maxThumbTop) * scrollRange;
+}
+
+function handleScrollbarPointerMove(event: PointerEvent) {
+  if (!isDraggingScrollbar.value) return;
+  const el = listRef.value;
+  if (!el) return;
+  const nextTop = scrollTopFromThumbDelta(event.clientY - scrollbarDragStartY);
+  el.scrollTop = Math.max(0, Math.min(nextTop, el.scrollHeight - el.clientHeight));
+  updateLatestState();
+  updateCustomScrollbar();
+}
+
+function stopScrollbarDrag() {
+  if (!isDraggingScrollbar.value) return;
+  isDraggingScrollbar.value = false;
+  window.removeEventListener("pointermove", handleScrollbarPointerMove);
+  window.removeEventListener("pointerup", stopScrollbarDrag);
+  window.removeEventListener("pointercancel", stopScrollbarDrag);
+  document.body.style.userSelect = "";
+  scheduleScrollbarHide();
+}
+
+function handleScrollbarPointerDown(event: PointerEvent) {
+  const el = listRef.value;
+  if (!el || scrollbarThumbHeight.value <= 0) return;
+  event.preventDefault();
+  event.stopPropagation();
   if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
-  scrollbarHideTimer = setTimeout(() => {
-    showCustomScrollbar.value = false;
-  }, 900);
+  isDraggingScrollbar.value = true;
+  showCustomScrollbar.value = true;
+  scrollbarDragStartY = event.clientY;
+  scrollbarDragStartScrollTop = el.scrollTop;
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", handleScrollbarPointerMove);
+  window.addEventListener("pointerup", stopScrollbarDrag);
+  window.addEventListener("pointercancel", stopScrollbarDrag);
+}
+
+function handleScrollbarPointerEnter() {
+  if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
+  isHoveringScrollbar.value = true;
+  showCustomScrollbar.value = true;
+}
+
+function handleScrollbarPointerLeave() {
+  isHoveringScrollbar.value = false;
+  scheduleScrollbarHide();
 }
 
 function rememberSessionScroll(sessionId: string | null | undefined) {
@@ -213,6 +278,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
+  stopScrollbarDrag();
   resizeObserver?.disconnect();
   resizeObserver = null;
 });
@@ -360,9 +426,12 @@ watch(
     <div
       v-if="scrollbarThumbHeight > 0"
       class="message-scrollbar-thumb"
-      :class="{ 'is-visible': showCustomScrollbar }"
+      :class="{ 'is-visible': showCustomScrollbar, 'is-dragging': isDraggingScrollbar }"
       :style="{ transform: `translateY(${scrollbarThumbTop}px)`, height: `${scrollbarThumbHeight}px` }"
       aria-hidden="true"
+      @pointerdown="handleScrollbarPointerDown"
+      @pointerenter="handleScrollbarPointerEnter"
+      @pointerleave="handleScrollbarPointerLeave"
     ></div>
     <button
       v-if="!isAtLatest"
@@ -449,28 +518,45 @@ watch(
 .message-scrollbar-thumb {
   position: absolute;
   top: 0;
-  right: 7px;
-  width: 7px;
+  right: 1px;
+  width: 20px;
   border-radius: 999px;
   pointer-events: none;
   z-index: 2;
   opacity: 0;
-  background: rgba(0, 0, 0, 0.38);
-  transition: opacity 0.18s ease, background-color $transition-fast;
+  background: transparent;
+  transition: opacity 0.18s ease;
+  cursor: grab;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0 5px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.38);
+    transition: background-color $transition-fast;
+  }
 
   &.is-visible {
     opacity: 1;
+    pointer-events: auto;
   }
 
-  .message-list-shell:hover &.is-visible {
+  &.is-dragging {
+    opacity: 1;
+    pointer-events: auto;
+    cursor: grabbing;
+  }
+
+  .message-list-shell:hover &.is-visible::before {
     background: rgba(0, 0, 0, 0.48);
   }
 
-  .dark & {
+  .dark &::before {
     background: rgba(255, 255, 255, 0.38);
   }
 
-  .dark .message-list-shell:hover &.is-visible {
+  .dark .message-list-shell:hover &.is-visible::before {
     background: rgba(255, 255, 255, 0.5);
   }
 }
