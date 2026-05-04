@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import type MarkdownIt from 'markdown-it'
 import MarkdownItConstructor from 'markdown-it'
-import { handleCodeBlockCopyClick, renderHighlightedCodeBlock } from './highlight'
+import { autoConvertDiffParagraphs, handleCodeBlockCopyClick, renderHighlightedCodeBlock } from './highlight'
 import { repairNestedMarkdownFences } from './markdownFenceRepair'
 import {
   MERMAID_MAX_DIAGRAMS_PER_MESSAGE,
@@ -19,8 +19,10 @@ import { downloadFile, getDownloadUrl } from '@/api/hermes/download'
 const props = withDefaults(defineProps<{
     content: string
     mentionNames?: string[]
+    autoDiff?: boolean
 }>(), {
     mentionNames: () => [],
+    autoDiff: false,
 })
 
 defineOptions({
@@ -140,6 +142,12 @@ const renderedHtml = computed(() => {
     const re = new RegExp(`(?<=[\\s>]|^)@(${escaped.join('|')})(?=\\s|$)`, 'gi')
     html = html.replace(re, '<span class="mention-highlight">@$1</span>')
   }
+
+  // Auto-detect inline diffs (only when explicitly enabled, e.g. for assistant messages)
+  if (props.autoDiff) {
+    html = autoConvertDiffParagraphs(html)
+  }
+
   return html
 })
 

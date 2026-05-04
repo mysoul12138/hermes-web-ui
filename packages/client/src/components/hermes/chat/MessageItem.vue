@@ -700,6 +700,7 @@ onBeforeUnmount(() => {
               <MarkdownRenderer
                 v-if="parsedThinking.body"
                 :content="parsedThinking.body"
+                auto-diff
                 :class="{ 'with-streaming-cursor': showStreamingCursor }"
               />
             </div>
