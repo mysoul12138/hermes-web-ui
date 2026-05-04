@@ -1265,9 +1265,27 @@ export const useChatStore = defineStore('chat', () => {
     existing.source = nextSession.source
     existing.model = nextSession.model
     if (!preserveHydratedMessages && !preserveActiveHydratedMessages) {
-      const mergedMessages = existing.messages.length > 0
+      let mergedMessages = existing.messages.length > 0
         ? mergeServerToolDetails(nextSession.messages, existing.messages)
         : nextSession.messages
+      // Preserve reasoning from hydrated messages: branch summaries (from
+      // branchToSession) always set reasoning=null.  Without this guard the
+      // periodic sync → hydrate cycle causes the thinking block to
+      // collapse/re-expand every few seconds — visible as flickering.
+      if (existing.messages.length > 0) {
+        const existingReasoning = new Map<string, string>()
+        for (const m of existing.messages) {
+          if (m.reasoning) existingReasoning.set(String(m.id), m.reasoning)
+        }
+        if (existingReasoning.size > 0) {
+          mergedMessages = mergedMessages.map(m => {
+            if (!m.reasoning && existingReasoning.has(String(m.id))) {
+              return { ...m, reasoning: existingReasoning.get(String(m.id))! }
+            }
+            return m
+          })
+        }
+      }
       if (!messagesEquivalent(existing.messages, mergedMessages)) {
         existing.messages = mergedMessages
       }
