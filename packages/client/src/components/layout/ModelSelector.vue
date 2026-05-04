@@ -2,12 +2,10 @@
 import { ref, computed } from 'vue'
 import { NModal, NInput, NSelect } from 'naive-ui'
 import { useAppStore } from '@/stores/hermes/app'
-import { useChatStore } from '@/stores/hermes/chat'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const chatStore = useChatStore()
 
 const showModal = ref(false)
 const searchQuery = ref('')
@@ -60,9 +58,6 @@ function isGroupCollapsed(provider: string) {
 
 async function applyModelSelection(model: string, provider: string) {
   await appStore.switchModel(model, provider)
-  if (chatStore.activeSession && !chatStore.isRunActive) {
-    await chatStore.switchSessionModel(model, provider, { updateGlobal: false })
-  }
 }
 
 function handleSelect(model: string, provider: string) {

@@ -137,6 +137,11 @@ interface PendingPersistentResolution {
   deadlineAt: number
 }
 
+interface BridgeRunOptions {
+  model?: string
+  provider?: string
+}
+
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_TUI_RPC_TIMEOUT_MS || 120000))
 const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEARTBEAT_MS || process.env.HERMES_TUI_IDLE_COMPLETE_MS || 15000))
@@ -455,6 +460,7 @@ export class TuiBridgeService {
     input: string,
     webSessionId: string,
     conversationHistory: Array<{ role: string, content: string }> = [],
+    options: BridgeRunOptions = {},
   ) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
     let bridgeSession = await this.ensureBridgeSession(webSessionId)
@@ -506,6 +512,7 @@ export class TuiBridgeService {
 
     const prompt = bridgeSession.created ? contextPrompt : input
     try {
+      if (!bridgeSession.created) await this.applyRunModelSelection(bridgeSessionId, options)
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: prompt })
     } catch (error) {
       if (!/session busy/i.test(error instanceof Error ? error.message : String(error))) {
@@ -538,6 +545,18 @@ export class TuiBridgeService {
       context_message_count: contextMessageCount,
       context_token_count: contextTokenCount,
     }
+  }
+
+  private async applyRunModelSelection(bridgeSessionId: string, options: BridgeRunOptions): Promise<void> {
+    const model = options.model?.trim()
+    if (!model) return
+    const provider = options.provider?.trim()
+    const value = provider ? `${model} --provider ${provider}` : model
+    await this.client.request('config.set', {
+      session_id: bridgeSessionId,
+      key: 'model',
+      value,
+    })
   }
 
   async respondApproval(webSessionId: string, choice: string) {

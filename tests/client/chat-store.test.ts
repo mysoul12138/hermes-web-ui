@@ -924,6 +924,37 @@ describe('Chat Store', () => {
     }))
     expect(store.activeSession?.model).toBe('new-model')
     expect(store.activeSession?.provider).toBe('new-provider')
+    expect(window.localStorage.getItem(sessionModelOverrideKey(store.activeSession!.id))).toBeNull()
+  })
+
+  it('clears stale session model overrides so old sessions follow the global model', async () => {
+    const appStore = useAppStore()
+    appStore.selectedModel = 'global-model'
+    appStore.selectedProvider = 'global-provider'
+    window.localStorage.setItem(sessionModelOverrideKey('old-session'), JSON.stringify({
+      model: 'stale-session-model',
+      provider: 'stale-session-provider',
+      updatedAt: Date.now() - 1000,
+    }))
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, 'old-session')
+    mockSessionsApi.fetchSessions.mockResolvedValue([
+      { ...makeSummary('old-session'), model: 'json-model', billing_provider: 'json-provider' },
+    ])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+    expect(store.activeSession?.model).toBe('stale-session-model')
+
+    await store.sendMessage('follow global after switch')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'global-model',
+      provider: 'global-provider',
+    }))
+    expect(store.activeSession?.model).toBe('global-model')
+    expect(store.activeSession?.provider).toBe('global-provider')
+    expect(window.localStorage.getItem(sessionModelOverrideKey('old-session'))).toBeNull()
   })
 
   it('does not pair a custom model with a stale global provider that does not list it', async () => {

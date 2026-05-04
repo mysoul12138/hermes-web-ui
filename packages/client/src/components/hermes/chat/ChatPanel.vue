@@ -2,6 +2,7 @@
 import { renameSession, setSessionWorkspace } from '@/api/hermes/sessions'
 import type { ConversationBranch } from '@/api/hermes/conversations'
 import { useChatStore, type Session } from '@/stores/hermes/chat'
+import { useAppStore } from '@/stores/hermes/app'
 import { useSessionBrowserPrefsStore } from '@/stores/hermes/session-browser-prefs'
 import { NButton, NDropdown, NInput, NModal, NTooltip, useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -16,6 +17,7 @@ import SessionListItem from './SessionListItem.vue'
 import DrawerPanel from './DrawerPanel.vue'
 
 const chatStore = useChatStore()
+const appStore = useAppStore()
 const sessionBrowserPrefsStore = useSessionBrowserPrefsStore()
 const message = useMessage()
 const { t } = useI18n()
@@ -288,7 +290,7 @@ const activeSessionSource = computed(() =>
 )
 
 const activeModelLabel = computed(() =>
-  currentMode.value === 'chat' ? (chatStore.activeSession?.model || '') : '',
+  currentMode.value === 'chat' ? (appStore.selectedModel || chatStore.activeSession?.model || '') : '',
 )
 
 const headerSubtitle = computed(() => {

@@ -3533,7 +3533,7 @@ function isStaleBridgeRunError(error: unknown): boolean {
       if (target) {
         if (sessionModel) target.model = sessionModel
         target.provider = sessionProvider
-        if (sessionModel) writeSessionModelOverride(target.id, sessionModel, sessionProvider)
+        clearSessionModelOverride(target.id)
         persistSessionsList()
       }
       const run = await startRun({

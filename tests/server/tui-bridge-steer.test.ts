@@ -32,7 +32,7 @@ class FakeGatewayClient extends EventEmitter {
     }
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
     if (method === 'prompt.submit') return { ok: true } as T
-    if (method === 'config.set') throw new Error('config.set should not be called during bridge runs')
+    if (method === 'config.set') return { key: params.key, value: String(params.value || ''), warning: '' } as T
     if (method === 'session.list') return { sessions: this.persistentSessions } as T
     if (method === 'session.create') {
       this.createdSessions += 1
@@ -213,10 +213,38 @@ describe('TuiBridgeService steer compatibility', () => {
       session_id: 'persistent-session',
     })
     expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
       'prompt.submit',
     ])
     expect(client.requests[0].params).toMatchObject({
       session_id: 'tui-session',
+      key: 'model',
+      value: 'gpt-5.5 --provider openai-codex',
+    })
+    expect(client.requests[1].params).toMatchObject({
+      session_id: 'tui-session',
+      text: 'hello',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('does not add model switch latency for a brand new bridge session', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await (bridge.startRun as any)('hello', 'new-web-session', [], {
+      model: 'gpt-5.5',
+      provider: 'openai-codex',
+    })
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'session.list',
+      'session.create',
+      'session.list',
+      'prompt.submit',
+    ])
+    expect(client.requests.at(-1)?.params).toMatchObject({
       text: 'hello',
     })
     ;(bridge as any).closeRun(result.run_id)
@@ -236,9 +264,15 @@ describe('TuiBridgeService steer compatibility', () => {
     })
 
     expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
       'prompt.submit',
     ])
     expect(client.requests[0].params).toMatchObject({
+      session_id: 'stale-tui-session',
+      key: 'model',
+      value: 'qwen3.5-plus --provider alibaba',
+    })
+    expect(client.requests[1].params).toMatchObject({
       session_id: 'stale-tui-session',
       text: 'hello',
     })
@@ -264,9 +298,15 @@ describe('TuiBridgeService steer compatibility', () => {
     })
 
     expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
       'prompt.submit',
     ])
     expect(client.requests[0].params).toMatchObject({
+      session_id: 'tui-session',
+      key: 'model',
+      value: 'deepseek-ai/DeepSeek-V4-Pro --provider custom:llm.mathmodel.tech',
+    })
+    expect(client.requests[1].params).toMatchObject({
       session_id: 'tui-session',
       text: 'hello',
     })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import MessageItem from "./MessageItem.vue";
 import { useChatStore } from "@/stores/hermes/chat";
@@ -11,10 +11,15 @@ const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
 const { t } = useI18n();
 const listRef = ref<HTMLElement>();
+const scrollbarThumbTop = ref(0);
+const scrollbarThumbHeight = ref(0);
+const showCustomScrollbar = ref(false);
 const isAtLatest = ref(true);
 const LATEST_THRESHOLD = 120;
 const scrollPositions = new Map<string, number>();
 let scrollRequestToken = 0;
+let scrollbarHideTimer: ReturnType<typeof setTimeout> | undefined;
+let resizeObserver: ResizeObserver | null = null;
 
 const displayMessages = computed(() => chatStore.displayMessages);
 
@@ -109,6 +114,37 @@ function updateLatestState() {
   isAtLatest.value = isNearBottom();
 }
 
+function updateCustomScrollbar() {
+  const el = listRef.value;
+  if (!el) return;
+  const { scrollHeight, clientHeight, scrollTop } = el;
+  if (scrollHeight <= clientHeight + 1) {
+    showCustomScrollbar.value = false;
+    scrollbarThumbTop.value = 0;
+    scrollbarThumbHeight.value = 0;
+    return;
+  }
+  const trackHeight = Math.max(0, clientHeight - 28);
+  const minThumbHeight = 64;
+  const proportionalHeight = Math.round((clientHeight / scrollHeight) * trackHeight);
+  const thumbHeight = Math.max(minThumbHeight, proportionalHeight);
+  const maxTop = Math.max(0, trackHeight - thumbHeight);
+  const scrollRange = Math.max(1, scrollHeight - clientHeight);
+  scrollbarThumbHeight.value = thumbHeight;
+  scrollbarThumbTop.value = 14 + Math.round((scrollTop / scrollRange) * maxTop);
+}
+
+function revealCustomScrollbar() {
+  updateCustomScrollbar();
+  const el = listRef.value;
+  if (!el || el.scrollHeight <= el.clientHeight + 1) return;
+  showCustomScrollbar.value = true;
+  if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
+  scrollbarHideTimer = setTimeout(() => {
+    showCustomScrollbar.value = false;
+  }, 900);
+}
+
 function rememberSessionScroll(sessionId: string | null | undefined) {
   const el = listRef.value;
   if (!el || !sessionId) return;
@@ -123,6 +159,7 @@ function restoreScrollTop(top: number, sessionId = chatStore.activeSessionId) {
     if (!el) return;
     el.scrollTop = Math.max(0, Math.min(top, el.scrollHeight));
     updateLatestState();
+    updateCustomScrollbar();
   });
 }
 
@@ -138,6 +175,7 @@ function scrollToBottom(smooth = false, sessionId = chatStore.activeSessionId) {
         el.scrollTop = el.scrollHeight;
       }
       updateLatestState();
+      revealCustomScrollbar();
     }
   });
 }
@@ -150,6 +188,7 @@ function scrollToMessage(messageId: string, sessionId = chatStore.activeSessionI
     if (el) {
       el.scrollIntoView({ block: 'center' });
       updateLatestState();
+      revealCustomScrollbar();
     }
   });
 }
@@ -157,11 +196,25 @@ function scrollToMessage(messageId: string, sessionId = chatStore.activeSessionI
 function handleScroll() {
   rememberSessionScroll(chatStore.activeSessionId);
   updateLatestState();
+  revealCustomScrollbar();
 }
 
 onMounted(() => {
   if (Object.keys(settingsStore.display).length === 0) void settingsStore.fetchSettings();
-  nextTick(updateLatestState);
+  nextTick(() => {
+    updateLatestState();
+    updateCustomScrollbar();
+    if (typeof ResizeObserver !== "undefined" && listRef.value) {
+      resizeObserver = new ResizeObserver(updateCustomScrollbar);
+      resizeObserver.observe(listRef.value);
+    }
+  });
+});
+
+onBeforeUnmount(() => {
+  if (scrollbarHideTimer) clearTimeout(scrollbarHideTimer);
+  resizeObserver?.disconnect();
+  resizeObserver = null;
 });
 
 // Scroll to bottom on session switch
@@ -232,6 +285,7 @@ watch(
     }
     if (!isAtLatest.value) return;
     scrollToBottom(false, chatStore.activeSessionId);
+    nextTick(updateCustomScrollbar);
   },
 );
 </script>
@@ -303,6 +357,13 @@ watch(
         </div>
       </div>
     </div>
+    <div
+      v-if="scrollbarThumbHeight > 0"
+      class="message-scrollbar-thumb"
+      :class="{ 'is-visible': showCustomScrollbar }"
+      :style="{ transform: `translateY(${scrollbarThumbTop}px)`, height: `${scrollbarThumbHeight}px` }"
+      aria-hidden="true"
+    ></div>
     <button
       v-if="!isAtLatest"
       type="button"
@@ -333,9 +394,84 @@ watch(
   overflow-y: auto;
   padding: 24px 28px 30px;
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.018), rgba(0, 0, 0, 0));
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+
+  &::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
+  &::-webkit-scrollbar-button,
+  &::-webkit-scrollbar-button:single-button,
+  &::-webkit-scrollbar-button:double-button {
+    width: 0;
+    height: 0;
+    display: none;
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.32);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+
+    &:hover {
+      background: rgba(0, 0, 0, 0.46);
+      background-clip: padding-box;
+    }
+  }
 
   .dark & {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0));
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.36);
+      background-clip: padding-box;
+
+      &:hover {
+        background: rgba(255, 255, 255, 0.54);
+        background-clip: padding-box;
+      }
+    }
+  }
+}
+
+.message-scrollbar-thumb {
+  position: absolute;
+  top: 0;
+  right: 7px;
+  width: 7px;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  background: rgba(0, 0, 0, 0.38);
+  transition: opacity 0.18s ease, background-color $transition-fast;
+
+  &.is-visible {
+    opacity: 1;
+  }
+
+  .message-list-shell:hover &.is-visible {
+    background: rgba(0, 0, 0, 0.48);
+  }
+
+  .dark & {
+    background: rgba(255, 255, 255, 0.38);
+  }
+
+  .dark .message-list-shell:hover &.is-visible {
+    background: rgba(255, 255, 255, 0.5);
   }
 }
 
