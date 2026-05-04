@@ -1419,9 +1419,27 @@ export const useChatStore = defineStore('chat', () => {
       const existing = sessions.value.find(session => session.id === branchId)
       if (existing) {
         const preserveToolDetails = serverHasBetterToolDetails(seededMessages, existing.messages)
-        const nextMessages = preserveToolDetails
+        let nextMessages = preserveToolDetails
           ? mergeServerToolDetails(seededMessages, existing.messages)
           : seededMessages
+        // Preserve reasoning from existing hydrated messages when the incoming
+        // messages lack it (e.g. pre-fetch failed and fell back to branch
+        // summary which always has reasoning=null).  Same logic as in
+        // syncBranchSessionFromBranch to prevent thinking-block flicker.
+        if (existing.messages.length > 0) {
+          const existingReasoning = new Map<string, string>()
+          for (const m of existing.messages) {
+            if (m.reasoning) existingReasoning.set(String(m.id), m.reasoning)
+          }
+          if (existingReasoning.size > 0) {
+            nextMessages = nextMessages.map(m => {
+              if (!m.reasoning && existingReasoning.has(String(m.id))) {
+                return { ...m, reasoning: existingReasoning.get(String(m.id))! }
+              }
+              return m
+            })
+          }
+        }
         existing.title = nextSession.title
         existing.source = nextSession.source
         existing.model = nextSession.model
