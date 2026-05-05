@@ -351,13 +351,16 @@ export function compareServerMessages(local: Message[], server: Message[]) {
 
 export function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
   const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
-  const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
-  if (!localSteered.length) return mapped
-  // Insert each steered message at the position matching its timestamp
+  // Preserve both steered (in-run) and queued (waiting for next turn) user
+  // messages that the server hasn't seen yet.  Without the queued check,
+  // switching away from a session with pending queued messages would lose them.
+  const localPreserved = current.filter(message => (message.steered || message.queued) && !mappedUserTexts.has(message.content.trim()))
+  if (!localPreserved.length) return mapped
+  // Insert each preserved message at the position matching its timestamp
   // instead of appending all at the end
   const result = [...mapped]
-  for (const steered of localSteered) {
-    const ts = steered.timestamp || 0
+  for (const msg of localPreserved) {
+    const ts = msg.timestamp || 0
     let insertIdx = result.length
     for (let i = 0; i < result.length; i++) {
       const msgTs = result[i].timestamp || 0
@@ -366,7 +369,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
         break
       }
     }
-    result.splice(insertIdx, 0, steered)
+    result.splice(insertIdx, 0, msg)
   }
   return result
 }

@@ -1661,8 +1661,16 @@ export const useChatStore = defineStore('chat', () => {
       if (!target) return false
       if (isBridgeFallbackSession(detail) && target.messages.length > 0) return true
       const mapped = mapHermesMessages(detail.messages || [])
+      // If the session has a resuming run, local messages are more current —
+      // only merge tool detail enrichment from the server.
+      const hasResumingRun = resumingRuns.value.has(sid)
       const { serverIsAhead } = compareServerMessages(target.messages, mapped)
-      if (serverIsAhead) {
+      if (hasResumingRun) {
+        if (serverHasBetterToolDetails(target.messages, mapped)) {
+          target.messages = mergeServerToolDetails(target.messages, mapped)
+          persistActiveMessages()
+        }
+      } else if (serverIsAhead) {
         target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
         persistActiveMessages()
       } else if (serverHasBetterToolDetails(target.messages, mapped)) {
@@ -2244,15 +2252,24 @@ export const useChatStore = defineStore('chat', () => {
       if (detail && detail.messages) {
         if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)
-        // When switching to a different session, always accept the server's
-        // messages.  The old comparison logic would reject the server payload
-        // when the new session had fewer user turns than the previously-viewed
-        // session, leaving stale messages from the old session on screen.
-        // For same-session refreshes (polling), keep the existing guard so
-        // we don't clobber a locally-streamed reply the server hasn't seen yet.
+        // When switching to a different session, accept the server's messages
+        // — but NOT if the target session has a live stream or a resuming run.
+        // In that case local messages are more up-to-date (streaming content,
+        // queued user turns) and the server snapshot would clobber them.
+        // The active SSE stream or polling will keep messages current.
         const switchingSessions = previousSessionId !== sessionId
+        const targetHasActiveStream = streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)
         const local = activeSession.value.messages
-        if (switchingSessions || compareServerMessages(local, mapped).serverIsAhead) {
+        if (targetHasActiveStream) {
+          // Only merge tool detail enrichment from the server; never overwrite
+          // streaming content or queued/steered user messages.
+          if (serverHasBetterToolDetails(local, mapped)) {
+            const nextMessages = mergeServerToolDetails(activeSession.value.messages, mapped)
+            if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
+              activeSession.value.messages = nextMessages
+            }
+          }
+        } else if (switchingSessions || compareServerMessages(local, mapped).serverIsAhead) {
           const nextMessages = withLocalSteeredMessages(mergeServerToolDetails(mapped, activeSession.value.messages), activeSession.value.messages)
           if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
             activeSession.value.messages = nextMessages
