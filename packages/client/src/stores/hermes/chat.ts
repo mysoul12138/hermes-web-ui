@@ -35,8 +35,41 @@ import {
 } from '@/custom/utils/run-event-helpers'
 import { isBuggyReasoningPreview } from '@/custom/utils/display-helpers'
 import {
-  uid,
+  storageKey as _storageKey,
+  sessionsCacheKey as _sessionsCacheKey,
+  bridgeLocalSessionKey as _bridgeLocalSessionKey,
+  bridgePersistentSessionKey as _bridgePersistentSessionKey,
+  bridgeSeenKey as _bridgeSeenKey,
+  msgsCacheKey as _msgsCacheKey,
+  inFlightKey as _inFlightKey,
+  legacyStorageKey as _legacyStorageKey,
+  legacySessionsCacheKey as _legacySessionsCacheKey,
+  legacyMsgsCacheKey as _legacyMsgsCacheKey,
+  legacyInFlightKey as _legacyInFlightKey,
+  loadJson as _loadJson,
+  loadJsonWithFallback as _loadJsonWithFallback,
+  saveJson as _saveJson,
+  saveJsonWithLegacy as _saveJsonWithLegacy,
+  removeItem as _removeItem,
+  removeItemWithLegacy as _removeItemWithLegacy,
+  setItemBestEffort as _setItemBestEffort,
+  writeSessionModelOverride as _writeSessionModelOverride,
+  clearSessionModelOverride as _clearSessionModelOverride,
+  copySessionModelOverride as _copySessionModelOverride,
+  applySessionModelOverride as _applySessionModelOverride,
+  markInFlight as _markInFlight,
+  readInFlight as _readInFlight,
+  clearInFlight as _clearInFlight,
   isPersistentTuiSessionId,
+  shouldDefaultNewSessionToTui as _shouldDefaultNewSessionToTui,
+  isBridgeLocalSession as _isBridgeLocalSession,
+  clearBridgeLocalSession as _clearBridgeLocalSession,
+  readBridgePersistentSessionId as _readBridgePersistentSessionId,
+  readBridgeBackingSessionId as _readBridgeBackingSessionId,
+  type InFlightRun,
+} from '@/custom/utils/bridge-session-helpers'
+import {
+  uid,
   normalizeProviderKey,
   normalizeBaseUrl,
   isBridgeFallbackSession,
@@ -188,16 +221,7 @@ function applySessionDetail(session: Session | undefined | null, detail: Partial
 // All keys include the active profile name to isolate cache between profiles.
 // Rendering from cache on boot avoids the multi-round-trip wait the user sees
 // every time they open the page (esp. noticeable on mobile).
-const STORAGE_KEY_PREFIX = 'hermes_active_session_'
-const SESSIONS_CACHE_KEY_PREFIX = 'hermes_sessions_cache_v1_'
-const BRIDGE_LOCAL_SESSION_KEY_PREFIX = 'hermes_bridge_local_session_v1_'
-const BRIDGE_PERSISTENT_SESSION_KEY_PREFIX = 'hermes_bridge_persistent_session_v1_'
-const BRIDGE_SEEN_KEY_PREFIX = 'hermes_bridge_seen_v1_'
 const BRANCH_SESSION_META_KEY_PREFIX = 'hermes_branch_session_meta_v1_'
-const SESSION_MODEL_OVERRIDE_KEY_PREFIX = 'hermes_session_model_override_v1_'
-const LEGACY_STORAGE_KEY = 'hermes_active_session'
-const LEGACY_SESSIONS_CACHE_KEY = 'hermes_sessions_cache_v1'
-const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
 const POLL_INTERVAL_MS = 2000
 const COMPRESSION_NOTICE_TTL_MS = 15_000
 const STREAM_FLUSH_INTERVAL_MS = 50
@@ -215,24 +239,38 @@ function getProfileName(): string {
   }
 }
 
-function storageKey(): string { return STORAGE_KEY_PREFIX + getProfileName() }
-function sessionsCacheKey(): string { return SESSIONS_CACHE_KEY_PREFIX + getProfileName() }
-function bridgeLocalSessionKey(sid: string): string { return `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
-function bridgePersistentSessionKey(sid: string): string { return `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_${sid}` }
-function bridgeSeenKey(): string { return BRIDGE_SEEN_KEY_PREFIX + getProfileName() }
+// Thin wrappers that inject getProfileName() into the pure helpers.
+function storageKey(): string { return _storageKey(getProfileName()) }
+function sessionsCacheKey(): string { return _sessionsCacheKey(getProfileName()) }
+function bridgeLocalSessionKey(sid: string): string { return _bridgeLocalSessionKey(getProfileName(), sid) }
+function bridgePersistentSessionKey(sid: string): string { return _bridgePersistentSessionKey(getProfileName(), sid) }
+function bridgeSeenKey(): string { return _bridgeSeenKey(getProfileName()) }
 function branchSessionMetaKey(): string { return BRANCH_SESSION_META_KEY_PREFIX + getProfileName() }
-function sessionModelOverrideKey(sid: string): string { return `${SESSION_MODEL_OVERRIDE_KEY_PREFIX}${getProfileName()}_${sid}` }
-function msgsCacheKey(sid: string): string { return `hermes_session_msgs_v1_${getProfileName()}_${sid}_` }
-function inFlightKey(sid: string): string { return `hermes_in_flight_v1_${getProfileName()}_${sid}` }
-function legacyStorageKey(): string | null { return getProfileName() === 'default' ? LEGACY_STORAGE_KEY : null }
-function legacySessionsCacheKey(): string | null { return getProfileName() === 'default' ? LEGACY_SESSIONS_CACHE_KEY : null }
-function legacyMsgsCacheKey(sid: string): string | null { return getProfileName() === 'default' ? `hermes_session_msgs_v1_${sid}` : null }
-function legacyInFlightKey(sid: string): string | null { return getProfileName() === 'default' ? `hermes_in_flight_v1_${sid}` : null }
-
-interface InFlightRun {
-  runId: string
-  startedAt: number
-}
+function msgsCacheKey(sid: string): string { return _msgsCacheKey(getProfileName(), sid) }
+function inFlightKey(sid: string): string { return _inFlightKey(getProfileName(), sid) }
+function legacyStorageKey(): string | null { return _legacyStorageKey(getProfileName()) }
+function legacySessionsCacheKey(): string | null { return _legacySessionsCacheKey(getProfileName()) }
+function legacyMsgsCacheKey(sid: string): string | null { return _legacyMsgsCacheKey(getProfileName(), sid) }
+function legacyInFlightKey(sid: string): string | null { return _legacyInFlightKey(getProfileName(), sid) }
+function loadJson<T>(key: string): T | null { return _loadJson<T>(key) }
+function loadJsonWithFallback<T>(key: string, legacyKey?: string | null): T | null { return _loadJsonWithFallback<T>(key, legacyKey) }
+function saveJson(key: string, value: unknown) { _saveJson(key, value) }
+function saveJsonWithLegacy(key: string, value: unknown, legacyKey?: string | null) { _saveJsonWithLegacy(key, value, legacyKey) }
+function removeItem(key: string) { _removeItem(key) }
+function removeItemWithLegacy(key: string, legacyKey?: string | null) { _removeItemWithLegacy(key, legacyKey) }
+function setItemBestEffort(key: string, value: string) { _setItemBestEffort(key, value) }
+function writeSessionModelOverride(sid: string, model: string, provider?: string) { _writeSessionModelOverride(getProfileName(), sid, model, provider) }
+function clearSessionModelOverride(sid: string) { _clearSessionModelOverride(getProfileName(), sid) }
+function copySessionModelOverride(fromSid: string, toSid: string) { _copySessionModelOverride(getProfileName(), fromSid, toSid) }
+function applySessionModelOverride(session: Session | undefined | null) { _applySessionModelOverride(getProfileName(), session) }
+function markInFlight(sid: string, runId: string) { _markInFlight(getProfileName(), sid, runId) }
+function readInFlight(sid: string): InFlightRun | null { return _readInFlight(getProfileName(), sid) }
+function clearInFlight(sid: string) { _clearInFlight(getProfileName(), sid) }
+function isBridgeLocalSession(sid: string): boolean { return _isBridgeLocalSession(getProfileName(), sid) }
+function clearBridgeLocalSession(sid: string) { _clearBridgeLocalSession(getProfileName(), sid) }
+function readBridgePersistentSessionId(sid: string): string | null { return _readBridgePersistentSessionId(getProfileName(), sid) }
+function readBridgeBackingSessionId(sid: string): string | null { return _readBridgeBackingSessionId(getProfileName(), sid) }
+function shouldDefaultNewSessionToTui(): boolean { return _shouldDefaultNewSessionToTui(getProfileName()) }
 
 interface ApprovalState {
   pending: PendingApproval | null
@@ -254,146 +292,6 @@ interface BranchSessionMeta {
   rootSessionId: string
   branchSessionCount?: number
 }
-
-interface SessionModelOverride {
-  model: string
-  provider?: string
-  updatedAt: number
-}
-
-function loadJson<T>(key: string): T | null {
-  try {
-    const raw = localStorage.getItem(key)
-    return raw ? (JSON.parse(raw) as T) : null
-  } catch {
-    return null
-  }
-}
-
-function isQuotaExceededError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false
-  const e = error as { name?: string, code?: number }
-  return e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014
-}
-
-function recoverStorageQuota() {
-  try {
-    const prefixes = [
-      sessionsCacheKey(),
-      `hermes_session_msgs_v1_${getProfileName()}_`,
-      `hermes_in_flight_v1_${getProfileName()}_`,
-      `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${getProfileName()}_`,
-      `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${getProfileName()}_`,
-      `${SESSION_MODEL_OVERRIDE_KEY_PREFIX}${getProfileName()}_`,
-    ]
-    const legacySessions = legacySessionsCacheKey()
-    if (legacySessions) prefixes.push(legacySessions)
-    if (getProfileName() === 'default') {
-      prefixes.push('hermes_session_msgs_v1_')
-      prefixes.push('hermes_in_flight_v1_')
-    }
-    const keysToRemove: string[] = []
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i)
-      if (!key) continue
-      if (key === storageKey() || key === LEGACY_STORAGE_KEY) continue
-      if (prefixes.some(prefix => key.startsWith(prefix))) {
-        keysToRemove.push(key)
-      }
-    }
-    keysToRemove.forEach(key => removeItem(key))
-  } catch {
-    // ignore
-  }
-}
-
-function setItemBestEffort(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value)
-    return
-  } catch (error) {
-    if (!isQuotaExceededError(error)) return
-  }
-
-  recoverStorageQuota()
-
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    // quota exceeded or private mode — ignore, cache is best-effort
-  }
-}
-
-function saveJson(key: string, value: unknown) {
-  try {
-    setItemBestEffort(key, JSON.stringify(value))
-  } catch {
-    // quota exceeded or private mode — ignore, cache is best-effort
-  }
-}
-
-function removeItem(key: string) {
-  try {
-    localStorage.removeItem(key)
-  } catch {
-    // ignore
-  }
-}
-
-function loadJsonWithFallback<T>(key: string, legacyKey?: string | null): T | null {
-  const value = loadJson<T>(key)
-  if (value != null) return value
-  if (!legacyKey) return null
-  return loadJson<T>(legacyKey)
-}
-
-function saveJsonWithLegacy(key: string, value: unknown, legacyKey?: string | null) {
-  saveJson(key, value)
-  if (legacyKey) removeItem(legacyKey)
-}
-
-function removeItemWithLegacy(key: string, legacyKey?: string | null) {
-  removeItem(key)
-  if (legacyKey) removeItem(legacyKey)
-}
-
-function readSessionModelOverride(sid: string | undefined): SessionModelOverride | null {
-  if (!sid) return null
-  const override = loadJson<SessionModelOverride>(sessionModelOverrideKey(sid))
-  if (!override?.model?.trim()) return null
-  return override
-}
-
-function writeSessionModelOverride(sid: string, model: string, provider?: string) {
-  const modelValue = model.trim()
-  if (!sid || !modelValue) return
-  saveJson(sessionModelOverrideKey(sid), {
-    model: modelValue,
-    provider: provider?.trim() || '',
-    updatedAt: Date.now(),
-  } as SessionModelOverride)
-}
-
-function clearSessionModelOverride(sid: string) {
-  removeItem(sessionModelOverrideKey(sid))
-}
-
-function copySessionModelOverride(fromSid: string, toSid: string) {
-  if (!fromSid || !toSid || fromSid === toSid) return
-  const override = readSessionModelOverride(fromSid)
-  if (!override) return
-  writeSessionModelOverride(toSid, override.model, override.provider)
-}
-
-function applySessionModelOverride(session: Session | undefined | null) {
-  if (!session) return
-  const override = readSessionModelOverride(session.id)
-  if (!override) return
-  session.model = override.model
-  session.provider = override.provider || ''
-}
-
-
 
 export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
@@ -1174,16 +1072,8 @@ export const useChatStore = defineStore('chat', () => {
     await submitMessage(sid, nextQueued.content, nextQueued.attachments, nextQueued.id)
   }
 
-  function markInFlight(sid: string, runId: string) {
-    saveJsonWithLegacy(inFlightKey(sid), { runId, startedAt: Date.now() } as InFlightRun, legacyInFlightKey(sid))
-  }
-
   function markBridgeModeSeen() {
     setItemBestEffort(bridgeSeenKey(), '1')
-  }
-
-  function shouldDefaultNewSessionToTui() {
-    return localStorage.getItem(bridgeSeenKey()) === '1'
   }
 
   function markBridgeLocalSession(sid: string, persistentSessionId?: string) {
@@ -1194,25 +1084,6 @@ export const useChatStore = defineStore('chat', () => {
       copySessionModelOverride(sid, persistentSessionId)
       copyCompressionState(sid, persistentSessionId)
     }
-  }
-
-  function clearBridgeLocalSession(sid: string) {
-    removeItem(bridgeLocalSessionKey(sid))
-    removeItem(bridgePersistentSessionKey(sid))
-  }
-
-  function isBridgeLocalSession(sid: string) {
-    return localStorage.getItem(bridgeLocalSessionKey(sid)) === '1'
-  }
-
-  function readBridgePersistentSessionId(sid: string) {
-    const persistent = localStorage.getItem(bridgePersistentSessionKey(sid)) || null
-    if (persistent && persistent !== sid && isPersistentTuiSessionId(sid)) return null
-    return persistent
-  }
-
-  function readBridgeBackingSessionId(sid: string) {
-    return localStorage.getItem(bridgePersistentSessionKey(sid)) || null
   }
 
   function clearCompressionNoticeTimer(sid: string) {
@@ -1272,22 +1143,8 @@ export const useChatStore = defineStore('chat', () => {
     if (persistentSid && persistentSid !== sid) setCompressionForSession(persistentSid, next)
   }
 
-  function clearInFlight(sid: string) {
-    removeItemWithLegacy(inFlightKey(sid), legacyInFlightKey(sid))
-  }
-
   function clearPendingRunStart(sid: string) {
     pendingRunStarts.value.delete(sid)
-  }
-
-  function readInFlight(sid: string): InFlightRun | null {
-    const rec = loadJsonWithFallback<InFlightRun>(inFlightKey(sid), legacyInFlightKey(sid))
-    if (!rec) return null
-    if (Date.now() - rec.startedAt > IN_FLIGHT_TTL_MS) {
-      removeItemWithLegacy(inFlightKey(sid), legacyInFlightKey(sid))
-      return null
-    }
-    return rec
   }
 
   function sessionFetchId(sid: string): string {
