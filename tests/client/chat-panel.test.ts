@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 
 const mockChatStore = vi.hoisted(() => ({
   sessions: [] as Array<Record<string, any>>,
@@ -54,6 +55,24 @@ vi.mock('@/components/hermes/chat/ConversationMonitorPane.vue', () => ({
   },
 }))
 
+vi.mock('@/components/hermes/chat/DrawerPanel.vue', () => ({
+  default: {
+    template: '<div class="drawer-panel-mock" />',
+  },
+}))
+
+vi.mock('@/components/hermes/chat/SessionListItem.vue', () => ({
+  default: {
+    props: ['session', 'active', 'live', 'pinned', 'canDelete', 'branchCount', 'branchesExpanded'],
+    emits: ['select', 'contextmenu', 'delete', 'toggleBranches'],
+    template: '<button class="session-item" :class="{ active, live }" @click="$emit(\'select\')"><span class="session-item-title">{{ session.title }}</span><span v-if="live" class="session-item-active-indicator">chat.liveMode</span></button>',
+  },
+}))
+
+vi.mock('@/components/hermes/chat/FolderPicker.vue', () => ({
+  default: { template: '<div />' },
+}))
+
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
     t: (key: string) => key,
@@ -67,6 +86,13 @@ vi.mock('naive-ui', async () => {
     useMessage: () => ({
       success: vi.fn(),
       error: vi.fn(),
+    }),
+    useDialog: () => ({
+      create: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      warning: vi.fn(),
+      info: vi.fn(),
     }),
   }
 })
@@ -89,6 +115,7 @@ function makeSession(id: string, overrides: Record<string, any> = {}) {
 describe('ChatPanel session list', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    setActivePinia(createPinia())
     vi.clearAllMocks()
 
     const activeDiscord = makeSession('discord-active', {

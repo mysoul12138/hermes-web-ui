@@ -1085,7 +1085,7 @@ export async function searchSessionSummaries(
   } catch (_err) {
     // FTS queries can fail for various inputs (pure numbers, special syntax, etc.)
     // Fall back to title-only LIKE results + literal content search.
-    const likeRows = runLiteralContentSearch(db, source, trimmed, candidateLimit)
+    const likeRows = runLiteralContentSearch(db, source, trimmed, candidateLimit) || []
     const idx2 = loadAllSessions(db)
     const merged = new Map<string, HermesSessionSearchRow>()
     for (const row of titleRows) {
