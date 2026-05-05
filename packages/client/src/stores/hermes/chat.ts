@@ -592,6 +592,8 @@ export const useChatStore = defineStore('chat', () => {
     return persistedParent === liveParent
       || persistedParent === sessionFetchId(liveParent)
       || sessionFetchId(persistedParent) === liveParent
+      || readBridgeBackingSessionId(persistedParent) === liveParent
+      || readBridgeBackingSessionId(liveParent) === persistedParent
   }
 
   function branchesRepresentSameSubagent(persisted: ConversationBranch, live: ConversationBranch): boolean {
@@ -829,21 +831,26 @@ export const useChatStore = defineStore('chat', () => {
       let mergedMessages = existing.messages.length > 0
         ? mergeServerToolDetails(nextSession.messages, existing.messages)
         : nextSession.messages
-      // Preserve reasoning from hydrated messages: branch summaries (from
-      // branchToSession) always set reasoning=null.  Without this guard the
-      // periodic sync → hydrate cycle causes the thinking block to
-      // collapse/re-expand every few seconds — visible as flickering.
+      // Preserve reasoning and isStreaming from hydrated messages: branch
+      // summaries (from branchToSession) always set reasoning=null and may
+      // lack isStreaming.  Without this guard the periodic sync → hydrate
+      // cycle causes the thinking block to collapse/re-expand — flickering.
       if (existing.messages.length > 0) {
-        const existingReasoning = new Map<string, string>()
+        const existingMeta = new Map<string, { reasoning?: string; isStreaming?: boolean }>()
         for (const m of existing.messages) {
-          if (m.reasoning) existingReasoning.set(String(m.id), m.reasoning)
+          if (m.reasoning || m.isStreaming) {
+            existingMeta.set(String(m.id), { reasoning: m.reasoning, isStreaming: m.isStreaming })
+          }
         }
-        if (existingReasoning.size > 0) {
+        if (existingMeta.size > 0) {
           mergedMessages = mergedMessages.map(m => {
-            if (!m.reasoning && existingReasoning.has(String(m.id))) {
-              return { ...m, reasoning: existingReasoning.get(String(m.id))! }
-            }
-            return m
+            const meta = existingMeta.get(String(m.id))
+            if (!meta) return m
+            let changed = false
+            const patch: Partial<Message> = {}
+            if (!m.reasoning && meta.reasoning) { patch.reasoning = meta.reasoning; changed = true }
+            if (!m.isStreaming && meta.isStreaming) { patch.isStreaming = true; changed = true }
+            return changed ? { ...m, ...patch } : m
           })
         }
       }
@@ -983,21 +990,25 @@ export const useChatStore = defineStore('chat', () => {
         let nextMessages = preserveToolDetails
           ? mergeServerToolDetails(seededMessages, existing.messages)
           : seededMessages
-        // Preserve reasoning from existing hydrated messages when the incoming
-        // messages lack it (e.g. pre-fetch failed and fell back to branch
-        // summary which always has reasoning=null).  Same logic as in
+        // Preserve reasoning and isStreaming from existing hydrated messages
+        // when the incoming messages lack them.  Same logic as in
         // syncBranchSessionFromBranch to prevent thinking-block flicker.
         if (existing.messages.length > 0) {
-          const existingReasoning = new Map<string, string>()
+          const existingMeta = new Map<string, { reasoning?: string; isStreaming?: boolean }>()
           for (const m of existing.messages) {
-            if (m.reasoning) existingReasoning.set(String(m.id), m.reasoning)
+            if (m.reasoning || m.isStreaming) {
+              existingMeta.set(String(m.id), { reasoning: m.reasoning, isStreaming: m.isStreaming })
+            }
           }
-          if (existingReasoning.size > 0) {
+          if (existingMeta.size > 0) {
             nextMessages = nextMessages.map(m => {
-              if (!m.reasoning && existingReasoning.has(String(m.id))) {
-                return { ...m, reasoning: existingReasoning.get(String(m.id))! }
-              }
-              return m
+              const meta = existingMeta.get(String(m.id))
+              if (!meta) return m
+              let changed = false
+              const patch: Partial<Message> = {}
+              if (!m.reasoning && meta.reasoning) { patch.reasoning = meta.reasoning; changed = true }
+              if (!m.isStreaming && meta.isStreaming) { patch.isStreaming = true; changed = true }
+              return changed ? { ...m, ...patch } : m
             })
           }
         }
