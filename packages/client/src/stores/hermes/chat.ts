@@ -10,7 +10,7 @@ import {
   respondClarify as respondClarifyApi,
   type PendingClarify,
 } from '@/api/hermes/clarify'
-import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionDetail, type SessionSummary } from '@/api/hermes/sessions'
+import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type SessionDetail, type SessionSummary } from '@/api/hermes/sessions'
 import { fetchConversationDetail, fetchConversationSummaries, type ConversationBranch, type ConversationMessage, type ConversationSummary } from '@/api/hermes/conversations'
 import { getApiKey } from '@/api/client'
 import { defineStore } from 'pinia'
@@ -20,6 +20,39 @@ import { useProfilesStore } from './profiles'
 import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 import { playCompletionBell, unlockCompletionBell } from '@/utils/completion-bell'
+import {
+  textFromRunEvent,
+  numberFromRunEvent,
+  betterToolText,
+  pickToolArgs,
+  pickToolPreview,
+  pickToolCallId,
+  pickToolResult,
+  pickInlineDiff,
+  toolEventDetails,
+  mergeToolResult,
+  usageFromRunEvent,
+} from '@/custom/utils/run-event-helpers'
+import { isBuggyReasoningPreview } from '@/custom/utils/display-helpers'
+import {
+  uid,
+  isPersistentTuiSessionId,
+  normalizeProviderKey,
+  normalizeBaseUrl,
+  isBridgeFallbackSession,
+  applySessionUsage,
+  extractPendingApprovalFromMessages,
+  mapHermesMessages,
+  mapHermesSession,
+  compareServerMessages,
+  serverHasBetterToolDetails,
+  mergeServerToolDetails,
+  withLocalSteeredMessages,
+  messagesEquivalent,
+  isStaleBridgeRunError,
+  sanitizeForCache,
+  scrubBuggyReasoningInCache,
+} from '@/custom/utils/message-helpers'
 
 export interface Attachment {
   id: string
@@ -94,13 +127,6 @@ export interface CompressionState {
   error?: string
 }
 
-function uid(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-}
-
-function isPersistentTuiSessionId(sessionId: string): boolean {
-  return /^\d{8}_\d{6}_[0-9a-f]+$/i.test(sessionId)
-}
 
 async function uploadFiles(attachments: Attachment[]): Promise<{ name: string; path: string }[]> {
   if (attachments.length === 0) return []
@@ -119,279 +145,7 @@ async function uploadFiles(attachments: Attachment[]): Promise<{ name: string; p
   return data.files
 }
 
-function tryParseJson(value?: string | null): Record<string, any> | null {
-  if (!value?.trim()) return null
-  try {
-    const parsed = JSON.parse(value)
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, any> : null
-  } catch {
-    return null
-  }
-}
 
-function extractApprovalCommandFromArgs(toolArgs?: string): string | undefined {
-  const parsed = tryParseJson(toolArgs)
-  return typeof parsed?.command === 'string' && parsed.command.trim()
-    ? parsed.command.trim()
-    : undefined
-}
-
-function textFromRunEvent(evt: RunEvent): string {
-  for (const value of [evt.text, evt.delta, evt.reasoning, evt.thinking, evt.content, evt.message, evt.output]) {
-    if (typeof value === 'string' && value) return value
-  }
-  return ''
-}
-
-function stringifyToolPayload(value: unknown): string | undefined {
-  if (value == null) return undefined
-  if (typeof value === 'string') return value.trim() ? value : undefined
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
-function commandFromToolPayload(value: unknown): string | undefined {
-  if (value == null) return undefined
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    if (!trimmed) return undefined
-    const parsed = tryParseJson(trimmed)
-    return parsed ? (commandFromToolPayload(parsed) || trimmed) : trimmed
-  }
-  if (typeof value !== 'object') return undefined
-  const record = value as Record<string, unknown>
-  const command = record.command ?? record.cmd
-  return typeof command === 'string' && command.trim() ? command.trim() : undefined
-}
-
-function firstPresent(...values: unknown[]): unknown {
-  return values.find(value => value != null)
-}
-
-function numberFromRunEvent(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed)) return parsed
-  }
-  return undefined
-}
-
-function uniqueStrings(values: unknown[]): string[] {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const value of values) {
-    if (value == null) continue
-    const text = String(value).trim()
-    if (!text || seen.has(text)) continue
-    seen.add(text)
-    result.push(text)
-  }
-  return result
-}
-
-function toolCallKeys(toolCall: Record<string, any>): string[] {
-  return uniqueStrings([
-    toolCall.call_id,
-    toolCall.tool_call_id,
-    toolCall.id,
-    toolCall.response_item_id,
-    toolCall.item_id,
-  ])
-}
-
-function toolCallName(toolCall: Record<string, any>): string | undefined {
-  const name = toolCall.function?.name ?? toolCall.name ?? toolCall.tool_name
-  return typeof name === 'string' && name.trim() ? name.trim() : undefined
-}
-
-function toolCallArgs(toolCall: Record<string, any>): string | undefined {
-  const args = toolCall.function?.arguments ?? toolCall.arguments ?? toolCall.args ?? toolCall.input
-  return stringifyToolPayload(args)
-}
-
-function previewFromToolResult(content?: string | null): string | undefined {
-  if (!content?.trim()) return undefined
-  const parsed = tryParseJson(content)
-  if (!parsed) return content.slice(0, 240)
-  for (const key of ['command', 'output', 'stdout', 'stderr', 'result', 'content', 'message', 'summary', 'preview', 'title', 'url']) {
-    const preview = stringifyToolPayload(parsed[key])
-    if (preview) return preview.slice(0, 240)
-  }
-  return stringifyToolPayload(parsed)?.slice(0, 240)
-}
-
-function pickToolArgs(evt: RunEvent): string | undefined {
-  const payload = firstPresent(
-    evt.arguments ??
-    evt.args ??
-    evt.parameters ??
-    evt.input ??
-    (evt.tool_call as Record<string, any> | undefined)?.function?.arguments ??
-    (evt.tool_call as Record<string, any> | undefined)?.arguments ??
-    (evt.function as Record<string, any> | undefined)?.arguments ??
-    (evt.payload as Record<string, any> | undefined)?.arguments ??
-    evt.command,
-  )
-  return stringifyToolPayload(payload)
-}
-
-function pickToolPreview(evt: RunEvent): string | undefined {
-  return commandFromToolPayload(evt.command) ||
-    commandFromToolPayload(evt.arguments) ||
-    commandFromToolPayload(evt.args) ||
-    commandFromToolPayload(evt.parameters) ||
-    commandFromToolPayload(evt.input) ||
-    commandFromToolPayload((evt.tool_call as Record<string, any> | undefined)?.function?.arguments) ||
-    commandFromToolPayload((evt.tool_call as Record<string, any> | undefined)?.arguments) ||
-    commandFromToolPayload((evt.function as Record<string, any> | undefined)?.arguments) ||
-    commandFromToolPayload((evt.payload as Record<string, any> | undefined)?.arguments) ||
-    stringifyToolPayload(evt.command) ||
-    stringifyToolPayload(evt.preview) ||
-    stringifyToolPayload(evt.tool_preview) ||
-    stringifyToolPayload(evt.context)
-}
-
-function pickToolCallId(evt: RunEvent): string | undefined {
-  return uniqueStrings([
-    evt.call_id,
-    evt.tool_call_id,
-    (evt.tool_call as Record<string, any> | undefined)?.call_id,
-    (evt.tool_call as Record<string, any> | undefined)?.id,
-    evt.id,
-    evt.item_id,
-    evt.response_item_id,
-  ])[0]
-}
-
-function betterToolText(current: string | undefined, next: string | undefined): string | undefined {
-  if (!next) return current
-  if (!current) return next
-  if (current === next) return current
-  if (current.includes('...') && next.length > current.length) return next
-  return next.length > current.length ? next : current
-}
-
-function pickToolResult(evt: RunEvent): string | undefined {
-  const details: Record<string, unknown> = {}
-  for (const key of [
-    'result',
-    'output',
-    'stdout',
-    'stderr',
-    'output_tail',
-    'files_read',
-    'files_written',
-    'exit_code',
-    'returncode',
-    'exit_status',
-    'exitCode',
-    'status',
-    'duration',
-    'duration_s',
-    'duration_ms',
-    'duration_seconds',
-    'error',
-  ]) {
-    if (evt[key] != null) details[key] = evt[key]
-  }
-  if (Object.keys(details).length > 0) return JSON.stringify(details)
-
-  return stringifyToolPayload(
-    evt.content ??
-    evt.message ??
-    evt.summary,
-  )
-}
-
-function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-}
-
-function normalizeInlineDiff(value: unknown): string | undefined {
-  const text = stringifyToolPayload(value)
-  if (!text) return undefined
-  const cleaned = stripAnsi(text)
-    .split(/\r?\n/)
-    .map(line => line.trimStart().replace(/^┊\s*review diff\s*$/i, ''))
-    .join('\n')
-    .trim()
-  return cleaned || undefined
-}
-
-function pickInlineDiff(evt: RunEvent): string | undefined {
-  return normalizeInlineDiff(evt.inline_diff ?? (evt.payload as Record<string, any> | undefined)?.inline_diff)
-}
-
-function toolEventDetails(evt: RunEvent): string | undefined {
-  const details: Record<string, unknown> = {}
-  for (const key of [
-    'tool',
-    'name',
-    'preview',
-    'context',
-    'command',
-    'duration',
-    'duration_s',
-    'duration_ms',
-    'duration_seconds',
-    'timestamp',
-    'status',
-    'stdout',
-    'stderr',
-    'output_tail',
-    'files_read',
-    'files_written',
-    'exit_code',
-    'returncode',
-    'exit_status',
-    'exitCode',
-  ]) {
-    if (evt[key] != null) details[key] = evt[key]
-  }
-  return Object.keys(details).length > 0 ? JSON.stringify(details) : undefined
-}
-
-function mergeToolResult(previous: string | undefined, next: string | undefined): string | undefined {
-  if (!next) return previous
-  if (!previous) return next
-  if (previous.includes(next)) return previous
-  return `${previous}\n\n${next}`
-}
-
-function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number } | null | undefined, options: { allowReset?: boolean } = {}) {
-  if (!session || !usage) return
-  const currentInput = session.inputTokens ?? 0
-  const currentOutput = session.outputTokens ?? 0
-  const currentTotal = currentInput + currentOutput
-  const nextInput = usage.input_tokens ?? 0
-  const nextOutput = usage.output_tokens ?? 0
-  const nextTotal = nextInput + nextOutput
-  if (nextTotal > 0 && (options.allowReset || currentTotal === 0 || nextTotal >= currentTotal)) {
-    session.inputTokens = nextInput
-    session.outputTokens = nextOutput
-  }
-}
-
-function usageFromRunEvent(evt: RunEvent): { input_tokens: number; output_tokens: number } | null {
-  if (evt.usage) {
-    return {
-      input_tokens: evt.usage.input_tokens ?? 0,
-      output_tokens: evt.usage.output_tokens ?? 0,
-    }
-  }
-  const raw = evt as RunEvent & { inputTokens?: number; outputTokens?: number }
-  const inputTokens = raw.input_tokens ?? raw.inputTokens
-  const outputTokens = raw.output_tokens ?? raw.outputTokens
-  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return null
-  return {
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-  }
-}
 
 function applySessionDetail(session: Session | undefined | null, detail: Partial<SessionDetail> | null | undefined) {
   if (!session || !detail) return
@@ -406,185 +160,15 @@ function applySessionDetail(session: Session | undefined | null, detail: Partial
   applySessionModelOverride(session)
 }
 
-function isBuggyReasoningPreview(reasoningText: string, assistantContent: string): boolean {
-  const r = reasoningText.trim()
-  const c = assistantContent.trim()
-  if (!r || !c) return false
-  return c === r || c.startsWith(r) || r.startsWith(c)
-}
 
-function scrubBuggyReasoning(message: Message): Message {
-  if (message.role !== 'assistant' || !message.reasoning || !message.content) return message
-  if (!isBuggyReasoningPreview(message.reasoning, message.content)) return message
-  const { reasoning: _drop, ...rest } = message
-  return rest as Message
-}
 
-function extractPendingApprovalFromMessages(messages: Message[]): PendingApproval | null {
-  const lastUserIdx = [...messages].map(m => m.role).lastIndexOf('user')
-  const relevantMessages = lastUserIdx >= 0 ? messages.slice(lastUserIdx + 1) : messages
 
-  for (let i = relevantMessages.length - 1; i >= 0; i -= 1) {
-    const msg = relevantMessages[i]
 
-    if (msg.role === 'assistant') {
-      const text = msg.content.trim()
-      if (!text) continue
-      if (/approval_required|need approval|需要审批|blocked/i.test(text)) continue
-      return null
-    }
 
-    if (msg.role === 'tool') {
-      if (!msg.toolResult) {
-        if (msg.toolStatus === 'running') return null
-        continue
-      }
-      const parsed = tryParseJson(msg.toolResult)
-      if (parsed?.status !== 'approval_required') {
-        return null
-      }
 
-      const command = typeof parsed.command === 'string' && parsed.command.trim()
-        ? parsed.command.trim()
-        : extractApprovalCommandFromArgs(msg.toolArgs)
 
-      return {
-        approval_id: typeof parsed.approval_id === 'string' && parsed.approval_id.trim() ? parsed.approval_id.trim() : undefined,
-        description: typeof parsed.description === 'string' && parsed.description.trim()
-          ? parsed.description.trim()
-          : undefined,
-        command,
-        pattern_key: typeof parsed.pattern_key === 'string' && parsed.pattern_key.trim()
-          ? parsed.pattern_key.trim()
-          : undefined,
-        pattern_keys: Array.isArray(parsed.pattern_keys)
-          ? parsed.pattern_keys.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-          : undefined,
-      }
-    }
-  }
 
-  return null
-}
 
-function mapHermesMessages(msgs: HermesMessage[]): Message[] {
-  // Build lookups from assistant messages with tool_calls
-  const toolNameMap = new Map<string, string>()
-  const toolArgsMap = new Map<string, string>()
-  for (const msg of msgs) {
-    if (msg.role === 'assistant' && msg.tool_calls) {
-      for (const tc of msg.tool_calls) {
-        const keys = toolCallKeys(tc)
-        const name = toolCallName(tc)
-        const args = toolCallArgs(tc)
-        for (const key of keys) {
-          if (name) toolNameMap.set(key, name)
-          if (args) toolArgsMap.set(key, args)
-        }
-      }
-    }
-  }
-
-  const result: Message[] = []
-  for (const msg of msgs) {
-    // Skip assistant messages that only contain tool_calls (no meaningful content)
-    if (msg.role === 'assistant' && msg.tool_calls?.length && !msg.content?.trim()) {
-      // Emit a tool.started message for each tool call
-      for (const [idx, tc] of msg.tool_calls.entries()) {
-        const keys = toolCallKeys(tc)
-        const primaryKey = keys[0] || `${msg.id}_${idx}`
-        const args = toolCallArgs(tc)
-        const preview = extractApprovalCommandFromArgs(args) || commandFromToolPayload(tryParseJson(args) || args)
-        result.push({
-          id: String(msg.id) + '_' + primaryKey,
-          role: 'tool',
-          content: '',
-          timestamp: Math.round(msg.timestamp * 1000),
-          toolName: toolCallName(tc) || 'tool',
-          toolArgs: args,
-          toolPreview: preview?.slice(0, 240),
-          toolCallId: primaryKey,
-          toolStatus: 'done',
-        })
-      }
-      continue
-    }
-
-    // Tool result messages
-    if (msg.role === 'tool') {
-      const tcId = msg.tool_call_id || ''
-      const toolName = msg.tool_name || toolNameMap.get(tcId) || 'tool'
-      const toolArgs = toolArgsMap.get(tcId) || undefined
-      const preview = previewFromToolResult(msg.content)
-        || extractApprovalCommandFromArgs(toolArgs)
-        || commandFromToolPayload(tryParseJson(toolArgs) || toolArgs)
-      // Find and remove the matching placeholder from tool_calls above
-      const placeholderIdx = result.findIndex(
-        m => m.role === 'tool'
-          && !m.toolResult
-          && (
-            (!!tcId && (m.toolCallId === tcId || m.id.includes('_' + tcId)))
-            || (m.toolName === toolName && !tcId)
-          )
-      )
-      if (placeholderIdx !== -1) {
-        result.splice(placeholderIdx, 1)
-      }
-      result.push({
-        id: String(msg.id),
-        role: 'tool',
-        content: '',
-        timestamp: Math.round(msg.timestamp * 1000),
-        toolName,
-        toolArgs,
-        toolPreview: preview?.slice(0, 240),
-        toolResult: msg.content || undefined,
-        toolCallId: tcId || undefined,
-        toolStatus: 'done',
-      })
-      continue
-    }
-
-    // Normal user/assistant messages
-    result.push(scrubBuggyReasoning({
-      id: String(msg.id),
-      role: msg.role,
-      content: msg.content || '',
-      timestamp: Math.round(msg.timestamp * 1000),
-      reasoning: msg.reasoning ? msg.reasoning : undefined,
-    }))
-  }
-  return result
-}
-
-function mapHermesSession(s: SessionSummary | ConversationSummary): Session {
-  return {
-    id: s.id,
-    title: s.title || s.preview || s.id,
-    source: s.source === 'webui-bridge' ? 'tui' : (s.source || undefined),
-    messages: [],
-    createdAt: Math.round(s.started_at * 1000),
-    updatedAt: Math.round((s.last_active || s.ended_at || s.started_at) * 1000),
-    model: s.model,
-    provider: (s as any).billing_provider || '',
-    billingBaseUrl: (s as any).billing_base_url || '',
-    messageCount: s.message_count,
-    inputTokens: s.input_tokens,
-    outputTokens: s.output_tokens,
-    endedAt: s.ended_at != null ? Math.round(s.ended_at * 1000) : null,
-    lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
-    workspace: (s as any).workspace || null,
-    branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
-  }
-}
-
-function normalizeProviderKey(value: string): string {
-  return value.trim().toLowerCase()
-}
-
-function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '').toLowerCase()
-}
 
 // Cache keys for stale-while-revalidate loading of sessions / messages.
 // All keys include the active profile name to isolate cache between profiles.
@@ -603,9 +187,7 @@ const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // Give up after 15 minutes
 const POLL_INTERVAL_MS = 2000
 const COMPRESSION_NOTICE_TTL_MS = 15_000
 const STREAM_FLUSH_INTERVAL_MS = 50
-function isBridgeFallbackSession(detail: { source?: string; messages?: unknown[] } | null | undefined): boolean {
-  return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
-}
+
 const POLL_STABLE_EXITS = 3 // 3 × 2s = 6s of no change → assume run finished
 
 // 获取当前 profile 名称，用于隔离缓存。
@@ -797,28 +379,7 @@ function applySessionModelOverride(session: Session | undefined | null) {
   session.provider = override.provider || ''
 }
 
-// Strip the circular `file: File` reference from attachments before caching —
-// File objects don't serialize and we only need name/type/size/url for display.
-function sanitizeForCache(msgs: Message[]): Message[] {
-  return msgs.map(m => {
-    const { isStreaming: _isStreaming, ...rest } = m
-    if (!m.attachments?.length) return rest
-    return {
-      ...rest,
-      attachments: m.attachments.map(a => ({ id: a.id, name: a.name, type: a.type, size: a.size, url: a.url })),
-    }
-  })
-}
 
-// Heals assistant messages whose `reasoning` field was polluted by the
-// old bug where `reasoning.available` clobbered it with the assistant
-// content. Detection heuristic: reasoning is a prefix of content (the
-// bug always derived `reasoning` from `content[:500]` with tags stripped).
-// Legitimate reasoning is almost never a prefix of the final answer.
-function scrubBuggyReasoningInCache(msgs: Message[] | null | undefined): Message[] {
-  if (!msgs) return []
-  return msgs.map(scrubBuggyReasoning)
-}
 
 export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
@@ -1730,32 +1291,7 @@ export const useChatStore = defineStore('chat', () => {
     if (sid) persistSessionMessages(sid)
   }
 
-function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
-  const mappedUserTexts = new Set(mapped.filter(message => message.role === 'user').map(message => message.content.trim()).filter(Boolean))
-  const localSteered = current.filter(message => message.steered && !mappedUserTexts.has(message.content.trim()))
-  if (!localSteered.length) return mapped
-  // Insert each steered message at the position matching its timestamp
-  // instead of appending all at the end
-  const result = [...mapped]
-  for (const steered of localSteered) {
-    const ts = steered.timestamp || 0
-    let insertIdx = result.length
-    for (let i = 0; i < result.length; i++) {
-      const msgTs = result[i].timestamp || 0
-      if (msgTs > ts) {
-        insertIdx = i
-        break
-      }
-    }
-    result.splice(insertIdx, 0, steered)
-  }
-  return result
-}
 
-function isStaleBridgeRunError(error: unknown): boolean {
-  const text = error instanceof Error ? error.message : String(error || '')
-  return /session is not running|bridge session not found|Bridge steer error/i.test(text)
-}
 
   function getQueuedMessages(sid: string) {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
@@ -2079,143 +1615,9 @@ function isStaleBridgeRunError(error: unknown): boolean {
     return true
   }
 
-  function compareServerMessages(local: Message[], server: Message[]) {
-    const userTurnIndexes = (messages: Message[]) =>
-      messages.map((m, i) => (m.role === 'user' && !m.queued && !m.steered ? i : -1)).filter(i => i >= 0)
-    const localUserIndexes = userTurnIndexes(local)
-    const serverUserIndexes = userTurnIndexes(server)
-    const localUsers = localUserIndexes.length
-    const serverUsers = serverUserIndexes.length
 
-    if (serverUsers > localUsers) return { serverIsCaughtUp: true, serverIsAhead: true }
-    if (serverUsers < localUsers) return { serverIsCaughtUp: false, serverIsAhead: false }
 
-    const localLastUserIndex = localUserIndexes[localUserIndexes.length - 1] ?? -1
-    const serverLastUserIndex = serverUserIndexes[serverUserIndexes.length - 1] ?? -1
-    const sameCurrentTurn =
-      localLastUserIndex < 0
-      || serverLastUserIndex < 0
-      || local[localLastUserIndex]?.content === server[serverLastUserIndex]?.content
 
-    if (!sameCurrentTurn) return { serverIsCaughtUp: false, serverIsAhead: false }
-
-    const localCurrentAssistantLen = local
-      .slice(localLastUserIndex + 1)
-      .filter(m => m.role === 'assistant')
-      .reduce((total, m) => total + (m.content?.length || 0), 0)
-    const serverCurrentAssistantLen = server
-      .slice(serverLastUserIndex + 1)
-      .filter(m => m.role === 'assistant')
-      .reduce((total, m) => total + (m.content?.length || 0), 0)
-
-    return {
-      serverIsCaughtUp: true,
-      serverIsAhead: serverCurrentAssistantLen >= localCurrentAssistantLen,
-    }
-  }
-
-  function toolDetailScore(message: Message): number {
-    if (message.role !== 'tool') return 0
-    let score = 0
-    if (message.toolName && message.toolName !== 'tool') score += 1
-    if (message.toolPreview) score += 1
-    if (message.toolArgs) score += 3
-    if (message.toolResult) score += 4
-    if (message.toolInlineDiff) score += 5
-    if (message.toolCallId) score += 1
-    return score
-  }
-
-  function serverHasBetterToolDetails(local: Message[], server: Message[]): boolean {
-    const localTools = local.filter(m => m.role === 'tool')
-    const serverTools = server.filter(m => m.role === 'tool')
-    if (!serverTools.length) return false
-
-    for (const [idx, serverTool] of serverTools.entries()) {
-      const localTool = localTools.find(m =>
-        (!!serverTool.toolCallId && m.toolCallId === serverTool.toolCallId)
-        || (!!serverTool.id && m.id === serverTool.id)
-      ) || localTools[idx]
-
-      if (!localTool) {
-        if (serverTool.toolArgs || serverTool.toolResult || serverTool.toolPreview || serverTool.toolInlineDiff) return true
-        continue
-      }
-
-      if (toolDetailScore(serverTool) > toolDetailScore(localTool)) return true
-      if (localTool.toolResult && serverTool.toolResult && localTool.toolResult.length < serverTool.toolResult.length) return true
-      if (localTool.toolArgs && serverTool.toolArgs && localTool.toolArgs.length < serverTool.toolArgs.length) return true
-    }
-
-    return false
-  }
-
-  function mergeToolMessageDetails(local: Message, server: Message): Message {
-    return {
-      ...local,
-      toolName: local.toolName && local.toolName !== 'tool' ? local.toolName : server.toolName,
-      toolPreview: betterToolText(local.toolPreview, server.toolPreview),
-      toolArgs: betterToolText(local.toolArgs, server.toolArgs),
-      toolResult: mergeToolResult(local.toolResult, server.toolResult),
-      toolInlineDiff: betterToolText(local.toolInlineDiff, server.toolInlineDiff),
-      toolCallId: local.toolCallId || server.toolCallId,
-      toolStatus: server.toolResult ? (server.toolStatus || 'done') : (local.toolStatus || server.toolStatus),
-    }
-  }
-
-  function mergeServerToolDetails(local: Message[], server: Message[]): Message[] {
-    const serverTools = server.filter(m => m.role === 'tool')
-    if (!serverTools.length) return local
-
-    const usedServerIndexes = new Set<number>()
-    const next = local.map((message) => {
-      if (message.role !== 'tool') return message
-      const byId = serverTools.findIndex((tool, idx) =>
-        !usedServerIndexes.has(idx)
-        && (
-          (!!message.toolCallId && message.toolCallId === tool.toolCallId)
-          || (!!message.id && message.id === tool.id)
-        )
-      )
-      const fallback = byId >= 0
-        ? byId
-        : serverTools.findIndex((_, idx) => !usedServerIndexes.has(idx))
-      if (fallback < 0) return message
-      usedServerIndexes.add(fallback)
-      return mergeToolMessageDetails(message, serverTools[fallback])
-    })
-
-    for (const [idx, tool] of serverTools.entries()) {
-      if (!usedServerIndexes.has(idx)) next.push(tool)
-    }
-
-    return next
-  }
-
-  function messagesEquivalent(a: Message[], b: Message[]): boolean {
-    if (a === b) return true
-    if (a.length !== b.length) return false
-    for (let i = 0; i < a.length; i += 1) {
-      const left = a[i]
-      const right = b[i]
-      if (!left || !right) return false
-      if (left.id !== right.id) return false
-      if (left.role !== right.role) return false
-      if ((left.content || '') !== (right.content || '')) return false
-      if ((left.toolName || '') !== (right.toolName || '')) return false
-      if ((left.toolPreview || '') !== (right.toolPreview || '')) return false
-      if ((left.toolArgs || '') !== (right.toolArgs || '')) return false
-      if ((left.toolResult || '') !== (right.toolResult || '')) return false
-      if ((left.toolInlineDiff || '') !== (right.toolInlineDiff || '')) return false
-      if ((left.toolCallId || '') !== (right.toolCallId || '')) return false
-      if ((left.toolStatus || '') !== (right.toolStatus || '')) return false
-      if ((left.reasoning || '') !== (right.reasoning || '')) return false
-      if (!!left.isStreaming !== !!right.isStreaming) return false
-      if (!!left.queued !== !!right.queued) return false
-      if (!!left.steered !== !!right.steered) return false
-    }
-    return true
-  }
 
   function stopPolling(sid: string) {
     const t = pollTimers.get(sid)

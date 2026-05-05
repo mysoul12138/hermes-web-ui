@@ -9,13 +9,14 @@ import MarkdownRenderer from "./MarkdownRenderer.vue";
 import { parseThinking, isPlaceholderThinkingText } from "@/utils/thinking-parser";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
-import { getApiKey, getBaseUrlValue } from "@/api/client";
 import {
   copyTextToClipboard,
   handleCodeBlockCopyClick,
   renderHighlightedCodeBlock,
 } from "./highlight";
 import { useGlobalSpeech } from "@/composables/useSpeech";
+import { isDiffLikeContent } from "@/custom/utils/diff-detector";
+import { withAuthToken } from "@/custom/utils/auth-url";
 
 const TOOL_PAYLOAD_DISPLAY_LIMIT = 2000;
 const USER_LONG_FORM_CHAR_THRESHOLD = 420;
@@ -32,16 +33,6 @@ const previewUrl = ref<string | null>(null);
 const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
 const speech = useGlobalSpeech();
-
-function withAuthToken(url: string): string {
-  if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
-  const base = getBaseUrlValue();
-  const resolved = url.startsWith("/") ? `${base}${url}` : url;
-  if (!resolved.includes("/api/")) return resolved;
-  const token = getApiKey();
-  if (!token || resolved.includes("token=")) return resolved;
-  return `${resolved}${resolved.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-}
 
 const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"));
 const assistantName = computed(() => settingsStore.display.assistant_name?.trim() || "Hermes");
@@ -259,31 +250,6 @@ type ToolPayload = {
   language?: string;
 };
 
-const DIFF_HUNK_RE_TOOL = /^@@\s*-\d*/
-
-function isDiffLikeContent(raw: string): boolean {
-  // Check raw lines first (direct diff content)
-  let hunks = 0
-  let changes = 0
-  for (const line of raw.split('\n')) {
-    if (DIFF_HUNK_RE_TOOL.test(line)) hunks++
-    else if (line.startsWith('+') || line.startsWith('-')) changes++
-  }
-  if (hunks > 0 && changes > 0) return true
-  if (changes >= 6) return true
-
-  // Also check inside JSON values (pickToolResult wraps content in JSON)
-  try {
-    const parsed = JSON.parse(raw)
-    if (typeof parsed === 'object' && parsed !== null) {
-      for (const val of Object.values(parsed)) {
-        if (typeof val === 'string' && isDiffLikeContent(val)) return true
-      }
-    }
-  } catch { /* not JSON */ }
-
-  return false
-}
 
 function formatToolPayload(raw?: string): ToolPayload {
   if (!raw) {

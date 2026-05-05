@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/hermes/settings'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import { getApiKey, getBaseUrlValue } from '@/api/client'
+import { withAuthToken } from '@/custom/utils/auth-url'
 import SettingRow from './SettingRow.vue'
 
 const settingsStore = useSettingsStore()
@@ -41,16 +42,6 @@ function handleThemeChange(val: string) {
   const m = val as ThemeMode
   setMode(m)
   save({ skin: m })
-}
-
-function withAuthToken(url: string): string {
-  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url
-  const base = getBaseUrlValue()
-  const resolved = url.startsWith('/') ? `${base}${url}` : url
-  if (!resolved.includes('/api/')) return resolved
-  const token = getApiKey()
-  if (!token || resolved.includes('token=')) return resolved
-  return `${resolved}${resolved.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
 }
 
 const assistantAvatarUrl = computed(() => withAuthToken(settingsStore.display.assistant_avatar_url || '/logo.png'))
