@@ -404,6 +404,7 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value
     || (activeSessionId.value != null && (isSessionLive(activeSessionId.value) || !!readInFlight(activeSessionId.value)))
   )
+  const isAborting = computed(() => false)
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
   const approvalsBySession = ref<Record<string, ApprovalState>>({})
@@ -3241,6 +3242,7 @@ export const useChatStore = defineStore('chat', () => {
     activeBranches,
     isStreaming,
     isRunActive,
+    isAborting,
     isSessionLive,
     sessionBranches,
     sessionBranchCount,
