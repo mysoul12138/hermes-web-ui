@@ -795,6 +795,25 @@ onBeforeUnmount(() => {
       }
     }
 
+    // File attachments in user bubble: add contrast layer
+    .msg-attachment {
+      background-color: rgba(255, 255, 255, 0.18) !important;
+      border-color: rgba(255, 255, 255, 0.25) !important;
+
+      .dark & {
+        background-color: rgba(255, 255, 255, 0.12) !important;
+        border-color: rgba(255, 255, 255, 0.18) !important;
+      }
+    }
+
+    .msg-attachment-file {
+      color: rgba(255, 255, 255, 0.92);
+
+      .att-size {
+        color: rgba(255, 255, 255, 0.65);
+      }
+    }
+
     .message-bubble--user-long {
       border-color: rgba(37, 99, 235, 0.22);
       border-left: 3px solid rgba(37, 99, 235, 0.88);
