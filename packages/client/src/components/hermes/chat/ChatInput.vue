@@ -352,6 +352,7 @@ function isImage(type: string): boolean {
           v-if="chatStore.isRunActive"
           size="small"
           type="error"
+          :disabled="chatStore.isAborting"
           @click="chatStore.stopStreaming()"
         >
           {{ t('chat.stop') }}
