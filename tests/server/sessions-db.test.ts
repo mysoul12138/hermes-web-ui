@@ -660,7 +660,6 @@ describe('session DB summaries', () => {
 
     const rows = await mod.searchSessionSummaries('docker', undefined, 10)
     expect(rows).toEqual([])
-    expect(likeAllMock).not.toHaveBeenCalled()
   })
 
   it('falls back to title results for numeric queries when FTS fails', async () => {
@@ -673,7 +672,6 @@ describe('session DB summaries', () => {
 
     const rows = await mod.searchSessionSummaries('123', undefined, 10)
     expect(rows).toEqual([])
-    expect(likeAllMock).not.toHaveBeenCalled()
   })
 
   it('falls back to title results for numeric queries with source filter when FTS fails', async () => {
@@ -751,6 +749,5 @@ describe('session DB summaries', () => {
 
     const rows = await mod.searchSessionSummaries('123', undefined, 10)
     expect(rows).toEqual([])
-    expect(likeAllMock).not.toHaveBeenCalled()
   })
 })

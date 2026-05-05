@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 
 const mockSettingsStore = vi.hoisted(() => ({
   sessionReset: { mode: 'both', idle_minutes: 60, at_hour: 0 },
+  approvals: { mode: 'off' },
   saveSection: vi.fn(),
 }))
 
@@ -28,16 +29,20 @@ vi.mock('vue-i18n', () => ({
   }),
 }))
 
-vi.mock('naive-ui', async () => {
-  const actual = await vi.importActual<any>('naive-ui')
-  return {
-    ...actual,
-    useMessage: () => ({
-      success: vi.fn(),
-      error: vi.fn(),
-    }),
-  }
-})
+vi.mock('naive-ui', () => ({
+  NInputNumber: { template: '<div />' },
+  NSelect: { template: '<div />' },
+  NSwitch: {
+    name: 'NSwitch',
+    props: ['value'],
+    emits: ['update:value'],
+    template: '<div class="n-switch" @click="$emit(\'update:value\', !value)"></div>',
+  },
+  useMessage: () => ({
+    success: vi.fn(),
+    error: vi.fn(),
+  }),
+}))
 
 import SessionSettings from '@/components/hermes/settings/SessionSettings.vue'
 
@@ -63,10 +68,13 @@ describe('SessionSettings', () => {
 
     expect(wrapper.text()).toContain('settings.session.liveMonitorHumanOnly')
 
-    const toggle = wrapper.find('.n-switch')
-    expect(toggle.exists()).toBe(true)
+    // Find the NSwitch component (second .n-switch is the humanOnly one)
+    const switches = wrapper.findAllComponents({ name: 'NSwitch' })
+    expect(switches.length).toBeGreaterThanOrEqual(1)
 
-    await toggle.trigger('click')
+    // The last NSwitch controls the humanOnly preference
+    const humanOnlySwitch = switches[switches.length - 1]
+    await humanOnlySwitch.vm.$emit('update:value', false)
     await Promise.resolve()
 
     expect(mockPrefsStore.setHumanOnly).toHaveBeenCalledWith(false)

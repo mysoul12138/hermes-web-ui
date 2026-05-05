@@ -467,11 +467,46 @@ function isCompressionContinuationChild(session: ConversationSessionRow | undefi
   return nextContinuationChild(parent, byId, childrenByParent)?.id === session.id
 }
 
+function isLikelyExplicitContinuation(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  // Fallback for sessions whose parent_session_id was explicitly set by the
+  // gateway (e.g. webui-bridge continuations) but whose source / preview does
+  // not match the strict bridge-context prompt format.
+  //
+  // Only applies to TUI / webui-bridge sessions — CLI and other sources use
+  // regular continuation chains and must NOT be folded into bridge context.
+  if (child.id === parent.id) return false
+  if (child.source !== 'tui' && child.source !== 'webui-bridge') return false
+  if (parent.source === 'tool') return false
+  if (child.parent_session_id !== parent.id) return false
+  if (!parent.has_visible_messages && Number(parent.tool_call_count || 0) <= 0) return false
+  // Parent must have ended — if still active, the child is a branch, not a
+  // continuation.  Continuations are created when the user resumes a finished
+  // conversation.
+  if (parent.ended_at == null) return false
+  // Compression continuations are handled by the compression-chain logic, not
+  // bridge context.  Do not hijack them.
+  if (isCompressionEndReason(parent.end_reason)) return false
+
+  const childStarted = Number(child.started_at || 0)
+  const parentStarted = Number(parent.started_at || 0)
+  if (childStarted < parentStarted) return false
+
+  // The child must have started AFTER the parent ended.  If the child started
+  // while the parent was still running, it is a subagent spawn (or similar
+  // in-flight branch), not a continuation.  Without this check, every child of
+  // a finished TUI session would be classified as a "continuation", causing the
+  // parent to disappear from the conversation list.
+  const parentEnded = Number(parent.ended_at || 0)
+  if (parentEnded > 0 && childStarted < parentEnded) return false
+
+  return true
+}
+
 function isBridgeContextBranchContinuationChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
   return !!parent
-    && (isLikelyBridgeContextBranchContinuation(parent, session) || isLikelyBridgeContextRootContinuation(parent, session))
+    && (isLikelyBridgeContextBranchContinuation(parent, session) || isLikelyBridgeContextRootContinuation(parent, session) || isLikelyExplicitContinuation(parent, session))
 }
 
 function bridgeContextHistoryPathToRoot(session: ConversationSessionRow, byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {

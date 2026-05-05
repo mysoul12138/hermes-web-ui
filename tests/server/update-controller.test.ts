@@ -55,28 +55,52 @@ describe('update controller', () => {
 
     await handleUpdate(ctx)
 
-    expect(mocks.execFileSync).toHaveBeenCalledWith(
-      join(nodeBinDir, process.platform === 'win32' ? 'npm.cmd' : 'npm'),
-      ['install', '-g', 'hermes-web-ui@latest'],
-      {
-        encoding: 'utf-8',
-        timeout: 120000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    )
+    if (process.platform === 'win32') {
+      expect(mocks.execFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('cmd.exe'),
+        expect.arrayContaining(['/d', '/s', '/c']),
+        expect.objectContaining({
+          encoding: 'utf-8',
+          timeout: 120000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }),
+      )
+    } else {
+      expect(mocks.execFileSync).toHaveBeenCalledWith(
+        join(nodeBinDir, 'npm'),
+        ['install', '-g', 'hermes-web-ui@latest'],
+        {
+          encoding: 'utf-8',
+          timeout: 120000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      )
+    }
     expect(ctx.body).toEqual({ success: true, message: 'updated' })
 
     vi.runAllTimers()
 
-    expect(mocks.spawn).toHaveBeenCalledWith(
-      join(nodeBinDir, process.platform === 'win32' ? 'hermes-web-ui.cmd' : 'hermes-web-ui'),
-      ['restart', '--port', '9129'],
-      {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      },
-    )
+    if (process.platform === 'win32') {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        expect.stringContaining('cmd.exe'),
+        ['/d', '/s', '/c', expect.stringContaining('restart --port 9129')],
+        {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        },
+      )
+    } else {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        join(nodeBinDir, 'hermes-web-ui'),
+        ['restart', '--port', '9129'],
+        {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        },
+      )
+    }
     expect(mocks.unref).toHaveBeenCalledOnce()
     expect(exitSpy).toHaveBeenCalledWith(0)
   })
@@ -89,11 +113,19 @@ describe('update controller', () => {
     await handleUpdate(ctx)
     vi.runAllTimers()
 
-    expect(mocks.spawn).toHaveBeenCalledWith(
-      expect.any(String),
-      ['restart', '--port', '8648'],
-      expect.objectContaining({ detached: true, stdio: 'ignore', windowsHide: true }),
-    )
+    if (process.platform === 'win32') {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        expect.stringContaining('cmd.exe'),
+        ['/d', '/s', '/c', expect.stringContaining('restart --port 8648')],
+        expect.objectContaining({ detached: true, stdio: 'ignore', windowsHide: true }),
+      )
+    } else {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        expect.any(String),
+        ['restart', '--port', '8648'],
+        expect.objectContaining({ detached: true, stdio: 'ignore', windowsHide: true }),
+      )
+    }
   })
 
   it('returns a 500 with stderr when installation fails', async () => {

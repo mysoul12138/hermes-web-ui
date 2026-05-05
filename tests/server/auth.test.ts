@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { join } from 'path'
 
 type FsMocks = {
   readFile: ReturnType<typeof vi.fn>
@@ -20,8 +21,8 @@ async function loadAuth(overrides: Partial<FsMocks> & { home?: string } = {}) {
   return {
     ...mod,
     mocks: { readFile, writeFile, mkdir },
-    appHome: `${home}/.hermes-web-ui`,
-    tokenFile: `${home}/.hermes-web-ui/.token`,
+    appHome: join(home, '.hermes-web-ui'),
+    tokenFile: join(home, '.hermes-web-ui', '.token'),
   }
 }
 

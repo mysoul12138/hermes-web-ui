@@ -641,11 +641,17 @@ export const useChatStore = defineStore('chat', () => {
   function mergePersistedAndLiveBranch(persisted: ConversationBranch, liveBranch: ConversationBranch): ConversationBranch {
     const persistedMessagesAreOnlySubagentStatus = (persisted.messages || []).every(message => isSubagentStatusText(message.content))
     const hasRealPersistedMessages = (persisted.messages || []).length > 0 && !persistedMessagesAreOnlySubagentStatus
-    const messages = hasRealPersistedMessages
-      ? persisted.messages
-      : (liveBranch.messages.length > 0
-          ? liveBranch.messages
-          : mergeConversationMessages(persisted.messages, liveBranch.messages))
+    // When the live subagent is still active, prefer its messages to avoid
+    // flickering: periodic DB refreshes swap between persisted (older) and
+    // live (real-time transcript) content on every tick.
+    const preferLive = liveBranch.source === 'subagent' && liveBranch.is_active
+    const messages = preferLive
+      ? (liveBranch.messages.length > 0 ? liveBranch.messages : persisted.messages)
+      : (hasRealPersistedMessages
+          ? persisted.messages
+          : (liveBranch.messages.length > 0
+              ? liveBranch.messages
+              : mergeConversationMessages(persisted.messages, liveBranch.messages)))
     const lastActive = Math.max(persisted.last_active || 0, liveBranch.last_active || 0)
     const liveIsNewer = (liveBranch.last_active || 0) >= (persisted.last_active || 0)
     const mergedIsActive = liveBranch.source === 'subagent'
@@ -2426,6 +2432,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function switchSession(sessionId: string, focusId?: string | null, prefetchedDetail: SessionDetail | null = null) {
+    const previousSessionId = activeSessionId.value
     clearThinkingObservationFor(sessionId)
     activeSessionId.value = sessionId
     focusMessageId.value = focusId ?? null
@@ -2455,15 +2462,15 @@ export const useChatStore = defineStore('chat', () => {
       if (detail && detail.messages) {
         if (isBridgeFallbackSession(detail) && activeSession.value.messages.length > 0) return
         const mapped = mapHermesMessages(detail.messages)
-        // Pick whichever view has more information for the current turn.
-        // Simple message-count comparison is wrong because mapHermesMessages
-        // folds tool_call-only assistant messages; global last-assistant
-        // comparison is also wrong across turns. Trust server only when it has
-        // a newer user turn or its assistant output after the current user turn
-        // has caught up.
+        // When switching to a different session, always accept the server's
+        // messages.  The old comparison logic would reject the server payload
+        // when the new session had fewer user turns than the previously-viewed
+        // session, leaving stale messages from the old session on screen.
+        // For same-session refreshes (polling), keep the existing guard so
+        // we don't clobber a locally-streamed reply the server hasn't seen yet.
+        const switchingSessions = previousSessionId !== sessionId
         const local = activeSession.value.messages
-        const { serverIsAhead } = compareServerMessages(local, mapped)
-        if (serverIsAhead) {
+        if (switchingSessions || compareServerMessages(local, mapped).serverIsAhead) {
           const nextMessages = withLocalSteeredMessages(mergeServerToolDetails(mapped, activeSession.value.messages), activeSession.value.messages)
           if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
             activeSession.value.messages = nextMessages

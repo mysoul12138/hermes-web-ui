@@ -2,6 +2,12 @@ import { vi } from 'vitest'
 
 // Vite injects this at build time; unit tests need a stable fallback.
 ;(globalThis as any).__APP_VERSION__ = 'test'
+
+// Polyfill document.queryCommandSupported for Monaco editor in jsdom
+if (typeof document !== 'undefined' && !document.queryCommandSupported) {
+  document.queryCommandSupported = () => false
+}
+
 // Client-only setup (window/localStorage only exist in jsdom)
 if (typeof window !== 'undefined') {
   // Mock window.matchMedia
