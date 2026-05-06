@@ -47,60 +47,36 @@ describe('update controller', () => {
     }
   })
 
-  it('updates using npm from the active node prefix and restarts via the same cli path', async () => {
+  it('updates using npm from PATH and restarts via global prefix', async () => {
     process.env.PORT = '9129'
     const { handleUpdate, mocks } = await loadUpdateController()
     const ctx = createMockCtx()
-    const nodeBinDir = dirname(process.execPath)
 
     await handleUpdate(ctx)
 
-    if (process.platform === 'win32') {
-      expect(mocks.execFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('cmd.exe'),
-        expect.arrayContaining(['/d', '/s', '/c']),
-        expect.objectContaining({
-          encoding: 'utf-8',
-          timeout: 120000,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }),
-      )
-    } else {
-      expect(mocks.execFileSync).toHaveBeenCalledWith(
-        join(nodeBinDir, 'npm'),
-        ['install', '-g', 'hermes-web-ui@latest'],
-        {
-          encoding: 'utf-8',
-          timeout: 120000,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        },
-      )
-    }
+    expect(mocks.execFileSync).toHaveBeenCalledWith(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['install', '-g', 'hermes-web-ui@latest'],
+      {
+        encoding: 'utf-8',
+        timeout: 10 * 60 * 1000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    )
     expect(ctx.body).toEqual({ success: true, message: 'updated' })
 
     vi.runAllTimers()
 
-    if (process.platform === 'win32') {
-      expect(mocks.spawn).toHaveBeenCalledWith(
-        expect.stringContaining('cmd.exe'),
-        ['/d', '/s', '/c', expect.stringContaining('restart --port 9129')],
-        {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-        },
-      )
-    } else {
-      expect(mocks.spawn).toHaveBeenCalledWith(
-        join(nodeBinDir, 'hermes-web-ui'),
-        ['restart', '--port', '9129'],
-        {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-        },
-      )
-    }
+    // Note: spawn is called with getGlobalCliBin() result
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      expect.any(String), // Dynamic path based on npm prefix -g
+      ['restart', '--port', '9129'],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    )
     expect(mocks.unref).toHaveBeenCalledOnce()
     expect(exitSpy).toHaveBeenCalledWith(0)
   })

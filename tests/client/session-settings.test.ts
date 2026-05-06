@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 
 const mockSettingsStore = vi.hoisted(() => ({
   sessionReset: { mode: 'both', idle_minutes: 60, at_hour: 0 },
-  approvals: { mode: 'off' },
+  approvals: { mode: 'manual' },
   saveSection: vi.fn(),
 }))
 
@@ -53,6 +53,7 @@ describe('SessionSettings', () => {
   })
 
   it('surfaces the human-only preference in the Session tab', async () => {
+    let emittedValue: boolean | undefined
     const wrapper = mount(SessionSettings, {
       global: {
         stubs: {
@@ -62,19 +63,30 @@ describe('SessionSettings', () => {
           },
           NSelect: true,
           NInputNumber: true,
+          NSwitch: {
+            props: ['value'],
+            emits: ['update:value'],
+            template: '<div class="n-switch" @click="$emit(\'update:value\', !value)"></div>',
+            setup(props: any, { emit }: any) {
+              return {
+                onClick: () => {
+                  emittedValue = !props.value
+                  emit('update:value', emittedValue)
+                },
+              }
+            },
+          },
         },
       },
     })
 
     expect(wrapper.text()).toContain('settings.session.liveMonitorHumanOnly')
 
-    // Find the NSwitch component (second .n-switch is the humanOnly one)
-    const switches = wrapper.findAllComponents({ name: 'NSwitch' })
-    expect(switches.length).toBeGreaterThanOrEqual(1)
+    const toggles = wrapper.findAll('.n-switch')
+    expect(toggles.length).toBe(2)
+    const humanOnlyToggle = toggles[1]
 
-    // The last NSwitch controls the humanOnly preference
-    const humanOnlySwitch = switches[switches.length - 1]
-    await humanOnlySwitch.vm.$emit('update:value', false)
+    await humanOnlyToggle.trigger('click')
     await Promise.resolve()
 
     expect(mockPrefsStore.setHumanOnly).toHaveBeenCalledWith(false)
