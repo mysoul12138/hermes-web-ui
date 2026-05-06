@@ -35,3 +35,6 @@ hermes-dependencies.md
 output/
 .playwright-cli/
 .tmp-debug-*/
+
+# IDE
+.claude/
