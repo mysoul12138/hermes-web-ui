@@ -719,7 +719,7 @@ export const useChatStore = defineStore('chat', () => {
         sessions.value.push(nextSession)
       }
       persistSessionsList()
-      await switchSession(branchId, null, prefetchedDetail)
+      await switchSession(branchId, null, prefetchedDetail, true)
       return
     }
     await switchSession(branchId)
@@ -2078,7 +2078,7 @@ export const useChatStore = defineStore('chat', () => {
     return session
   }
 
-  async function switchSession(sessionId: string, focusId?: string | null, prefetchedDetail: SessionDetail | null = null) {
+  async function switchSession(sessionId: string, focusId?: string | null, prefetchedDetail: SessionDetail | null = null, toolDetailsPreMerged = false) {
     const previousSessionId = activeSessionId.value
     clearThinkingObservationFor(sessionId)
     activeSessionId.value = sessionId
@@ -2126,7 +2126,21 @@ export const useChatStore = defineStore('chat', () => {
               activeSession.value.messages = nextMessages
             }
           }
-        } else if (switchingSessions || compareServerMessages(local, mapped).serverIsAhead) {
+        } else if (switchingSessions) {
+          // When switching to a different session, accept server messages
+          // directly.  Do NOT merge tool details from the old session's
+          // localStorage cache — fallback index matching can cross-
+          // contaminate tool messages between sessions.
+          // Exception: switchBranchSession sets toolDetailsPreMerged=true
+          // because it already merged tool details into the session.
+          const base = toolDetailsPreMerged
+            ? activeSession.value.messages  // Already merged — keep as-is
+            : mapped
+          const nextMessages = withLocalSteeredMessages(base, activeSession.value.messages)
+          if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
+            activeSession.value.messages = nextMessages
+          }
+        } else if (compareServerMessages(local, mapped).serverIsAhead) {
           const nextMessages = withLocalSteeredMessages(mergeServerToolDetails(mapped, activeSession.value.messages), activeSession.value.messages)
           if (!messagesEquivalent(activeSession.value.messages, nextMessages)) {
             activeSession.value.messages = nextMessages
