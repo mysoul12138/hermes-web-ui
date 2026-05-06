@@ -20,7 +20,6 @@ import { useProfilesStore } from './profiles'
 import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 import { primeCompletionSound, playCompletionSound } from '@/utils/completion-sound'
-import { playCompletionBell, unlockCompletionBell } from '@/utils/completion-bell'
 import {
   textFromRunEvent,
   numberFromRunEvent,
@@ -1955,9 +1954,6 @@ export const useChatStore = defineStore('chat', () => {
                 }, 300)
               }
             }
-            if (useSettingsStore().display.bell_on_complete) {
-              playCompletionBell()
-            }
             playCompletionBellIfEnabled()
             finishLiveSubagentBranches(sid, 'complete')
             cleanup()
@@ -2623,7 +2619,6 @@ export const useChatStore = defineStore('chat', () => {
 
   async function sendMessage(content: string, attachments?: Attachment[]) {
     if (!content.trim() && !(attachments && attachments.length > 0)) return
-    unlockCompletionBell()
     primeCompletionBellIfEnabled()
 
     if (!activeSession.value) {
