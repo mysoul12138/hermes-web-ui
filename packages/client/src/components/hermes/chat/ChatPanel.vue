@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { renameSession, setSessionWorkspace } from '@/api/hermes/sessions'
+import { renameSession, setSessionWorkspace, batchDeleteSessions } from '@/api/hermes/sessions'
 import type { ConversationBranch } from '@/api/hermes/conversations'
 import { useChatStore, type Session } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useSessionBrowserPrefsStore } from '@/stores/hermes/session-browser-prefs'
-import { NButton, NDropdown, NInput, NModal, NTooltip, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NInput, NModal, NTooltip, NPopconfirm, useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getSourceLabel } from '@/shared/session-display'
@@ -26,6 +26,10 @@ const currentMode = ref<'chat' | 'live'>('chat')
 const showDrawer = ref(false)
 const drawerActiveTab = ref<'terminal' | 'files'>('files')
 const BRANCH_TREE_VISIBLE_LIMIT = 2
+
+// Batch selection mode
+const isBatchMode = ref(false);
+const selectedSessionIds = ref<Set<string>>(new Set());
 
 // Initialize synchronously from the media query so first paint is correct.
 // On narrow viewports the session list is an absolute-positioned overlay
@@ -320,6 +324,66 @@ function handleDeleteSession(id: string) {
   message.success(t('chat.sessionDeleted'))
 }
 
+function toggleBatchMode() {
+  isBatchMode.value = !isBatchMode.value;
+  if (!isBatchMode.value) {
+    selectedSessionIds.value.clear();
+  }
+}
+
+function toggleSessionSelection(id: string) {
+  if (selectedSessionIds.value.has(id)) {
+    selectedSessionIds.value.delete(id);
+  } else {
+    selectedSessionIds.value.add(id);
+  }
+  selectedSessionIds.value = new Set(selectedSessionIds.value);
+}
+
+function isSessionSelected(id: string): boolean {
+  return selectedSessionIds.value.has(id);
+}
+
+async function handleBatchDelete() {
+  if (selectedSessionIds.value.size === 0) return;
+  const ids = Array.from(selectedSessionIds.value);
+  try {
+    const result = await batchDeleteSessions(ids);
+    if (result.deleted > 0) {
+      for (const id of ids) {
+        sessionBrowserPrefsStore.removePinned(id);
+      }
+      await chatStore.loadSessions();
+      message.success(t('chat.batchDeleteSuccess', { count: result.deleted }));
+      if (result.failed > 0) {
+        message.warning(t('chat.batchDeletePartial', { failed: result.failed }));
+      }
+    } else {
+      message.error(t('chat.batchDeleteFailed'));
+    }
+  } catch {
+    message.error(t('chat.batchDeleteFailed'));
+  } finally {
+    isBatchMode.value = false;
+    selectedSessionIds.value.clear();
+  }
+}
+
+function selectAllSessions() {
+  selectedSessionIds.value.clear();
+  for (const session of chatStore.sessions) {
+    if (session.id !== chatStore.activeSessionId) {
+      selectedSessionIds.value.add(session.id);
+    }
+  }
+  selectedSessionIds.value = new Set(selectedSessionIds.value);
+}
+
+const selectedCount = computed(() => selectedSessionIds.value.size);
+const canSelectAll = computed(() => {
+  return chatStore.sessions.some(s => s.id !== chatStore.activeSessionId);
+});
+
 const contextSessionId = ref<string | null>(null)
 const contextSessionPinned = computed(() =>
   contextSessionId.value ? sessionBrowserPrefsStore.isPinned(contextSessionId.value) : false,
@@ -420,6 +484,92 @@ async function handleWorkspaceConfirm() {
           <button class="session-close-btn" @click="showSessions = false">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
+          <NButton
+            v-if="!isBatchMode"
+            quaternary
+            size="tiny"
+            @click="toggleBatchMode"
+            :title="t('chat.toggleBatchMode')"
+          >
+            <template #icon>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+            </template>
+          </NButton>
+          <NButton
+            v-if="isBatchMode"
+            quaternary
+            size="tiny"
+            @click="selectAllSessions"
+            :disabled="!canSelectAll"
+            :title="t('chat.selectAll')"
+          >
+            <template #icon>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+            </template>
+          </NButton>
+          <NPopconfirm
+            v-if="isBatchMode && selectedCount > 0"
+            @positive-click="handleBatchDelete"
+          >
+            <template #trigger>
+              <NButton quaternary size="tiny" type="error">
+                <template #icon>
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </template>
+              </NButton>
+            </template>
+            {{ t('chat.confirmBatchDelete', { count: selectedCount }) }}
+          </NPopconfirm>
+          <NButton
+            v-if="isBatchMode"
+            quaternary
+            size="tiny"
+            @click="toggleBatchMode"
+          >
+            <template #icon>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </template>
+          </NButton>
           <NButton quaternary size="tiny" @click="handleNewChat" circle>
             <template #icon>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -445,10 +595,14 @@ async function handleWorkspaceConfirm() {
               :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
               :branch-count="chatStore.sessionBranchCount(s.id)"
               :branches-expanded="isBranchExpanded(s.id)"
+              :streaming="chatStore.isSessionLive(s.id)"
+              :selectable="isBatchMode"
+              :selected="isSessionSelected(s.id)"
               @select="handleSessionClick(s.id)"
               @toggle-branches="toggleSessionBranches(s.id)"
               @contextmenu="handleContextMenu($event, s.id)"
               @delete="handleDeleteSession(s.id)"
+              @toggle-select="toggleSessionSelection(s.id)"
             />
             <div v-if="isBranchExpanded(s.id)" class="session-branch-items">
               <button
@@ -501,10 +655,14 @@ async function handleWorkspaceConfirm() {
                 :can-delete="s.id !== chatStore.activeSessionId || chatStore.sessions.length > 1"
                 :branch-count="chatStore.sessionBranchCount(s.id)"
                 :branches-expanded="isBranchExpanded(s.id)"
+                :streaming="chatStore.isSessionLive(s.id)"
+                :selectable="isBatchMode"
+                :selected="isSessionSelected(s.id)"
                 @select="handleSessionClick(s.id)"
                 @toggle-branches="toggleSessionBranches(s.id)"
                 @contextmenu="handleContextMenu($event, s.id)"
                 @delete="handleDeleteSession(s.id)"
+                @toggle-select="toggleSessionSelection(s.id)"
               />
               <div v-if="isBranchExpanded(s.id)" class="session-branch-items">
                 <button
@@ -740,12 +898,22 @@ async function handleWorkspaceConfirm() {
   justify-content: space-between;
   padding: 12px;
   flex-shrink: 0;
+  min-height: 0;
 }
 
 .session-list-actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  height: 22px;
+
+  .n-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    min-height: 22px;
+  }
 }
 
 .session-close-btn {
@@ -756,6 +924,10 @@ async function handleWorkspaceConfirm() {
   color: $text-secondary;
   padding: 4px;
   border-radius: $radius-sm;
+  height: 22px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
 
   &:hover {
     background: rgba($accent-primary, 0.06);
@@ -768,6 +940,7 @@ async function handleWorkspaceConfirm() {
   color: $text-muted;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  line-height: 22px;
 }
 
 .session-group-header {
