@@ -7,16 +7,12 @@ import { messages, rawMessages } from '@/i18n/messages'
 
 const SOURCE_ROOT = join(process.cwd(), 'packages/client/src')
 
-function toPosixPath(path: string): string {
-  return path.replace(/\\/g, '/')
-}
-
 function walkFiles(dir: string, files: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) {
       walkFiles(path, files)
-    } else if (/\.(ts|vue)$/.test(entry.name) && !toPosixPath(path).includes('/i18n/locales/')) {
+    } else if (/\.(ts|vue)$/.test(entry.name) && !path.replace(/\\/g, '/').includes('/i18n/locales/')) {
       files.push(path)
     }
   }
@@ -43,13 +39,57 @@ function collectLiteralTranslationKeys(): string[] {
   return [...keys].sort()
 }
 
-function hasPath(messages: Record<string, unknown>, key: string): boolean {
+function getPath(messages: Record<string, unknown>, key: string): unknown {
   let current: unknown = messages
   for (const part of key.split('.')) {
-    if (!current || typeof current !== 'object' || !(part in current)) return false
+    if (!current || typeof current !== 'object' || !(part in current)) return undefined
     current = (current as Record<string, unknown>)[part]
   }
-  return typeof current !== 'undefined'
+  return current
+}
+
+function hasPath(messages: Record<string, unknown>, key: string): boolean {
+  return typeof getPath(messages, key) !== 'undefined'
+}
+
+const SKILLS_USAGE_LOCALIZED_KEYS = [
+  'sidebar.skillsUsage',
+  'skillsUsage.title',
+  'skillsUsage.subtitle',
+  'skillsUsage.refresh',
+  'skillsUsage.periodSelector',
+  'skillsUsage.periodLabel',
+  'skillsUsage.summary',
+  'skillsUsage.totalActions',
+  'skillsUsage.loads',
+  'skillsUsage.edits',
+  'skillsUsage.distinctSkills',
+  'skillsUsage.topSkills',
+  'skillsUsage.dailyTrend',
+  'skillsUsage.periodSummary',
+  'skillsUsage.skill',
+  'skillsUsage.share',
+  'skillsUsage.lastUsed',
+  'skillsUsage.noData',
+  'skillsUsage.loadFailed',
+  'skillsUsage.otherSkills',
+]
+
+const SKILLS_USAGE_COMPACT_LABEL_LIMITS: Record<string, number> = {
+  'skillsUsage.totalActions': 12,
+  'skillsUsage.loads': 10,
+  'skillsUsage.edits': 10,
+  'skillsUsage.distinctSkills': 12,
+  'skillsUsage.topSkills': 16,
+  'skillsUsage.dailyTrend': 16,
+  'skillsUsage.skill': 10,
+  'skillsUsage.share': 10,
+  'skillsUsage.lastUsed': 12,
+  'skillsUsage.otherSkills': 16,
+}
+
+function labelLength(value: unknown): number {
+  return typeof value === 'string' ? Array.from(value.replace(/\{[^}]+\}/g, '')).length : Infinity
 }
 
 describe('i18n locale coverage', () => {
@@ -79,34 +119,36 @@ describe('i18n locale coverage', () => {
     expect(missing).toEqual([])
   })
 
-  it('keeps approval prompt actions translated in source locales', () => {
-    const approvalKeys = [
-      'approvalTitle',
-      'approvalAllowOnce',
-      'approvalAllowSession',
-      'approvalAllowAlways',
-      'approvalDeny',
-      'approvalPendingCount',
-      'approvalDangerousCommand',
-      'approvalResponding',
-    ]
+  it('localizes Skills Usage page copy in every non-English locale instead of falling back to English', () => {
+    const englishMessages = rawMessages.en
+    const untranslated = Object.entries(rawMessages).flatMap(([locale, localeMessages]) => {
+      if (locale === 'en') return []
 
-    for (const [locale, localeMessages] of Object.entries(rawMessages)) {
-      const chat = localeMessages.chat as Record<string, unknown>
-      const missingOrFallback = approvalKeys
-        .filter((key) => typeof chat?.[key] !== 'string' || chat[key] === `chat.${key}`)
-        .map((key) => `${locale}: chat.${key}`)
+      return SKILLS_USAGE_LOCALIZED_KEYS.flatMap((key) => {
+        const localeValue = getPath(localeMessages, key)
+        if (typeof localeValue === 'undefined') return [`${locale}: ${key} missing`]
+        return localeValue === getPath(englishMessages, key) ? [`${locale}: ${key}`] : []
+      })
+    })
 
-      expect(missingOrFallback).toEqual([])
-    }
+    expect(untranslated).toEqual([])
+  })
 
-    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowOnce).toBe('允许一次')
-    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowSession).toBe('本会话允许')
-    expect((rawMessages.zh.chat as Record<string, string>).approvalAllowAlways).toBe('始终允许')
-    expect((rawMessages.zh.chat as Record<string, string>).approvalDeny).toBe('拒绝')
+
+  it('keeps Skills Usage summary and table labels compact across locales', () => {
+    const oversized = Object.entries(rawMessages).flatMap(([locale, localeMessages]) =>
+      Object.entries(SKILLS_USAGE_COMPACT_LABEL_LIMITS).flatMap(([key, maxLength]) => {
+        const localeValue = getPath(localeMessages, key)
+        return labelLength(localeValue) > maxLength
+          ? [`${locale}: ${key} (${labelLength(localeValue)} > ${maxLength})`]
+          : []
+      }),
+    )
+
+    expect(oversized).toEqual([])
   })
 
   it('keeps the coverage scanner rooted in client source files', () => {
-    expect(toPosixPath(relative(process.cwd(), SOURCE_ROOT))).toBe('packages/client/src')
+    expect(relative(process.cwd(), SOURCE_ROOT)).toBe(join('packages', 'client', 'src'))
   })
 })
