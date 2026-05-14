@@ -2,6 +2,7 @@ import { execFile } from 'child_process'
 import { existsSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { promisify } from 'util'
+import { getActiveProfileDir } from './hermes-profile'
 
 const execFileAsync = promisify(execFile)
 
@@ -272,6 +273,7 @@ export async function listHermesPlugins(): Promise<HermesPluginsResponse> {
   const env = {
     ...process.env,
     HERMES_AGENT_ROOT_RESOLVED: agentRoot,
+    HERMES_HOME: getActiveProfileDir(),
   }
 
   const errors: string[] = []
