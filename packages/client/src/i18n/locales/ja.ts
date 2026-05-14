@@ -442,6 +442,7 @@ export default {
     customModelPlaceholder: 'カスタムモデル名',
     customModelHint: 'Enterで読み込み',
     noProviders: 'プロバイダーがありません。カスタムプロバイダーを追加して始めましょう。',
+    clearVisibleModels: '選択をクリア',
     builtIn: '組み込み',
     customType: 'カスタム',
     provider: 'プロバイダー',

@@ -442,6 +442,7 @@ export default {
     customModelPlaceholder: '사용자 지정 모델 이름',
     customModelHint: 'Enter로 불러오기',
     noProviders: 'Provider가 없습니다. 사용자 지정 Provider를 추가하여 시작하세요.',
+    clearVisibleModels: '선택 지우기',
     builtIn: '내장',
     customType: '사용자 지정',
     provider: 'Provider',
