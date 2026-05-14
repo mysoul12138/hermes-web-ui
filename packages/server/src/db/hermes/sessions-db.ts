@@ -13,6 +13,7 @@ const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
 const SYNTHETIC_USER_PREFIXES = [
   '[system:',
   '[context compaction',
+  '[your active task list was preserved across context compression]',
   'summary generation was unavailable.',
   "you've reached the maximum number of tool-calling iterations allowed.",
   'you have reached the maximum number of tool-calling iterations allowed.',
@@ -411,6 +412,18 @@ function isLikelyOrphanContinuation(parent: HermesSessionInternalRow, child: Her
   return !!parentTitle && !!childTitle && parentTitle === childTitle
 }
 
+function shouldSuppressBridgePromptTopLevelRoot(session: HermesSessionInternalRow, idx: SessionIndex): boolean {
+  if (session.parent_session_id != null) return false
+  if (!isBridgeContextPrompt(session.preview || session.title)) return false
+  for (const candidate of idx.byId.values()) {
+    if (candidate.id === session.id) continue
+    if (candidate.source !== session.source || candidate.source === 'tool') continue
+    if (!isCompressionEnded(candidate) || candidate.ended_at == null) continue
+    if (isLikelyOrphanContinuation(candidate, session)) return true
+  }
+  return false
+}
+
 function linkOrphanCompressionContinuations(sessions: HermesSessionInternalRow[]) {
   const parentless = sessions.filter(session => session.parent_session_id == null && session.source !== 'tool')
   const assignments = new Map<string, string | null>()
@@ -682,7 +695,8 @@ function aggregateSessionDetail(
   const firstRootUser = messages.find(message => message.session_id === root.id && message.role === 'user' && !isSyntheticUserText(message.content))
   const firstVisibleUserBySession = new Map<string, string>()
   let duplicateRemoved = false
-  const normalizedMessages = messages.filter((message, index) => {
+  const replayFilteredMessages = filterCompressionReplayPrefixMessages(messages, chain)
+  const normalizedMessages = replayFilteredMessages.filter((message, index) => {
     if (isSyntheticUserText(message.content)) return false
     if (!firstRootUser) return true
     if (firstCompactionSessionIndex == null) return true
@@ -730,6 +744,73 @@ function aggregateSessionDetail(
   }
 }
 
+function messageReplayKey(message: HermesMessageRow): string {
+  return `${message.role}\u0000${normalizeText(message.content)}`
+}
+
+function isCompressionReplaySession(session: HermesSessionInternalRow, chain: HermesSessionInternalRow[], index: number): boolean {
+  if (index <= 0) return false
+  const previous = chain[index - 1]
+  return isCompressionEnded(previous)
+}
+
+function hasMessagePayload(message: HermesMessageRow): boolean {
+  if (String(message.content || '').trim()) return true
+  if (message.role === 'tool') return true
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true
+  return !!(
+    String(message.reasoning || '').trim()
+    || String(message.reasoning_details || '').trim()
+    || String(message.reasoning_content || '').trim()
+    || String(message.codex_reasoning_items || '').trim()
+  )
+}
+
+function filterCompressionReplayPrefixMessages(
+  messages: HermesMessageRow[],
+  chain: HermesSessionInternalRow[],
+): HermesMessageRow[] {
+  const bySession = new Map<string, HermesMessageRow[]>()
+  for (const message of messages) {
+    const grouped = bySession.get(message.session_id) || []
+    grouped.push(message)
+    bySession.set(message.session_id, grouped)
+  }
+
+  const prior = new Set<string>()
+  const filtered: HermesMessageRow[] = []
+  chain.forEach((session, index) => {
+    const sessionMessages = bySession.get(session.id) || []
+    if (isCompressionReplaySession(session, chain, index)) {
+      const firstNewUserIndex = sessionMessages.findIndex(message =>
+        message.role === 'user'
+        && !isSyntheticUserText(message.content)
+        && !prior.has(messageReplayKey(message)),
+      )
+      const replayBoundary = firstNewUserIndex >= 0 ? firstNewUserIndex : sessionMessages.length
+      filtered.push(...sessionMessages.filter((message, messageIndex) => {
+        if (!hasMessagePayload(message)) return false
+        if (isSyntheticUserText(message.content)) return false
+        if (messageIndex >= replayBoundary) return true
+        if (!prior.has(messageReplayKey(message))) return true
+        return false
+      }))
+    } else {
+      filtered.push(...sessionMessages.filter(message =>
+        hasMessagePayload(message) && !isSyntheticUserText(message.content),
+      ))
+    }
+    for (const message of sessionMessages) {
+      prior.add(messageReplayKey(message))
+    }
+  })
+
+  return filtered.sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
+    return String(a.id).localeCompare(String(b.id))
+  })
+}
+
 async function openSessionDb() {
   if (!SQLITE_AVAILABLE) {
     throw new Error(`node:sqlite requires Node >= 22.5, current: ${process.versions.node}`)
@@ -770,6 +851,18 @@ export async function getSessionMessagesFromDb(sessionId: string): Promise<{
       messages: messageRows.map(mapMessageRow),
       session: sessionRow ? mapRow(sessionRow) : null,
     }
+  } finally {
+    db.close()
+  }
+}
+
+export async function isSessionCompressionEnded(sessionId: string): Promise<boolean> {
+  const db = await openSessionDb()
+  try {
+    const row = db.prepare('SELECT end_reason FROM sessions WHERE id = ?').get(sessionId) as Record<string, unknown> | undefined
+    return COMPRESSION_END_REASONS.has(String(row?.end_reason || ''))
+  } catch {
+    return false
   } finally {
     db.close()
   }
@@ -1103,6 +1196,7 @@ export async function listSessionSummaries(source?: string, limit = 2000, profil
 
     const idx = loadAllSessions(db)
     return roots
+      .filter(root => !shouldSuppressBridgePromptTopLevelRoot(root, idx))
       .filter(root => {
         if (!idx.byId.has(root.id)) return true
         return compressionChainRootId(root.id, idx) === root.id

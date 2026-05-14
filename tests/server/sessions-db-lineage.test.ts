@@ -209,7 +209,7 @@ describe('session DB compression lineage', () => {
     expect(detailFromTip?.title).toBe('Mermaid fix')
   })
 
-  it('filters compaction handoff notes and exact duplicated opening user turns from aggregated detail', async () => {
+  it('filters compaction handoff notes and replayed historical turns from aggregated detail', async () => {
     insertSession(db!, {
       id: 'root',
       source: 'tui',
@@ -217,7 +217,7 @@ describe('session DB compression lineage', () => {
       started_at: 100,
       ended_at: 200,
       end_reason: 'compression',
-      message_count: 2,
+      message_count: 6,
     })
     insertSession(db!, {
       id: 'tip',
@@ -227,15 +227,24 @@ describe('session DB compression lineage', () => {
       started_at: 201,
       ended_at: null,
       end_reason: null,
-      message_count: 4,
+      message_count: 9,
     })
 
     insertMessage(db!, { id: 1, session_id: 'root', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 101 })
     insertMessage(db!, { id: 2, session_id: 'root', role: 'assistant', content: 'root assistant', timestamp: 102 })
-    insertMessage(db!, { id: 3, session_id: 'tip', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 201 })
-    insertMessage(db!, { id: 4, session_id: 'tip', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 202 })
-    insertMessage(db!, { id: 5, session_id: 'tip', role: 'user', content: '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配', timestamp: 203 })
-    insertMessage(db!, { id: 6, session_id: 'tip', role: 'assistant', content: 'new assistant answer', timestamp: 204 })
+    insertMessage(db!, { id: 3, session_id: 'root', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 103 })
+    insertMessage(db!, { id: 4, session_id: 'root', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 104 })
+    insertMessage(db!, { id: 5, session_id: 'root', role: 'user', content: '更新指南skill', timestamp: 105 })
+    insertMessage(db!, { id: 6, session_id: 'root', role: 'assistant', content: 'skill 已更新。', timestamp: 106 })
+    insertMessage(db!, { id: 7, session_id: 'tip', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 201 })
+    insertMessage(db!, { id: 8, session_id: 'tip', role: 'assistant', content: 'root assistant', timestamp: 202 })
+    insertMessage(db!, { id: 9, session_id: 'tip', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 203 })
+    insertMessage(db!, { id: 10, session_id: 'tip', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 204 })
+    insertMessage(db!, { id: 11, session_id: 'tip', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 205 })
+    insertMessage(db!, { id: 12, session_id: 'tip', role: 'user', content: '更新指南skill', timestamp: 206 })
+    insertMessage(db!, { id: 13, session_id: 'tip', role: 'assistant', content: 'skill 已更新。', timestamp: 207 })
+    insertMessage(db!, { id: 14, session_id: 'tip', role: 'user', content: '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配', timestamp: 208 })
+    insertMessage(db!, { id: 15, session_id: 'tip', role: 'assistant', content: 'new assistant answer', timestamp: 209 })
 
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
     const detail = await mod.getSessionDetailFromDb('root')
@@ -243,8 +252,60 @@ describe('session DB compression lineage', () => {
     expect(detail?.messages.map(message => message.content)).toEqual([
       '添加一个skill 以后只要涉及写代码就要加载这个skill',
       'root assistant',
+      '先看看我这次 指南更新 是否包括了今天的源码改动',
+      '指南已覆盖今天的源码改动。',
+      '更新指南skill',
+      'skill 已更新。',
       '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配',
       'new assistant answer',
+    ])
+  })
+
+  it('filters replayed history before the first new user turn even when tool rows break the prefix', async () => {
+    insertSession(db!, {
+      id: 'root',
+      source: 'tui',
+      title: 'Local Repository Status Overview',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 8,
+    })
+    insertSession(db!, {
+      id: 'tip',
+      source: 'tui',
+      parent_session_id: 'root',
+      title: 'Local Repository Status Overview #2',
+      started_at: 201,
+      ended_at: null,
+      end_reason: null,
+      message_count: 8,
+    })
+
+    insertMessage(db!, { id: 101, session_id: 'root', role: 'user', content: '检查 custom-code-isolation 和 hermes-bridge-ui 是否同步', timestamp: 101 })
+    insertMessage(db!, { id: 102, session_id: 'root', role: 'assistant', content: '', timestamp: 102 })
+    insertMessage(db!, { id: 103, session_id: 'root', role: 'tool', content: 'repo status output', timestamp: 103 })
+    insertMessage(db!, { id: 104, session_id: 'root', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 104 })
+    insertMessage(db!, { id: 105, session_id: 'root', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 105 })
+    insertMessage(db!, { id: 201, session_id: 'tip', role: 'user', content: '检查 custom-code-isolation 和 hermes-bridge-ui 是否同步', timestamp: 201 })
+    insertMessage(db!, { id: 202, session_id: 'tip', role: 'assistant', content: '', timestamp: 202 })
+    insertMessage(db!, { id: 203, session_id: 'tip', role: 'tool', content: 'repo status output', timestamp: 203 })
+    insertMessage(db!, { id: 204, session_id: 'tip', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 204 })
+    insertMessage(db!, { id: 205, session_id: 'tip', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 205 })
+    insertMessage(db!, { id: 206, session_id: 'tip', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 206 })
+    insertMessage(db!, { id: 207, session_id: 'tip', role: 'user', content: '开始按步骤和阶段重构', timestamp: 207 })
+    insertMessage(db!, { id: 208, session_id: 'tip', role: 'assistant', content: '开始执行新的重构阶段。', timestamp: 208 })
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const detail = await mod.getSessionDetailFromDb('root')
+
+    expect(detail?.messages.map(message => `${message.session_id}:${message.role}:${message.content}`)).toEqual([
+      'root:user:检查 custom-code-isolation 和 hermes-bridge-ui 是否同步',
+      'root:tool:repo status output',
+      'root:user:先看看我这次 指南更新 是否包括了今天的源码改动',
+      'root:assistant:指南已覆盖今天的源码改动。',
+      'tip:user:开始按步骤和阶段重构',
+      'tip:assistant:开始执行新的重构阶段。',
     ])
   })
 
@@ -298,10 +359,11 @@ describe('session DB compression lineage', () => {
       started_at: 260,
       ended_at: null,
       end_reason: null,
-      message_count: 1,
+      message_count: 2,
     })
     insertMessage(db!, { id: 31, session_id: 'root', content: 'same visible conversation', timestamp: 101 })
     insertMessage(db!, { id: 32, session_id: 'duplicate-cont', content: 'same visible conversation', timestamp: 261 })
+    insertMessage(db!, { id: 33, session_id: 'duplicate-cont', role: 'assistant', content: 'new continuation answer', timestamp: 262 })
 
     const mod = await import('../../packages/server/src/db/hermes/sessions-db')
     const rows = await mod.listSessionSummaries(undefined, 20)
@@ -310,7 +372,10 @@ describe('session DB compression lineage', () => {
 
     const detail = await mod.getSessionDetailFromDb('duplicate-cont')
     expect(detail?.thread_session_count).toBe(2)
-    expect(detail?.messages.map(message => message.session_id)).toEqual(['root', 'duplicate-cont'])
+    expect(detail?.messages.map(message => `${message.session_id}:${message.content}`)).toEqual([
+      'root:same visible conversation',
+      'duplicate-cont:new continuation answer',
+    ])
   })
 
   it('does not merge unrelated tui sessions that only share the same title', async () => {

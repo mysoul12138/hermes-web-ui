@@ -11,6 +11,7 @@ const mockChatApi = vi.hoisted(() => ({
 
 const mockSessionsApi = vi.hoisted(() => ({
   fetchSessions: vi.fn(),
+  fetchHermesSessions: vi.fn(),
   fetchSession: vi.fn(),
   fetchSessionUsageSingle: vi.fn(),
   deleteSession: vi.fn(),
@@ -109,6 +110,7 @@ describe('Chat Store', () => {
     vi.useRealTimers()
     window.localStorage.clear()
     mockSessionsApi.fetchSessions.mockResolvedValue([])
+    mockSessionsApi.fetchHermesSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.fetchSessionUsageSingle.mockResolvedValue(null)
     mockSessionsApi.deleteSession.mockResolvedValue(true)
@@ -692,6 +694,36 @@ describe('Chat Store', () => {
     expect(store.activeCompression).toBeNull()
   })
 
+  it('filters compaction and continuation wrapper text out of bridge conversation history', async () => {
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_filtered_history',
+      status: 'queued',
+      bridge: true,
+      session_id: '20260514_184636_6eac27',
+    })
+
+    const store = useChatStore()
+    store.newChat()
+    store.activeSession!.messages.push(
+      { id: 'u1', role: 'user', content: 'real earlier question', timestamp: Date.now() - 5000 },
+      { id: 'a1', role: 'assistant', content: 'real earlier answer', timestamp: Date.now() - 4000 },
+      { id: 'u2', role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: Date.now() - 3000 },
+      { id: 'u2b', role: 'user', content: '[Your active task list was preserved across context compression]\n- [ ] t5. update skill\n- [>] t6. migrate state machine', timestamp: Date.now() - 2800 },
+      { id: 'a2', role: 'assistant', content: 'Summary generation was unavailable. 51 message(s) were removed to free context space but could not be summarized.', timestamp: Date.now() - 2500 },
+      { id: 'u3', role: 'user', content: 'Previous conversation context:\nassistant: older answer\n\nCurrent user message:\ncontinue here', timestamp: Date.now() - 2000 },
+    )
+
+    await store.sendMessage('latest real request')
+
+    expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      input: 'latest real request',
+      conversation_history: [
+        expect.objectContaining({ role: 'user', content: 'real earlier question' }),
+        expect.objectContaining({ role: 'assistant', content: 'real earlier answer' }),
+      ],
+    }))
+  })
+
   it('does not fetch a persistent continuation root through a bridge backing session', async () => {
     const continuationId = '20260502_135857_2f594e'
     const backingId = '20260502_120953_713358'
@@ -860,15 +892,10 @@ describe('Chat Store', () => {
     mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
       { ...makeSummary(visibleId, 'Visible'), source: 'tui', branch_session_count: 0 },
     ])
-    mockSessionsApi.fetchSessions.mockImplementation(async (source?: string) => {
-      if (source === 'tui') {
-        return [
-          { ...makeSummary(visibleId, 'Visible'), source: 'tui' },
-          { ...makeSummary(missingId, 'Missing but real'), source: 'tui' },
-        ]
-      }
-      return []
-    })
+    mockSessionsApi.fetchHermesSessions.mockResolvedValue([
+      { ...makeSummary(visibleId, 'Visible'), source: 'tui' },
+      { ...makeSummary(missingId, 'Missing but real'), source: 'tui' },
+    ])
     mockConversationsApi.fetchConversationDetail.mockResolvedValue({
       session_id: visibleId,
       messages: [],

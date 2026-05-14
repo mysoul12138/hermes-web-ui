@@ -2,9 +2,14 @@ import { EventEmitter } from 'events'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockUpdateUsage = vi.hoisted(() => vi.fn())
+const mockIsSessionCompressionEnded = vi.hoisted(() => vi.fn())
 
 vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
   updateUsage: mockUpdateUsage,
+}))
+
+vi.mock('../../packages/server/src/db/hermes/sessions-db', () => ({
+  isSessionCompressionEnded: mockIsSessionCompressionEnded,
 }))
 
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
@@ -51,6 +56,8 @@ class FakeGatewayClient extends EventEmitter {
 describe('TuiBridgeService steer compatibility', () => {
   beforeEach(() => {
     mockUpdateUsage.mockClear()
+    mockIsSessionCompressionEnded.mockReset()
+    mockIsSessionCompressionEnded.mockResolvedValue(false)
     delete process.env.HERMES_TUI_ROOT
     delete process.env.HERMES_PYTHON_SRC_ROOT
     delete process.env.HERMES_AGENT_ROOT
@@ -246,6 +253,34 @@ describe('TuiBridgeService steer compatibility', () => {
     ])
     expect(client.requests.at(-1)?.params).toMatchObject({
       text: 'hello',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('does not resume compression-ended persistent sessions before submitting the latest user input', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+    mockIsSessionCompressionEnded.mockResolvedValue(true)
+
+    const result = await bridge.startRun('latest real request', '20260514_184636_6eac27', [
+      { role: 'user', content: 'historical request that must not become current' },
+      { role: 'assistant', content: 'historical answer' },
+    ])
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'session.list',
+      'session.create',
+      'session.list',
+      'prompt.submit',
+    ])
+    expect(client.requests.some(request => request.method === 'session.resume')).toBe(false)
+    expect(client.requests.at(-1)?.params.text).toBe(
+      'Previous conversation context:\nuser: historical request that must not become current\n\nassistant: historical answer\n\nCurrent user message:\nlatest real request',
+    )
+    expect(result).toMatchObject({
+      bridge: true,
+      context_handoff: true,
     })
     ;(bridge as any).closeRun(result.run_id)
   })
@@ -616,6 +651,34 @@ describe('TuiBridgeService steer compatibility', () => {
       context_message_count: 2,
     })
     expect(result.context_token_count).toBeGreaterThan(0)
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('filters synthetic compaction and continuation wrapper history before building bridge prompts', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await bridge.startRun('latest real request', 'web-session-with-filtered-history', [
+      { role: 'user', content: 'real earlier question' },
+      { role: 'assistant', content: 'real earlier answer' },
+      { role: 'user', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.' },
+      { role: 'user', content: '[Your active task list was preserved across context compression]\n- [ ] t5. update skill\n- [>] t6. migrate state machine' },
+      { role: 'assistant', content: 'Summary generation was unavailable. 51 message(s) were removed to free context space but could not be summarized.' },
+      { role: 'user', content: 'Previous conversation context:\nassistant: older answer\n\nCurrent user message:\ncontinue here' },
+    ])
+
+    expect(client.requests.at(-1)).toMatchObject({
+      method: 'prompt.submit',
+      params: {
+        text: 'Previous conversation context:\nuser: real earlier question\n\nassistant: real earlier answer\n\nCurrent user message:\nlatest real request',
+      },
+    })
+    expect(result).toMatchObject({
+      bridge: true,
+      context_handoff: true,
+      context_message_count: 6,
+    })
     ;(bridge as any).closeRun(result.run_id)
   })
 

@@ -24,6 +24,7 @@ const BRIDGE_CURRENT_USER_MARKER = 'current user message:'
 const SYNTHETIC_USER_PREFIXES = [
   '[system:',
   '[context compaction',
+  '[your active task list was preserved across context compression]',
   'summary generation was unavailable.',
   "you've reached the maximum number of tool-calling iterations allowed.",
   'you have reached the maximum number of tool-calling iterations allowed.',
@@ -166,6 +167,17 @@ function textFromContent(value: unknown): string {
   }
 }
 
+function assistantTextTail(value: unknown, width = 64): string {
+  const text = textFromContent(value).replace(/\s+/g, ' ').trim().toLowerCase()
+  if (!text) return ''
+  return text.length > width ? text.slice(-width) : text
+}
+
+function bridgeAssistantHistoryTail(value: unknown, width = 64): string {
+  const tail = assistantTextTail(value, width)
+  return tail ? `assistant: ${tail}` : ''
+}
+
 function normalizeText(value: unknown): string {
   return textFromContent(value).replace(/\s+/g, ' ').trim().toLowerCase()
 }
@@ -297,6 +309,28 @@ function bridgeContextHistoryText(value: unknown): string {
   const markerIndex = normalized.lastIndexOf(BRIDGE_CURRENT_USER_MARKER)
   const history = markerIndex >= 0 ? text.slice(0, markerIndex) : text
   return normalizeText(history)
+}
+
+function bridgeContextAssistantHistorySnippets(value: unknown): string[] {
+  const history = bridgeContextHistoryText(value).replace(/^previous conversation context:\s*/, '')
+  if (!history) return []
+
+  const snippets: string[] = []
+  const rolePattern = /(?:^|\s)(assistant|user|system|tool):\s*/g
+  let currentRole: string | null = null
+  let contentStart = 0
+  let match: RegExpExecArray | null
+
+  while ((match = rolePattern.exec(history))) {
+    if (currentRole === 'assistant') snippets.push(history.slice(contentStart, match.index).trim())
+    currentRole = match[1]
+    contentStart = rolePattern.lastIndex
+  }
+
+  if (currentRole === 'assistant') snippets.push(history.slice(contentStart).trim())
+  if (!snippets.length && history) snippets.push(history)
+
+  return [...new Set(snippets.map(snippet => normalizeText(snippet)).filter(snippet => snippet.length >= 12))]
 }
 
 function contextReferencesParent(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
@@ -573,6 +607,7 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
   //   prefix-sized slice of the candidate anchor/preview text
   const sessionTitle = normalizeText(session.title)
   const history = bridgeContextHistoryText(session.raw_preview || session.preview || session.title)
+  const assistantHistorySnippets = bridgeContextAssistantHistorySnippets(session.raw_preview || session.preview || session.title)
   const fallback = candidates.find(candidate => {
     if (isBridgeContextPrompt(candidate.raw_preview || candidate.preview || candidate.title)) return false
     const candidateTitle = normalizeText(candidate.title)
@@ -582,16 +617,33 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
       candidate.raw_preview,
       candidate.preview,
       candidate.title,
+      assistantTextTail(candidate.raw_context_anchor),
+      assistantTextTail(candidate.raw_preview),
+      assistantTextTail(candidate.preview),
+      bridgeAssistantHistoryTail(candidate.raw_context_anchor),
+      bridgeAssistantHistoryTail(candidate.raw_preview),
+      bridgeAssistantHistoryTail(candidate.preview),
     ]
       .map(anchor => normalizeText(anchor))
       .filter(anchor => anchor.length >= 16)
     const anchorMatches = candidateAnchors.some(anchor => {
-      const prefix = anchor.slice(0, Math.min(anchor.length, 48))
-      const middleStart = Math.max(0, Math.floor(anchor.length / 3))
-      const middle = anchor.slice(middleStart, middleStart + Math.min(48, anchor.length - middleStart))
-      return history.includes(prefix) || (!!middle && history.includes(middle))
+      const window = Math.min(48, anchor.length)
+      const fragmentWindow = Math.min(16, anchor.length)
+      const coreWindow = Math.min(12, anchor.length)
+      const fragments = new Set<string>()
+      fragments.add(anchor.slice(0, window))
+      fragments.add(anchor.slice(Math.max(0, anchor.length - window)))
+      const middleStart = Math.max(0, Math.floor((anchor.length - fragmentWindow) / 2))
+      fragments.add(anchor.slice(middleStart, middleStart + fragmentWindow))
+      const coreStart = Math.max(0, Math.floor((anchor.length - coreWindow) / 2))
+      fragments.add(anchor.slice(coreStart, coreStart + coreWindow))
+      for (let start = 0; start + 16 <= anchor.length; start += 8) {
+        fragments.add(anchor.slice(start, Math.min(anchor.length, start + fragmentWindow)))
+      }
+      return Array.from(fragments).some(fragment => fragment.length >= 12 && history.includes(fragment))
     })
-    if (!titleMatches && !anchorMatches) return false
+    const assistantHistoryMatches = assistantHistorySnippets.some(snippet => candidateAnchors.some(anchor => anchor.includes(snippet) || snippet.includes(anchor)))
+    if (!titleMatches && !anchorMatches && !assistantHistoryMatches) return false
     const anchor = Number(candidate.last_active || candidate.started_at || 0)
     const delta = sessionStarted - anchor
     return delta >= 0 && delta <= DUPLICATE_CONTINUATION_WINDOW_SECONDS
@@ -601,6 +653,7 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
       sessionId: session.id,
       sessionTitle: session.title,
       history: history.slice(0, 500),
+      assistantHistorySnippets,
       candidateIds: candidates.slice(0, 10).map(candidate => candidate.id),
       candidateTitles: candidates.slice(0, 10).map(candidate => candidate.title),
       fallbackParentId: fallback?.id || null,
@@ -608,6 +661,21 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
     }, '[conversations-db] inferred-parent fallback-result')
   }
   return fallback || null
+}
+
+function isBridgePromptOnlyContinuationStub(session: ConversationSessionRow): boolean {
+  return isBridgeContextPrompt(session.raw_preview || session.preview || session.title)
+    && Number(session.message_count || 0) <= 1
+    && Number(session.tool_call_count || 0) === 0
+}
+
+function shouldSuppressBridgePromptTopLevelConversation(
+  session: ConversationSessionRow,
+  inferredParents: Map<string, string>,
+): boolean {
+  if (session.parent_session_id != null) return false
+  if (!isBridgeContextPrompt(session.raw_preview || session.preview || session.title)) return false
+  return !!inferredParents.get(session.id)
 }
 
 function buildInferredBridgeContextParentMap(sessions: ConversationSessionRow[]): Map<string, string> {
@@ -1078,18 +1146,20 @@ function aggregateSummary(
   const unifiedChain = normalizedMainline.length
     ? normalizedMainline
     : [...fallbackBridgeContextHistory, ...fallbackChain]
-  if (!unifiedChain.length || ![...unifiedChain, ...fallbackCompressionHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
-  const root = unifiedChain[0]
+  const summaryChain = unifiedChain.filter((session, index) => !(index > 0 && isBridgePromptOnlyContinuationStub(session)))
+  if (!summaryChain.length || ![...summaryChain, ...fallbackCompressionHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
+  const root = summaryChain[0]
   const visibleHead = requestedRoot || root
-  const last = unifiedChain[unifiedChain.length - 1]
-  const firstPreview = unifiedChain.map(session => session.preview).find(Boolean) || ''
-  const costStatuses = Array.from(new Set(unifiedChain.map(session => safeText(session.cost_status)).filter(Boolean)))
+  const last = summaryChain[summaryChain.length - 1]
+  const firstPreview = summaryChain.map(session => session.preview).find(Boolean) || ''
+  const costStatuses = Array.from(new Set(summaryChain.map(session => safeText(session.cost_status)).filter(Boolean)))
   const normalizedBranchSessionCount = requestedRoot && isBridgeContextBranchContinuationChild(requestedRoot, byId)
     ? 0
     : branchSessionCount
   logger.info({
     rootId,
     chainIds: unifiedChain.map(session => session.id),
+    summaryChainIds: summaryChain.map(session => session.id),
     compressionHistoryIds: fallbackCompressionHistory.map(session => session.id),
     bridgeContextHistoryIds: fallbackBridgeContextHistory.map(session => session.id),
     mainlineIds: normalizedMainline.map(session => session.id),
@@ -1103,22 +1173,22 @@ function aggregateSummary(
     preview: last.preview || visibleHead.preview || root.preview || firstPreview,
     started_at: Number(visibleHead.started_at || 0),
     ended_at: last?.ended_at ?? null,
-    last_active: Math.max(...unifiedChain.map(session => session.last_active)),
-    is_active: unifiedChain.some(session => session.is_active),
+    last_active: Math.max(...summaryChain.map(session => session.last_active)),
+    is_active: summaryChain.some(session => session.is_active),
     billing_provider: last?.billing_provider ?? root.billing_provider ?? null,
     billing_base_url: last?.billing_base_url ?? root.billing_base_url ?? null,
     cost_status: costStatuses.length === 1 ? costStatuses[0] : 'mixed',
-    thread_session_count: unifiedChain.length,
+    thread_session_count: summaryChain.length,
     branch_session_count: normalizedBranchSessionCount,
-    message_count: unifiedChain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
-    tool_call_count: unifiedChain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
+    message_count: summaryChain.reduce((sum, session) => sum + Number(session.message_count || 0), 0),
+    tool_call_count: summaryChain.reduce((sum, session) => sum + Number(session.tool_call_count || 0), 0),
     input_tokens: Number(last.input_tokens || 0),
     output_tokens: Number(last.output_tokens || 0),
     cache_read_tokens: Number(last.cache_read_tokens || 0),
     cache_write_tokens: Number(last.cache_write_tokens || 0),
     reasoning_tokens: Number(last.reasoning_tokens || 0),
-    estimated_cost_usd: unifiedChain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
-    actual_cost_usd: unifiedChain.reduce<number | null>((sum, session) => {
+    estimated_cost_usd: summaryChain.reduce((sum, session) => sum + Number(session.estimated_cost_usd || 0), 0),
+    actual_cost_usd: summaryChain.reduce<number | null>((sum, session) => {
       const actual = session.actual_cost_usd
       if (actual == null) return sum
       return (sum || 0) + Number(actual)
@@ -1174,13 +1244,14 @@ function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, 
     })
   if (normalized.length < 2) return normalized
 
-  const firstUser = normalized.find(message => message.role === 'user')
-  if (!firstUser) return normalized
-  if (firstCompactionSessionIndex == null) return normalized
+  const filteredReplay = filterCompressionReplayPrefixMessages(normalized, sessions, sessionById, sessionIndex)
+  const firstUser = filteredReplay.find(message => message.role === 'user')
+  if (!firstUser) return filteredReplay
+  if (firstCompactionSessionIndex == null) return filteredReplay
 
   const firstVisibleUserBySession = new Map<string, string>()
   let duplicateRemoved = false
-  return normalized.filter((message, index) => {
+  return filteredReplay.filter((message, index) => {
     if (index === 0) return true
     if (message.role !== 'user') return true
     const currentSessionId = message.session_id
@@ -1197,6 +1268,61 @@ function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, 
       return false
     }
     return true
+  })
+}
+
+function visibleMessageReplayKey(message: ConversationMessage): string {
+  return `${message.role}\u0000${normalizeText(message.content)}`
+}
+
+function isCompressionReplaySession(
+  session: ConversationSessionRow,
+  sessions: ConversationSessionRow[],
+  sessionById: Map<string, ConversationSessionRow>,
+  sessionIndex: Map<string, number>,
+): boolean {
+  const index = sessionIndex.get(session.id)
+  if (index == null || index <= 0) return false
+  const parent = session.parent_session_id ? sessionById.get(session.parent_session_id) : null
+  if (isCompressionEndReason(parent?.end_reason ?? null)) return true
+  return isCompressionEndReason(sessions[index - 1]?.end_reason ?? null)
+}
+
+function filterCompressionReplayPrefixMessages(
+  messages: ConversationMessage[],
+  sessions: ConversationSessionRow[],
+  sessionById: Map<string, ConversationSessionRow>,
+  sessionIndex: Map<string, number>,
+): ConversationMessage[] {
+  const bySession = new Map<string, ConversationMessage[]>()
+  for (const message of messages) {
+    const grouped = bySession.get(message.session_id) || []
+    grouped.push(message)
+    bySession.set(message.session_id, grouped)
+  }
+
+  const prior = new Set<string>()
+  const filtered: ConversationMessage[] = []
+  for (const session of sessions) {
+    const sessionMessages = bySession.get(session.id) || []
+    if (isCompressionReplaySession(session, sessions, sessionById, sessionIndex)) {
+      let prefixEnd = 0
+      while (prefixEnd < sessionMessages.length && prior.has(visibleMessageReplayKey(sessionMessages[prefixEnd]))) {
+        prefixEnd += 1
+      }
+      const dropPrefix = prefixEnd >= 1
+      filtered.push(...(dropPrefix ? sessionMessages.slice(prefixEnd) : sessionMessages))
+    } else {
+      filtered.push(...sessionMessages)
+    }
+    for (const message of sessionMessages) {
+      prior.add(visibleMessageReplayKey(message))
+    }
+  }
+
+  return filtered.sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
+    return String(a.id).localeCompare(String(b.id))
   })
 }
 
@@ -1410,6 +1536,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
     const rootIds = sessions
       .filter(session => session.source !== 'tool')
       .filter(session => !isSubagentSession(session))
+      .filter(session => !shouldSuppressBridgePromptTopLevelConversation(session, inferredParents))
       .map(session => rootConversationIdForSession(session.id, byId, inferredParents, rootMemo))
       .filter((id): id is string => !!id)
     const uniqueRootIds = [...new Set(rootIds)]

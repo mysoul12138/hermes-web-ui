@@ -343,7 +343,7 @@ describe('conversation DB service', () => {
       started_at: 100,
       ended_at: 110,
       end_reason: null,
-      message_count: 1,
+      message_count: 2,
       tool_call_count: 0,
       input_tokens: 0,
       output_tokens: 0,
@@ -573,9 +573,7 @@ describe('conversation DB service', () => {
       '我把指南更新了   你现在把合并指南skill 更新一下',
       '我先定位现有的合并指南 skill 和你更新后的指南来源，然后按 skill 安全规范做最小更新。',
       '开始更新 skill。',
-      '我先定位现有的合并指南 skill 和你更新后的指南来源，然后按 skill 安全规范做最小更新。',
       '开始更新 skill：我会新增一个“从项目开发指南同步的合并约束”章节。',
-      '我把指南更新了   你现在把合并指南skill 更新一下',
       '我先读取你上传的新版 SKILL.md 和现有 skill。',
       '我看到上传的新版 SKILL.md 不是简单覆盖版。',
     ])
@@ -661,7 +659,7 @@ describe('conversation DB service', () => {
     ])
   })
 
-  it('drops compaction handoff notes and only removes the exact duplicated root-opening user message', async () => {
+  it('drops compaction handoff notes and replayed historical turns from aggregated detail', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
     const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
@@ -676,7 +674,7 @@ describe('conversation DB service', () => {
       started_at: 100,
       ended_at: 200,
       end_reason: 'compression',
-      message_count: 5,
+      message_count: 8,
       tool_call_count: 1,
       input_tokens: 0,
       output_tokens: 0,
@@ -697,7 +695,7 @@ describe('conversation DB service', () => {
       started_at: 200.01,
       ended_at: null,
       end_reason: null,
-      message_count: 5,
+      message_count: 9,
       tool_call_count: 1,
       input_tokens: 0,
       output_tokens: 0,
@@ -712,10 +710,19 @@ describe('conversation DB service', () => {
 
     insertMessage(db, { id: 1, session_id: 'root-clean', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 101 })
     insertMessage(db, { id: 2, session_id: 'root-clean', role: 'assistant', content: 'root assistant', timestamp: 102 })
-    insertMessage(db, { id: 3, session_id: 'cont-clean', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 201 })
-    insertMessage(db, { id: 4, session_id: 'cont-clean', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 202 })
-    insertMessage(db, { id: 5, session_id: 'cont-clean', role: 'user', content: '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配', timestamp: 203 })
-    insertMessage(db, { id: 6, session_id: 'cont-clean', role: 'assistant', content: 'new assistant answer', timestamp: 204 })
+    insertMessage(db, { id: 3, session_id: 'root-clean', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 103 })
+    insertMessage(db, { id: 4, session_id: 'root-clean', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 104 })
+    insertMessage(db, { id: 5, session_id: 'root-clean', role: 'user', content: '更新指南skill', timestamp: 105 })
+    insertMessage(db, { id: 6, session_id: 'root-clean', role: 'assistant', content: 'skill 已更新。', timestamp: 106 })
+    insertMessage(db, { id: 7, session_id: 'cont-clean', role: 'user', content: '添加一个skill 以后只要涉及写代码就要加载这个skill', timestamp: 201 })
+    insertMessage(db, { id: 8, session_id: 'cont-clean', role: 'assistant', content: 'root assistant', timestamp: 202 })
+    insertMessage(db, { id: 9, session_id: 'cont-clean', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 203 })
+    insertMessage(db, { id: 10, session_id: 'cont-clean', role: 'user', content: '先看看我这次 指南更新 是否包括了今天的源码改动', timestamp: 204 })
+    insertMessage(db, { id: 11, session_id: 'cont-clean', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 205 })
+    insertMessage(db, { id: 12, session_id: 'cont-clean', role: 'user', content: '更新指南skill', timestamp: 206 })
+    insertMessage(db, { id: 13, session_id: 'cont-clean', role: 'assistant', content: 'skill 已更新。', timestamp: 207 })
+    insertMessage(db, { id: 14, session_id: 'cont-clean', role: 'user', content: '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配', timestamp: 208 })
+    insertMessage(db, { id: 15, session_id: 'cont-clean', role: 'assistant', content: 'new assistant answer', timestamp: 209 })
     db.close()
 
     const mod = await import('../../packages/server/src/db/hermes/conversations-db')
@@ -723,8 +730,81 @@ describe('conversation DB service', () => {
     expect(detail?.messages.map((message: any) => message.content)).toEqual([
       '添加一个skill 以后只要涉及写代码就要加载这个skill',
       'root assistant',
+      '先看看我这次 指南更新 是否包括了今天的源码改动',
+      '指南已覆盖今天的源码改动。',
+      '更新指南skill',
+      'skill 已更新。',
       '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配',
       'new assistant answer',
+    ])
+  })
+
+  it('hides todo reinjection notes from human-only aggregated detail without affecting continuation folding', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'todo-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Phase 2 bridge refactor',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 3,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'todo-tip',
+      parent_session_id: 'todo-root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Phase 2 bridge refactor #2',
+      started_at: 200.01,
+      ended_at: null,
+      end_reason: null,
+      message_count: 3,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'todo-root', role: 'user', content: '继续做 Phase 2', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'todo-root', role: 'assistant', content: '我先拆状态机和测试面。', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'todo-tip', role: 'user', content: '[Your active task list was preserved across context compression]\n- [ ] t5. update skill\n- [>] t6. migrate state machine', timestamp: 201 })
+    insertMessage(db, { id: 4, session_id: 'todo-tip', role: 'user', content: '继续，把 Phase 2 做完', timestamp: 202 })
+    insertMessage(db, { id: 5, session_id: 'todo-tip', role: 'assistant', content: '继续推进。', timestamp: 203 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['todo-root'])
+
+    const detail = await mod.getConversationDetailFromDb('todo-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      '继续做 Phase 2',
+      '我先拆状态机和测试面。',
+      '继续，把 Phase 2 做完',
+      '继续推进。',
     ])
   })
 
@@ -848,6 +928,7 @@ describe('conversation DB service', () => {
 
     insertMessage(db, { id: 21, session_id: 'root', role: 'user', content: 'same visible conversation', timestamp: 101 })
     insertMessage(db, { id: 22, session_id: 'duplicate-cont', role: 'user', content: 'same visible conversation', timestamp: 200 })
+    insertMessage(db, { id: 23, session_id: 'duplicate-cont', role: 'assistant', content: 'new continuation answer', timestamp: 201 })
     db.close()
 
     const mod = await import('../../packages/server/src/db/hermes/conversations-db')
@@ -860,7 +941,10 @@ describe('conversation DB service', () => {
     })
 
     const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
-    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['root', 'duplicate-cont'])
+    expect(detail?.messages.map((message: any) => `${message.session_id}:${message.content}`)).toEqual([
+      'root:same visible conversation',
+      'duplicate-cont:new continuation answer',
+    ])
     expect(detail?.branches ?? []).toEqual([])
   })
 

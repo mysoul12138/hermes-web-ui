@@ -20,6 +20,7 @@ import { useProfilesStore } from './profiles'
 import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 import { primeCompletionSound, playCompletionSound } from '@/utils/completion-sound'
+import { shouldHideFromPromptHistory } from '@/utils/injected-message-rules'
 import {
   textFromRunEvent,
   numberFromRunEvent,
@@ -2698,6 +2699,7 @@ export const useChatStore = defineStore('chat', () => {
         && !m.steered
         && (m.role === 'user' || m.role === 'assistant')
         && m.content.trim()
+        && !shouldHideFromPromptHistory(m.role, m.content)
       )
       .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
 

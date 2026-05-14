@@ -14,8 +14,10 @@ import {
   setLivePendingClarifyForRun,
   setRunSession,
 } from './run-state'
+import { shouldHideFromPromptHistory } from './injected-message-rules'
 import { writeBridgeContinuationLink } from './bridge-continuation-links'
 import { getActiveConfigPath } from './hermes-profile'
+import { isSessionCompressionEnded } from '../../db/hermes/sessions-db'
 import { updateUsage } from '../../db/hermes/usage-store'
 import { countTokens } from '../../lib/context-compressor'
 
@@ -150,7 +152,6 @@ const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEAR
 const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
 const CANCEL_STATUS_POLL_MS = Math.max(100, Number(process.env.HERMES_TUI_CANCEL_STATUS_POLL_MS || 250))
 const CANCEL_STATUS_TIMEOUT_MS = Math.max(1000, Number(process.env.HERMES_TUI_CANCEL_STATUS_TIMEOUT_MS || 5000))
-
 function resolveHermesHome(): string {
   return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
 }
@@ -734,6 +735,7 @@ export class TuiBridgeService {
 
   private async tryResumeBridgeSession(webSessionId: string): Promise<BridgeSessionRef | null> {
     if (!/^\d{8}_\d{6}_/.test(webSessionId)) return null
+    if (await isSessionCompressionEnded(webSessionId)) return null
     try {
       const resumed = await this.client.request<{ session_id: string, resumed?: string }>('session.resume', {
         session_id: webSessionId,
@@ -815,6 +817,7 @@ export class TuiBridgeService {
   private buildPrompt(input: string, conversationHistory: Array<{ role: string, content: string }>): string {
     const history = conversationHistory
       .filter(item => item.content?.trim())
+      .filter(item => !shouldHideFromPromptHistory(item.role, item.content))
       .filter(item => !(item.role === 'user' && item.content.trim() === input.trim()))
       .slice(-8)
       .map(item => `${item.role}: ${item.content}`)
