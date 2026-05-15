@@ -48,6 +48,12 @@ const execFileAsync = promisify(execFile)
 
 const HERMES_BASE = resolve(homedir(), '.hermes')
 const HERMES_BIN = process.env.HERMES_BIN?.trim() || 'hermes'
+const DEFAULT_WEB_UI_PORT = 8648
+
+function getWebUiPort(): number | null {
+  const port = parseInt(process.env.PORT || String(DEFAULT_WEB_UI_PORT), 10)
+  return port > 0 && port <= 65535 ? port : null
+}
 
 /**
  * 检测系统的 init 系统（服务管理器）
@@ -361,6 +367,8 @@ export class GatewayManager {
         usedPorts.add(gw.port)
       }
     }
+    const webUiPort = getWebUiPort()
+    if (webUiPort !== null) usedPorts.add(webUiPort)
 
     if (usedPorts.has(port)) {
       // 已管理端口冲突 → 找空闲端口
