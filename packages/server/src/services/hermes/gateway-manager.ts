@@ -498,7 +498,7 @@ export class GatewayManager {
       // WSL / Docker：无 systemd/launchd，用 "gateway run" 作为 detached 子进程
       // Redirect stdout/stderr to a log file so crashes are diagnosable.
       return new Promise((resolve, reject) => {
-        const env = { ...process.env, HERMES_HOME: hermesHome }
+        const env = { ...process.env, HERMES_HOME: hermesHome, HERMES_PROFILE: name }
         const logPath = `/tmp/hermes-gateway-${name}.log`
         let logFd: number | undefined
         try {
@@ -527,7 +527,7 @@ export class GatewayManager {
 
     // 正常系统：先 start，失败则 restart（处理服务已运行的情况）
     logger.info('Starting gateway for profile "%s" (start mode, port: %d)', name, port)
-    const env = { ...process.env, HERMES_HOME: hermesHome }
+    const env = { ...process.env, HERMES_HOME: hermesHome, HERMES_PROFILE: name }
     try {
       const { stdout } = await execFileAsync(HERMES_BIN, ['gateway', 'start'], {
         timeout: 30000,
@@ -592,7 +592,7 @@ export class GatewayManager {
       // 正常系统：通过 hermes CLI 停止系统服务
       try {
         const hermesHome = this.profileDir(name)
-        const env = { ...process.env, HERMES_HOME: hermesHome }
+        const env = { ...process.env, HERMES_HOME: hermesHome, HERMES_PROFILE: name }
         await execFileAsync(HERMES_BIN, ['gateway', 'stop'], {
           timeout: 10000,
           env,
