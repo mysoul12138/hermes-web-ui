@@ -22,6 +22,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const wecom = ref<Record<string, any>>({})
   const feishu = ref<Record<string, any>>({})
   const dingtalk = ref<Record<string, any>>({})
+  const qqbot = ref<Record<string, any>>({})
   const weixin = ref<Record<string, any>>({})
   const platforms = ref<Record<string, any>>({})
   const loaded = ref(false)
@@ -45,6 +46,7 @@ export const useSettingsStore = defineStore('settings', () => {
       wecom.value = data.wecom || {}
       feishu.value = data.feishu || {}
       dingtalk.value = data.dingtalk || {}
+      qqbot.value = data.qqbot || {}
       weixin.value = data.weixin || {}
       platforms.value = data.platforms || {}
       loaded.value = true
@@ -71,6 +73,7 @@ export const useSettingsStore = defineStore('settings', () => {
       case 'wecom': wecom.value = { ...wecom.value, ...values }; break
       case 'feishu': feishu.value = { ...feishu.value, ...values }; break
       case 'dingtalk': dingtalk.value = { ...dingtalk.value, ...values }; break
+      case 'qqbot': qqbot.value = { ...qqbot.value, ...values }; break
       case 'weixin': weixin.value = { ...weixin.value, ...values }; break
       case 'platforms': {
         for (const [key, val] of Object.entries(values)) {
@@ -104,6 +107,7 @@ export const useSettingsStore = defineStore('settings', () => {
       case 'wechat': case 'wecom': wecom.value = { ...wecom.value, ...values }; break
       case 'feishu': feishu.value = { ...feishu.value, ...values }; break
       case 'dingtalk': dingtalk.value = { ...dingtalk.value, ...values }; break
+      case 'qqbot': qqbot.value = { ...qqbot.value, ...values }; break
       case 'weixin': weixin.value = { ...weixin.value, ...values }; break
       case 'platforms': {
         // Deep-merge each platform's credentials
@@ -125,7 +129,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loading, saving,
     loaded,
     display, agent, memory, sessionReset, privacy, webui, approvals,
-    telegram, discord, slack, whatsapp, matrix, wecom, feishu, dingtalk, weixin, platforms,
+    telegram, discord, slack, whatsapp, matrix, wecom, feishu, dingtalk, qqbot, weixin, platforms,
     fetchSettings, saveSection, updateLocal,
   }
 })
