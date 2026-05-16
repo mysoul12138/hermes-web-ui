@@ -37,9 +37,11 @@ export interface AvailableModelGroup {
   label: string      // display name (e.g. "zai", "subrouter.ai")
   base_url: string
   models: string[]
+  /** Full unfiltered model catalog for this provider, used to restore hidden WUI models. */
   available_models?: string[]
   api_key: string
   builtin?: boolean
+  /** 可选：模型 ID -> 元数据（preview/disabled/alias）。alias 仅用于 Web UI 展示。 */
   model_meta?: Record<string, { preview?: boolean; disabled?: boolean; alias?: string }>
 }
 
@@ -48,12 +50,9 @@ export interface AvailableModelsResponse {
   default_provider: string
   groups: AvailableModelGroup[]
   allProviders: AvailableModelGroup[]
+  /** Web UI-only display aliases keyed by provider -> canonical model ID. */
   model_aliases?: Record<string, Record<string, string>>
   model_visibility?: ModelVisibility
-}
-
-export interface ProviderModelProbeResponse {
-  data: Array<{ id: string }>
 }
 
 export interface CustomProvider {
@@ -84,8 +83,9 @@ export async function fetchAvailableModels(): Promise<AvailableModelsResponse> {
 export async function fetchProviderModels(data: {
   base_url: string
   api_key?: string
-}): Promise<ProviderModelProbeResponse> {
-  return request<ProviderModelProbeResponse>('/api/hermes/provider-models/fetch', {
+  freeOnly?: boolean
+}): Promise<{ models: string[] }> {
+  return request<{ models: string[] }>('/api/hermes/provider-models', {
     method: 'POST',
     body: JSON.stringify(data),
   })
