@@ -1,7 +1,7 @@
 import { readFile } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { getActiveEnvPath, getActiveAuthPath } from '../../services/hermes/hermes-profile'
-import { readConfigYaml, writeConfigYaml, fetchProviderModels as fetchProviderModelsFromConfig, buildModelGroups, listUserProviders, PROVIDER_ENV_MAP } from '../../services/config-helpers'
+import { readConfigYaml, updateConfigYaml, fetchProviderModels, buildModelGroups, PROVIDER_ENV_MAP } from '../../services/config-helpers'
 import { buildProviderModelMap, PROVIDER_PRESETS } from '../../shared/providers'
 import { getCopilotModelsDetailed, resolveCopilotOAuthToken, type CopilotModelMeta } from '../../services/hermes/copilot-models'
 import { readAppConfig, writeAppConfig, type ModelVisibilityRule } from '../../services/app-config'
@@ -9,18 +9,11 @@ import { getDb } from '../../db'
 import { MODEL_CONTEXT_TABLE } from '../../db/hermes/schemas'
 
 const PROVIDER_MODEL_CATALOG = buildProviderModelMap()
+
 type ModelMeta = { preview?: boolean; disabled?: boolean; alias?: string }
-type AvailableGroup = {
-  provider: string
-  label: string
-  base_url: string
-  models: string[]
-  api_key: string
-  builtin?: boolean
-  model_meta?: Record<string, ModelMeta>
-  available_models?: string[]
-}
+type AvailableGroup = { provider: string; label: string; base_url: string; models: string[]; api_key: string; builtin?: boolean; model_meta?: Record<string, ModelMeta>; available_models?: string[] }
 type ModelVisibility = Record<string, ModelVisibilityRule>
+
 const RESERVED_ALIAS_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 
 function isSafeAliasKey(value: string): boolean {
@@ -52,10 +45,7 @@ function normalizeAliases(value: unknown): Record<string, Record<string, string>
   return normalized
 }
 
-function applyModelAliases<T extends { provider: string; models: string[]; model_meta?: Record<string, ModelMeta> }>(
-  groups: T[],
-  aliases: Record<string, Record<string, string>>,
-): T[] {
+function applyModelAliases<T extends { provider: string; models: string[]; model_meta?: Record<string, ModelMeta> }>(groups: T[], aliases: Record<string, Record<string, string>>): T[] {
   return groups.map((group) => {
     const providerAliases = aliases[group.provider]
     if (!providerAliases) return group
@@ -99,6 +89,8 @@ function filterModelsForProvider(provider: string, models: string[], visibility:
   if (!rule || rule.mode !== 'include') return models
   const allowed = new Set(rule.models)
   const visible = models.filter(model => allowed.has(model))
+  // If a stale hand-edited rule references models that are no longer present,
+  // fail open so the provider remains recoverable from the Web UI.
   return visible.length > 0 ? visible : models
 }
 
@@ -126,55 +118,6 @@ function resolveVisibleDefault(defaultModel: string, defaultProvider: string, gr
   return { defaultModel: fallback?.models[0] || '', defaultProvider: fallback?.provider || '' }
 }
 
-export async function fetchProviderModels(ctx: any) {
-  const { base_url, api_key } = ctx.request.body as { base_url?: string; api_key?: string }
-  const baseUrl = String(base_url || '').trim()
-  const apiKey = String(api_key || '').trim()
-
-  if (!baseUrl) {
-    ctx.status = 400
-    ctx.body = { error: 'Missing base_url' }
-    return
-  }
-
-  const base = baseUrl.replace(/\/+$/, '')
-  const modelsUrl = /\/v\d+\/?$/.test(base) ? `${base}/models` : `${base}/v1/models`
-
-  try {
-    const headers: Record<string, string> = {}
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-
-    const res = await fetch(modelsUrl, {
-      headers,
-      signal: AbortSignal.timeout(8000),
-    })
-
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '')
-      ctx.status = 502
-      ctx.body = {
-        error: `Upstream model probe failed with HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`,
-      }
-      return
-    }
-
-    const data = await res.json() as { data?: Array<{ id: string }> }
-    if (!Array.isArray(data.data)) {
-      ctx.status = 502
-      ctx.body = { error: 'Unexpected upstream models response format' }
-      return
-    }
-
-    ctx.body = {
-      data: data.data
-        .filter(item => item && typeof item.id === 'string' && item.id.trim())
-        .map(item => ({ id: item.id })),
-    }
-  } catch (err: any) {
-    ctx.status = 502
-    ctx.body = { error: err?.message || 'Failed to fetch provider models' }
-  }
-}
 
 // Copilot 授权检测：复用同一套 token 解析逻辑（含 ~/.config/github-copilot/apps.json
 // 与 ghp_ PAT 跳过），与 getCopilotModels 行为一致，避免出现"模型能拉到却被判未授权"。
@@ -191,28 +134,20 @@ export async function getAvailable(ctx: any) {
     if (typeof modelSection === 'object' && modelSection !== null) {
       currentDefault = String(modelSection.default || '').trim()
       currentDefaultProvider = String(modelSection.provider || '').trim()
-      // When Hermes CLI sets provider: custom, resolve to custom:name
-      // by matching base_url + model against user-defined providers.
+      // When hermes CLI sets provider: custom, resolve to custom:name
+      // by matching base_url + model against custom_providers
       if (currentDefaultProvider === 'custom' && currentDefault) {
-        const match = listUserProviders(config).find(
-          cp => cp.base_url.replace(/\/+$/, '') === String(modelSection.base_url || '').replace(/\/+$/, '')
+        const cps = Array.isArray(config.custom_providers) ? config.custom_providers as any[] : []
+        const match = cps.find(
+          (cp: any) => cp.base_url?.replace(/\/+$/, '') === String(modelSection.base_url || '').replace(/\/+$/, '')
             && cp.model === currentDefault,
         )
         if (match) {
-          currentDefaultProvider = match.providerKey
+          currentDefaultProvider = `custom:${match.name.trim().toLowerCase().replace(/ /g, '-')}`
         }
       }
     } else if (typeof modelSection === 'string') {
       currentDefault = modelSection.trim()
-    }
-
-    if (currentDefaultProvider && currentDefaultProvider !== 'custom') {
-      const customMatch = listUserProviders(config).find(
-        provider => provider.slug === currentDefaultProvider || provider.providerKey === `custom:${currentDefaultProvider}`,
-      )
-      if (customMatch) {
-        currentDefaultProvider = customMatch.providerKey
-      }
     }
 
     const groups: AvailableGroup[] = []
@@ -245,6 +180,9 @@ export async function getAvailable(ctx: any) {
         const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
         const provider = auth.providers?.[providerKey]
         const pool = auth.credential_pool?.[providerKey]
+        // Legacy OAuth providers are stored under providers.*; newer Hermes
+        // credential pools store Codex-style OAuth entries under
+        // credential_pool.*. Treat either shape as an authorized provider.
         return !!(
           provider?.tokens?.access_token ||
           provider?.access_token ||
@@ -296,7 +234,7 @@ export async function getAvailable(ctx: any) {
       }
       const catalogModels = PROVIDER_MODEL_CATALOG[providerKey]
       let modelsList: string[] = catalogModels && catalogModels.length > 0 ? [...catalogModels] : []
-      let modelMeta: Record<string, { preview?: boolean; disabled?: boolean }> | undefined
+      let modelMeta: Record<string, ModelMeta> | undefined
       if (providerKey === 'copilot') {
         const live = await getCopilotLive()
         if (live.length > 0) {
@@ -318,7 +256,7 @@ export async function getAvailable(ctx: any) {
           const apiKey = envGetValue(envMapping.api_key_env)
           if (apiKey) {
             try {
-              const fetched = await fetchProviderModelsFromConfig(baseUrl, apiKey, providerKey === 'openrouter')
+              const fetched = await fetchProviderModels(baseUrl, apiKey, providerKey === 'openrouter')
               if (fetched.length > 0) modelsList = fetched
             } catch { /* ignore — leave empty, won't show */ }
           }
@@ -330,21 +268,23 @@ export async function getAvailable(ctx: any) {
       }
     }
 
-    const customProviders = listUserProviders(config)
+    const customProviders = Array.isArray(config.custom_providers)
+      ? config.custom_providers as Array<{ name: string; base_url: string; model: string; api_key?: string }>
+      : []
 
     const customFetches = await Promise.allSettled(
       customProviders.map(async cp => {
         if (!cp.base_url) return null
-        const providerKey = cp.providerKey
+        const providerKey = `custom:${cp.name.trim().toLowerCase().replace(/ /g, '-')}`
         const baseUrl = cp.base_url.replace(/\/+$/, '')
-        const bareKey = cp.slug
+        const bareKey = cp.name.trim().toLowerCase().replace(/ /g, '-')
         const builtinPreset = PROVIDER_PRESETS.find(p => p.value === bareKey)
-        let models = builtinPreset?.models?.length ? [...builtinPreset.models] : (cp.models.length ? [...cp.models] : [cp.model])
+        let models = builtinPreset?.models?.length ? [...builtinPreset.models] : [cp.model]
         // Skip dynamic fetch for builtin presets — their model list is maintained in providers.ts
         if (!builtinPreset && cp.api_key) {
-          try { const fetched = await fetchProviderModelsFromConfig(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([cp.model, ...fetched])] } catch { }
+          try { const fetched = await fetchProviderModels(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([cp.model, ...fetched])] } catch { }
         }
-        const label = builtinPreset?.label || cp.label
+        const label = builtinPreset?.label || cp.name
         const presetBaseUrl = builtinPreset?.base_url || ''
         return { providerKey, label, base_url: presetBaseUrl || baseUrl, models, api_key: cp.api_key || '', builtin: !!builtinPreset }
       }),
@@ -476,6 +416,7 @@ export async function fetchProviderModelList(ctx: any) {
   }
 }
 
+
 export async function setModelAlias(ctx: any) {
   const body = ctx.request.body
   const provider = body && typeof body === 'object' && !Array.isArray(body) ? body.provider : undefined
@@ -497,6 +438,7 @@ export async function setModelAlias(ctx: any) {
     ctx.body = { error: 'Invalid provider or model' }
     return
   }
+
   if (cleanAlias.length > 512) {
     ctx.status = 400
     ctx.body = { error: 'Alias is too long' }
@@ -541,11 +483,12 @@ export async function setConfigModel(ctx: any) {
     return
   }
   try {
-    const config = await readConfigYaml()
-    config.model = {}
-    config.model.default = defaultModel
-    if (reqProvider) { config.model.provider = reqProvider }
-    await writeConfigYaml(config)
+    await updateConfigYaml((config) => {
+      config.model = {}
+      config.model.default = defaultModel
+      if (reqProvider) { config.model.provider = reqProvider }
+      return config
+    })
     ctx.body = { success: true }
   } catch (err: any) {
     ctx.status = 500
@@ -675,6 +618,7 @@ export async function getModelContext(ctx: any) {
     ctx.body = { error: err.message }
   }
 }
+
 
 export async function setModelVisibility(ctx: any) {
   const { provider, mode, models } = ctx.request.body as { provider?: string; mode?: string; models?: string[] }

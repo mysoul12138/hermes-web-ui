@@ -39,6 +39,7 @@ import { promisify } from 'util'
 import { createServer } from 'net'
 import yaml from 'js-yaml'
 import { logger } from '../logger'
+import { safeFileStore } from '../safe-file-store'
 
 const execFileAsync = promisify(execFile)
 
@@ -314,31 +315,30 @@ export class GatewayManager {
    *         host: <host>
    * 同时清理旧的顶层 port/host（避免 Hermes 读取错误）
    */
-  private writeProfilePort(name: string, port: number, host: string): void {
+  private async writeProfilePort(name: string, port: number, host: string): Promise<void> {
     const configPath = join(this.profileDir(name), 'config.yaml')
     try {
-      const content = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : ''
-      const cfg = (yaml.load(content) as any) || {}
+      await safeFileStore.updateYaml(configPath, (cfg) => {
+        if (!cfg.platforms) cfg.platforms = {}
+        if (!cfg.platforms.api_server) cfg.platforms.api_server = {}
+        if (!cfg.platforms.api_server.extra) cfg.platforms.api_server.extra = {}
 
-      if (!cfg.platforms) cfg.platforms = {}
-      if (!cfg.platforms.api_server) cfg.platforms.api_server = {}
-      if (!cfg.platforms.api_server.extra) cfg.platforms.api_server.extra = {}
+        cfg.platforms.api_server.enabled = true
+        cfg.platforms.api_server.key = ''
+        cfg.platforms.api_server.cors_origins = '*'
+        cfg.platforms.api_server.extra.port = port
+        cfg.platforms.api_server.extra.host = host
 
-      cfg.platforms.api_server.enabled = true
-      cfg.platforms.api_server.key = ''
-      cfg.platforms.api_server.cors_origins = '*'
-      cfg.platforms.api_server.extra.port = port
-      cfg.platforms.api_server.extra.host = host
+        // 清理旧的顶层 port/host，Hermes 只从 extra 读取
+        if (cfg.platforms.api_server.port !== undefined) {
+          delete cfg.platforms.api_server.port
+        }
+        if (cfg.platforms.api_server.host !== undefined) {
+          delete cfg.platforms.api_server.host
+        }
 
-      // 清理旧的顶层 port/host，Hermes 只从 extra 读取
-      if (cfg.platforms.api_server.port !== undefined) {
-        delete cfg.platforms.api_server.port
-      }
-      if (cfg.platforms.api_server.host !== undefined) {
-        delete cfg.platforms.api_server.host
-      }
-
-      writeFileSync(configPath, yaml.dump(cfg, { lineWidth: -1 }), 'utf-8')
+        return cfg
+      })
       logger.debug('Updated %s: api_server.extra.port = %d', configPath, port)
     } catch (err) {
       logger.error(err, 'Failed to write config for profile "%s"', name)
@@ -374,7 +374,7 @@ export class GatewayManager {
       // 已管理端口冲突 → 找空闲端口
       const newPort = await this.findFreePort(port, host, usedPorts)
       logger.info('Port %d is in use for profile "%s", reassigning to %d', port, name, newPort)
-      this.writeProfilePort(name, newPort, host)
+      await this.writeProfilePort(name, newPort, host)
       port = newPort
     } else {
       // 检查系统级端口占用（外部进程）
@@ -382,11 +382,11 @@ export class GatewayManager {
       if (!available) {
         const newPort = await this.findFreePort(port, host, usedPorts)
         logger.info('Port %d is occupied by another process for profile "%s", reassigning to %d', port, name, newPort)
-        this.writeProfilePort(name, newPort, host)
+        await this.writeProfilePort(name, newPort, host)
         port = newPort
       } else {
         // 端口空闲，写入完整配置（确保 api_server 配置齐全）
-        this.writeProfilePort(name, port, host)
+        await this.writeProfilePort(name, port, host)
       }
     }
 

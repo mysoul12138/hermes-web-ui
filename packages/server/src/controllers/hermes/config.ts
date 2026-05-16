@@ -1,8 +1,9 @@
-import { readFile, writeFile, copyFile } from 'fs/promises'
-import YAML from 'js-yaml'
-import { restartGateway } from '../../services/hermes/hermes-cli'
+import { readFile } from 'fs/promises'
+import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { getActiveConfigPath, getActiveEnvPath } from '../../services/hermes/hermes-profile'
 import { saveEnvValue } from '../../services/config-helpers'
+import { logger } from '../../services/logger'
+import { safeFileStore } from '../../services/safe-file-store'
 
 const PLATFORM_SECTIONS = new Set([
   'telegram', 'discord', 'slack', 'whatsapp', 'matrix',
@@ -12,29 +13,6 @@ const PLATFORM_SECTIONS = new Set([
 
 const configPath = () => getActiveConfigPath()
 const envPath = () => getActiveEnvPath()
-
-function parseBooleanFlag(value: unknown): boolean | null {
-  if (typeof value === 'boolean') return value
-  if (typeof value !== 'string') return null
-  const normalized = value.trim().toLowerCase()
-  if (!normalized) return null
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
-  return null
-}
-
-function mergeWebUiRuntimeConfig(config: Record<string, any>) {
-  const configured = parseBooleanFlag(config.webui?.bridge_enabled)
-  const env = parseBooleanFlag(process.env.HERMES_WEBUI_BRIDGE)
-  const effective = configured ?? env ?? false
-  config.webui = {
-    ...(config.webui || {}),
-    bridge_enabled: configured ?? effective,
-    bridge_env_enabled: env === true,
-    bridge_env_locked: false,
-    bridge_effective_enabled: effective,
-  }
-}
 
 const envPlatformMap: Record<string, [string, string]> = {
   TELEGRAM_BOT_TOKEN: ['telegram', 'token'],
@@ -112,20 +90,7 @@ async function readEnvPlatforms(): Promise<Record<string, any>> {
 }
 
 async function readConfig(): Promise<Record<string, any>> {
-  const raw = await readFile(configPath(), 'utf-8')
-  return (YAML.load(raw) as Record<string, any>) || {}
-}
-
-async function writeConfig(data: Record<string, any>): Promise<void> {
-  const cp = configPath()
-  await copyFile(cp, cp + '.bak')
-  const yamlStr = YAML.dump(data, {
-    lineWidth: -1,
-    noRefs: true,
-    quotingType: '"',
-    forceQuotes: true, // Force quotes on all string values
-  })
-  await writeFile(cp, yamlStr, 'utf-8')
+  return safeFileStore.readYaml(configPath())
 }
 
 export async function getConfig(ctx: any) {
@@ -139,7 +104,6 @@ export async function getConfig(ctx: any) {
       }
       config.platforms = existing
     }
-    mergeWebUiRuntimeConfig(config)
     const { section, sections } = ctx.query
     if (section) {
       ctx.body = { [section as string]: config[section as string] || {} }
@@ -162,10 +126,30 @@ export async function updateConfig(ctx: any) {
     ctx.status = 400; ctx.body = { error: 'Missing section or values' }; return
   }
   try {
-    const config = await readConfig()
-    config[section] = deepMerge(config[section] || {}, values)
-    await writeConfig(config)
-    if (PLATFORM_SECTIONS.has(section)) { await restartGateway() }
+    await safeFileStore.updateYaml(configPath(), (config) => {
+      config[section] = deepMerge(config[section] || {}, values)
+      return config
+    }, {
+      backup: true,
+      dumpOptions: {
+        forceQuotes: true,
+      },
+    })
+
+    // 使用 GatewayManager 重启平台网关
+    if (PLATFORM_SECTIONS.has(section)) {
+      const mgr = getGatewayManagerInstance()
+      if (mgr) {
+        try {
+          const activeProfile = mgr.getActiveProfile()
+          await mgr.stop(activeProfile)
+          await mgr.start(activeProfile)
+        } catch (err) {
+          logger.error(err, 'GatewayManager restart failed')
+        }
+      }
+    }
+
     ctx.body = { success: true }
   } catch (err: any) {
     ctx.status = 500; ctx.body = { error: err.message }
@@ -182,38 +166,54 @@ export async function updateCredentials(ctx: any) {
     if (!envMap) {
       ctx.status = 400; ctx.body = { error: `Unknown platform: ${platform}` }; return
     }
-    const config = await readConfig()
-    let configChanged = false
     const flatValues: Record<string, any> = {}
     for (const [key, val] of Object.entries(values)) {
       if (key === 'extra' && val && typeof val === 'object') {
         for (const [subKey, subVal] of Object.entries(val as Record<string, any>)) { flatValues[`extra.${subKey}`] = subVal }
       } else { flatValues[key] = val }
     }
-    for (const [cfgPath, val] of Object.entries(flatValues)) {
-      const envVar = envMap[cfgPath]
-      if (!envVar) continue
-      if (val === undefined || val === null || val === '') {
-        await saveEnvValue(envVar, '')
-        const parts = cfgPath.split('.')
-        let obj: any = config.platforms?.[platform]
-        if (obj) {
-          if (parts.length === 1) { delete obj[parts[0]] }
-          else {
-            let cur = obj
-            for (let i = 0; i < parts.length - 1; i++) { if (!cur[parts[i]]) break; cur = cur[parts[i]] }
-            delete cur[parts[parts.length - 1]]
-            if (obj.extra && Object.keys(obj.extra).length === 0) delete obj.extra
+    await safeFileStore.updateYaml(configPath(), async (config) => {
+      for (const [cfgPath, val] of Object.entries(flatValues)) {
+        const envVar = envMap[cfgPath]
+        if (!envVar) continue
+        if (val === undefined || val === null || val === '') {
+          await saveEnvValue(envVar, '')
+          const parts = cfgPath.split('.')
+          let obj: any = config.platforms?.[platform]
+          if (obj) {
+            if (parts.length === 1) { delete obj[parts[0]] }
+            else {
+              let cur = obj
+              for (let i = 0; i < parts.length - 1; i++) { if (!cur[parts[i]]) break; cur = cur[parts[i]] }
+              delete cur[parts[parts.length - 1]]
+              if (obj.extra && Object.keys(obj.extra).length === 0) delete obj.extra
+            }
+            if (Object.keys(obj).length === 0) { if (!config.platforms) config.platforms = {}; delete config.platforms[platform] }
           }
-          if (Object.keys(obj).length === 0) { if (!config.platforms) config.platforms = {}; delete config.platforms[platform] }
-          configChanged = true
+        } else {
+          await saveEnvValue(envVar, String(val))
         }
-      } else {
-        await saveEnvValue(envVar, String(val))
+      }
+      return config
+    }, {
+      backup: true,
+      dumpOptions: {
+        forceQuotes: true,
+      },
+    })
+
+    // 使用 GatewayManager 重启平台网关
+    const mgr = getGatewayManagerInstance()
+    if (mgr) {
+      try {
+        const activeProfile = mgr.getActiveProfile()
+        await mgr.stop(activeProfile)
+        await mgr.start(activeProfile)
+      } catch (err) {
+        logger.error(err, 'GatewayManager restart failed')
       }
     }
-    if (configChanged) { await writeConfig(config) }
-    await restartGateway()
+
     ctx.body = { success: true }
   } catch (err: any) {
     ctx.status = 500; ctx.body = { error: err.message }

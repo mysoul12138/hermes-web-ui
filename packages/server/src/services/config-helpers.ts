@@ -1,13 +1,15 @@
-import { readFile, writeFile, copyFile, chmod } from 'fs/promises'
+import { readFile, chmod } from 'fs/promises'
 import { readdir, stat } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import YAML from 'js-yaml'
 import { getActiveProfileDir, getActiveConfigPath, getActiveEnvPath, getActiveAuthPath } from './hermes/hermes-profile'
 import { logger } from './logger'
+import { safeFileStore } from './safe-file-store'
 
 // --- Provider env var mapping (from hermes providers.py HERMES_OVERLAYS + config.py) ---
 export const PROVIDER_ENV_MAP: Record<string, { api_key_env: string; base_url_env: string }> = {
+  'fun-codex': { api_key_env: '', base_url_env: '' },
+  'fun-claude': { api_key_env: '', base_url_env: '' },
   openrouter: { api_key_env: 'OPENROUTER_API_KEY', base_url_env: '' },
   'glm-coding-plan': { api_key_env: '', base_url_env: '' },
   zai: { api_key_env: 'GLM_API_KEY', base_url_env: '' },
@@ -65,169 +67,53 @@ export interface ModelGroup {
   models: ModelInfo[]
 }
 
-export interface UserProviderInfo {
-  providerKey: string
-  slug: string
-  label: string
-  base_url: string
-  model: string
-  api_key: string
-  models: string[]
-  api_mode?: string
-  context_length?: number
-}
-
-export function normalizeCustomProviderSlug(value: string): string {
-  return value.trim().replace(/^custom:/i, '').toLowerCase().replace(/ /g, '-')
-}
-
-function uniqueModels(defaultModel: string, models: unknown): string[] {
-  const result: string[] = []
-  const push = (value: unknown) => {
-    if (typeof value !== 'string') return
-    const model = value.trim()
-    if (model && !result.includes(model)) result.push(model)
-  }
-  push(defaultModel)
-  if (Array.isArray(models)) {
-    for (const model of models) push(model)
-  } else if (models && typeof models === 'object') {
-    for (const model of Object.keys(models as Record<string, unknown>)) push(model)
-  }
-  return result
-}
-
-export function buildUserProviderConfigEntry(
-  name: string,
-  base_url: string,
-  api_key: string,
-  model: string,
-  context_length?: number,
-  models?: string[],
-) {
-  const entry: Record<string, any> = {
-    name: name.trim(),
-    api: base_url.trim(),
-    api_key: api_key.trim(),
-    default_model: model.trim(),
-    models: uniqueModels(model, models),
-  }
-  if (context_length && context_length > 0) entry.context_length = context_length
-  return entry
-}
-
-export function listUserProviders(config: Record<string, any>): UserProviderInfo[] {
-  const result: UserProviderInfo[] = []
-  const seen = new Set<string>()
-  const add = (info: UserProviderInfo) => {
-    if (!info.slug || !info.base_url) return
-    if (seen.has(info.providerKey)) return
-    seen.add(info.providerKey)
-    result.push(info)
-  }
-
-  const providers = config.providers
-  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
-    for (const [rawSlug, entry] of Object.entries(providers as Record<string, any>)) {
-      if (!entry || typeof entry !== 'object') continue
-      const slug = normalizeCustomProviderSlug(rawSlug)
-      const baseUrl = String(entry.api || entry.url || entry.base_url || '').trim()
-      const model = String(entry.default_model || entry.model || '').trim()
-      const label = String(entry.name || rawSlug).trim()
-      add({
-        providerKey: `custom:${slug}`,
-        slug,
-        label,
-        base_url: baseUrl,
-        model,
-        api_key: String(entry.api_key || '').trim(),
-        models: uniqueModels(model, entry.models),
-        api_mode: typeof entry.transport === 'string' ? entry.transport : typeof entry.api_mode === 'string' ? entry.api_mode : undefined,
-        context_length: typeof entry.context_length === 'number' ? entry.context_length : undefined,
-      })
-    }
-  }
-
-  const customProviders = config.custom_providers
-  if (Array.isArray(customProviders)) {
-    for (const entry of customProviders) {
-      if (!entry || typeof entry !== 'object') continue
-      const name = String(entry.name || '').trim()
-      const slug = normalizeCustomProviderSlug(String(entry.provider_key || name))
-      const baseUrl = String(entry.base_url || '').trim()
-      const model = String(entry.model || '').trim()
-      add({
-        providerKey: `custom:${slug}`,
-        slug,
-        label: name || slug,
-        base_url: baseUrl,
-        model,
-        api_key: String(entry.api_key || '').trim(),
-        models: uniqueModels(model, entry.models),
-        api_mode: typeof entry.api_mode === 'string' ? entry.api_mode : undefined,
-        context_length: typeof entry.context_length === 'number' ? entry.context_length : undefined,
-      })
-    }
-  }
-
-  return result
-}
-
 // --- Config YAML helpers ---
 
 const configPath = () => getActiveConfigPath()
 
 export async function readConfigYaml(): Promise<Record<string, any>> {
-  const raw = await safeReadFile(configPath())
-  if (!raw) return {}
-  return (YAML.load(raw) as Record<string, any>) || {}
+  return safeFileStore.readYaml(configPath())
 }
 
 export async function writeConfigYaml(config: Record<string, any>): Promise<void> {
-  const cp = configPath()
-  await copyFile(cp, cp + '.bak')
-  const yamlStr = YAML.dump(config, {
-    lineWidth: -1,
-    noRefs: true,
-    quotingType: '"',
-  })
-  await writeFile(cp, yamlStr, 'utf-8')
+  await safeFileStore.writeYaml(configPath(), config, { backup: true })
+}
+
+export async function updateConfigYaml<T = void>(
+  updater: (config: Record<string, any>) => Record<string, any> | { data: Record<string, any>; result: T; write?: boolean } | Promise<Record<string, any> | { data: Record<string, any>; result: T; write?: boolean }>,
+): Promise<T | undefined> {
+  return safeFileStore.updateYaml(configPath(), updater, { backup: true })
 }
 
 // --- .env helpers ---
 
 export async function saveEnvValue(key: string, value: string): Promise<void> {
   const envPath = getActiveEnvPath()
-  let raw: string
-  try {
-    raw = await readFile(envPath, 'utf-8')
-  } catch {
-    raw = ''
-  }
-  const remove = !value
-  const lines = raw.split('\n')
-  let found = false
-  const result: string[] = []
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('#') && trimmed.startsWith(`# ${key}=`)) {
-      if (!remove) result.push(`${key}=${value}`)
-      found = true
-    } else {
-      const eqIdx = trimmed.indexOf('=')
-      if (eqIdx !== -1 && trimmed.slice(0, eqIdx).trim() === key) {
+  await safeFileStore.updateText(envPath, (raw) => {
+    const remove = !value
+    const lines = raw.split('\n')
+    let found = false
+    const result: string[] = []
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('#') && trimmed.startsWith(`# ${key}=`)) {
         if (!remove) result.push(`${key}=${value}`)
         found = true
       } else {
-        result.push(line)
+        const eqIdx = trimmed.indexOf('=')
+        if (eqIdx !== -1 && trimmed.slice(0, eqIdx).trim() === key) {
+          if (!remove) result.push(`${key}=${value}`)
+          found = true
+        } else {
+          result.push(line)
+        }
       }
     }
-  }
-  if (!found && !remove) {
-    result.push(`${key}=${value}`)
-  }
-  let output = result.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '') + '\n'
-  await writeFile(envPath, output, 'utf-8')
+    if (!found && !remove) {
+      result.push(`${key}=${value}`)
+    }
+    return result.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '') + '\n'
+  })
   try { await chmod(envPath, 0o600) } catch { /* ignore */ }
 }
 
@@ -335,16 +221,22 @@ export function buildModelGroups(config: Record<string, any>): { default: string
     defaultModel = modelSection.trim()
   }
 
-  // 2. Extract user-defined providers from Hermes' current providers: dict
-  // and the legacy custom_providers: list.
-  const customModels: ModelInfo[] = []
-  for (const provider of listUserProviders(config)) {
-    for (const model of provider.models.length ? provider.models : [provider.model]) {
-      if (model) customModels.push({ id: model, label: `${provider.label}: ${model}` })
+  // 2. Extract custom_providers section
+  const customProviders = config.custom_providers
+  if (Array.isArray(customProviders)) {
+    const customModels: ModelInfo[] = []
+    for (const entry of customProviders) {
+      if (entry && typeof entry === 'object') {
+        const cName = String(entry.name || '').trim()
+        const cModel = String(entry.model || '').trim()
+        if (cName && cModel) {
+          customModels.push({ id: cModel, label: `${cName}: ${cModel}` })
+        }
+      }
     }
-  }
-  if (customModels.length > 0) {
-    groups.push({ provider: 'Custom', models: customModels })
+    if (customModels.length > 0) {
+      groups.push({ provider: 'Custom', models: customModels })
+    }
   }
 
   return { default: defaultModel, groups }
