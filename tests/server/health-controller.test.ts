@@ -82,7 +82,6 @@ describe('health controller version metadata', () => {
 
   it('checks npm latest using the root package name', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {})
-    const pkg = readRootPackage()
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ version: '99.99.99' }),
@@ -93,16 +92,14 @@ describe('health controller version metadata', () => {
 
     await checkLatestVersion()
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://registry.npmjs.org/${pkg.name}/latest`,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    )
+    // Fork disables npm registry check; no fetch expected
+    expect(fetchMock).not.toHaveBeenCalled()
 
     const ctx = createMockCtx()
     await healthCheck(ctx)
 
-    expect(ctx.body.webui_latest).toBe('99.99.99')
-    expect(ctx.body.webui_update_available).toBe(true)
+    expect(ctx.body.webui_latest).toBe('')
+    expect(ctx.body.webui_update_available).toBe(false)
   })
 
   it('does not throw when latest-version lookup fails', async () => {

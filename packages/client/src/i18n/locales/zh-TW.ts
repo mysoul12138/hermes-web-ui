@@ -2,12 +2,14 @@ import zh from './zh'
 
 const locale = structuredClone(zh) as Record<string, any>
 
-<<<<<<< HEAD
 locale.language = {
   ...locale.language,
   zh: '中文（简体）',
   'zh-TW': '繁體中文',
-=======
+}
+
+locale.sidebar = {
+  ...locale.sidebar,
   // 側邊欄
   sidebar: {
     chat: '對話',
@@ -1208,7 +1210,6 @@ locale.language = {
     new_0_4_2_4: 'Chat 頁面新增釘選工作階段和即時監控',
     new_0_4_2_5: '修復內建 Provider 偵測和模型匹配問題',
   },
->>>>>>> db0c23b ([codex] add QQBot and DingTalk channel settings (#787))
 }
 
 locale.sidebar = {

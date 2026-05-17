@@ -191,11 +191,11 @@ export async function capabilities(ctx: Context) {
 }
 
 export async function list(ctx: Context) {
-  const { status, assignee, tenant } = ctx.query as Record<string, string | undefined>
+  const { status, assignee, tenant, includeArchived } = ctx.query as Record<string, string | undefined>
   const board = requestBoard(ctx)
   if (!board) return
   try {
-    const tasks = await kanbanCli.listTasks({ board, status, assignee, tenant })
+    const tasks = await kanbanCli.listTasks({ board, status, assignee, tenant, includeArchived: includeArchived === 'true' })
     ctx.body = { tasks }
   } catch (err: any) {
     ctx.status = 500

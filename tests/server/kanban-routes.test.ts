@@ -11,6 +11,7 @@ const handlers = {
   searchSessions: vi.fn(async (ctx: any) => { ctx.body = { results: [] } }),
   linkTasks: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
   unlinkTasks: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  diagnostics: vi.fn(async (ctx: any) => { ctx.body = { diagnostics: [] } }),
   bulkUpdateTasks: vi.fn(async (ctx: any) => { ctx.body = { results: [] } }),
   list: vi.fn(async (ctx: any) => { ctx.body = { tasks: [] } }),
   get: vi.fn(async (ctx: any) => { ctx.body = { task: {} } }),
@@ -19,6 +20,12 @@ const handlers = {
   unblock: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
   block: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
   assign: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  taskLog: vi.fn(async (ctx: any) => { ctx.body = { log: [] } }),
+  addComment: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  reclaim: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  reassign: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  specify: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
+  dispatch: vi.fn(async (ctx: any) => { ctx.body = { ok: true } }),
 }
 
 vi.mock('../../packages/server/src/controllers/hermes/kanban', () => handlers)

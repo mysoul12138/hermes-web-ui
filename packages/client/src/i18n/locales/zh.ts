@@ -620,6 +620,8 @@ export default {
     unexpectedFormat: '响应格式异常',
     foundModels: '找到 {count} 个模型',
     fetchFailed: '获取模型失败',
+    clearVisibleModels: '显示全部模型',
+    getApiKey: '获取 API Key',
   },
 
   // 配置
@@ -1167,6 +1169,16 @@ export default {
 
   // 更新日志
   changelog: {
+    new_0_5_22_1: '新增 MiMo TTS 语音提供者、服务端代理 Provider 模型列表、Windows 媒体路径支持及移动端终端修复',
+    new_0_5_18_1: '新增群聊房间重置与克隆功能',
+    new_0_5_18_2: 'Web UI 状态目录支持自定义配置',
+    new_0_5_18_3: '新增并发配置写入的文件锁机制',
+    new_0_5_18_4: '新增 QQBot 和钉钉频道配置',
+    new_0_5_18_5: '服务端代理 Provider 模型列表获取，解决 CORS 问题',
+    new_0_5_18_6: '支持 Windows Markdown 媒体路径',
+    new_0_5_18_7: '优化 Windows 媒体路径提示',
+    new_0_5_18_8: '修复移动端终端抽屉尺寸问题',
+    new_0_5_18_9: '修复会话重置模式选项错误',
     new_0_5_14_1: '新增会话导出功能：支持完整和压缩模式，导出为 JSON 或纯文本',
     new_0_5_14_2: '修复终端面板启动即连接导致 PTY 资源耗尽的问题，改为懒加载连接',
     new_0_5_14_3: '修复 WSL2 环境下 IPv6 双栈绑定导致健康检查失败、端口无法访问的问题',

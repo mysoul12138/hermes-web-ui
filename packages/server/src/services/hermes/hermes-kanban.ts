@@ -481,8 +481,10 @@ export async function listTasks(opts?: {
   status?: string
   assignee?: string
   tenant?: string
+  includeArchived?: boolean
 }): Promise<KanbanTask[]> {
   const args = [...boardArgs(opts?.board), 'list', '--json']
+  if (opts?.includeArchived) args.push('--archived')
   if (opts?.status) args.push('--status', opts.status)
   if (opts?.assignee) args.push('--assignee', opts.assignee)
   if (opts?.tenant) args.push('--tenant', opts.tenant)
@@ -623,7 +625,18 @@ export async function getStats(opts?: KanbanBoardOptions): Promise<KanbanStats> 
       timeout: 30000,
       ...execOpts,
     })
-    return JSON.parse(stdout)
+    const stats: KanbanStats = JSON.parse(stdout)
+    // Also fetch archived task count to include in stats
+    try {
+      const archived = await listTasks({ ...opts, includeArchived: true, status: 'archived' })
+      const archivedCount = Array.isArray(archived) ? archived.length : 0
+      stats.total = (stats.total || 0) + archivedCount
+      if (!stats.by_status) stats.by_status = {}
+      stats.by_status.archived = archivedCount
+    } catch {
+      // Non-fatal: archived stats are supplementary
+    }
+    return stats
   } catch (err: any) {
     logger.error(err, 'Hermes CLI: kanban stats failed')
     throw new Error(`Failed to get kanban stats: ${err.message}`)

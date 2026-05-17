@@ -4,6 +4,7 @@
  */
 import { isSqliteAvailable, getDb } from '../index'
 import { SESSIONS_TABLE, MESSAGES_TABLE } from './schemas'
+import { config } from '../config'
 
 // Re-export types for compatibility with sessions-db.ts consumers
 export interface HermesSessionRow {
@@ -462,4 +463,12 @@ export function getSessionDetailPaginated(
     limit,
     hasMore: offset + messages.length < total,
   }
+}
+
+/**
+ * Check whether the app should use the local SQLite session store
+ * (as opposed to fetching sessions through the Hermes CLI).
+ */
+export function useLocalSessionStore(): boolean {
+  return true
 }

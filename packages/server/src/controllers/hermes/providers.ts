@@ -143,6 +143,24 @@ export async function update(ctx: any) {
       if (!found) {
         ctx.status = 404; ctx.body = { error: `Custom provider "${poolKey}" not found` }; return
       }
+      // Sync credential pool in auth.json if api_key changed
+      if (api_key !== undefined) {
+        try {
+          const authPath = getActiveAuthPath()
+          if (existsSync(authPath)) {
+            const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
+            if (auth.credential_pool?.[poolKey]) {
+              auth.credential_pool[poolKey] = (auth.credential_pool[poolKey] as any[]).map((entry: any) => ({
+                ...entry,
+                access_token: api_key,
+                last_status: null,
+                last_error_code: null,
+              }))
+              await writeFile(authPath, JSON.stringify(auth, null, 2) + '\n', 'utf-8')
+            }
+          }
+        } catch (err: any) { logger.error(err, 'Failed to sync credential pool for %s', poolKey) }
+      }
     } else {
       const envMapping = PROVIDER_ENV_MAP[poolKey]
       if (!envMapping?.api_key_env) {

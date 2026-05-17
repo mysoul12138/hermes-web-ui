@@ -239,9 +239,72 @@ export function buildModelGroups(config: Record<string, any>): { default: string
     }
   }
 
+  // 3. Also extract from providers dict (legacy format)
+  const providersDict = config.providers
+  if (providersDict && typeof providersDict === 'object' && !Array.isArray(providersDict)) {
+    const legacyModels: ModelInfo[] = []
+    for (const [slug, entry] of Object.entries(providersDict) as [string, any][]) {
+      if (entry && typeof entry === 'object') {
+        const models = Array.isArray(entry.models) ? entry.models : (entry.default_model ? [entry.default_model] : [])
+        for (const m of models) {
+          if (m) legacyModels.push({ id: String(m), label: `${slug}: ${m}` })
+        }
+      }
+    }
+    if (legacyModels.length > 0) {
+      groups.push({ provider: 'Custom (legacy)', models: legacyModels })
+    }
+  }
+
   return { default: defaultModel, groups }
 }
 
 // --- Profile directory helper ---
 
 export const getHermesDir = () => getActiveProfileDir()
+
+// --- User providers helpers (providers dict from config.yaml) ---
+
+export interface UserProviderEntry {
+  providerKey: string
+  slug: string
+  base_url: string
+  model: string
+  models: string[]
+  context_length: number
+}
+
+export function listUserProviders(config: any): UserProviderEntry[] {
+  const providers = config?.providers
+  if (!providers || typeof providers !== 'object') return []
+  const entries: UserProviderEntry[] = []
+  for (const [slug, p] of Object.entries(providers) as [string, any][]) {
+    if (!p || typeof p !== 'object') continue
+    entries.push({
+      providerKey: `custom:${slug}`,
+      slug,
+      base_url: p.api || '',
+      model: p.default_model || '',
+      models: Array.isArray(p.models) ? p.models : (p.default_model ? [p.default_model] : []),
+      context_length: p.context_length || 0,
+    })
+  }
+  return entries
+}
+
+export function buildUserProviderConfigEntry(
+  slug: string,
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  contextLength: number,
+): Record<string, any> {
+  return {
+    name: slug,
+    api: baseUrl,
+    api_key: apiKey,
+    default_model: model,
+    models: [model],
+    context_length: contextLength,
+  }
+}

@@ -46,15 +46,14 @@ describe('Hermes providers controller credential pool sync', () => {
         default: 'gpt-5.5',
         provider: 'custom:ai.warp2pans.online',
       },
-      providers: {
-        'ai.warp2pans.online': {
-          name: 'Ai.warp2pans.online',
-          api: 'https://ai.warp2pans.online/v1',
+      custom_providers: [
+        {
+          name: 'ai.warp2pans.online',
+          base_url: 'https://ai.warp2pans.online/v1',
           api_key: 'old-key',
-          default_model: 'gpt-5.5',
-          models: ['gpt-5.5'],
+          model: 'gpt-5.5',
         },
-      },
+      ],
     }), 'utf-8')
     await writeFile(join(hermesHome, 'auth.json'), JSON.stringify({
       credential_pool: {
@@ -94,15 +93,14 @@ describe('Hermes providers controller credential pool sync', () => {
   it('removes custom provider credential pool when provider is deleted', async () => {
     await writeFile(join(hermesHome, 'config.yaml'), YAML.dump({
       model: { default: 'gpt-5.5', provider: 'custom:ai.warp2pans.online' },
-      providers: {
-        'ai.warp2pans.online': {
-          name: 'Ai.warp2pans.online',
-          api: 'https://ai.warp2pans.online/v1',
+      custom_providers: [
+        {
+          name: 'ai.warp2pans.online',
+          base_url: 'https://ai.warp2pans.online/v1',
           api_key: 'key',
-          default_model: 'gpt-5.5',
-          models: ['gpt-5.5'],
+          model: 'gpt-5.5',
         },
-      },
+      ],
     }), 'utf-8')
     await writeFile(join(hermesHome, 'auth.json'), JSON.stringify({
       credential_pool: {

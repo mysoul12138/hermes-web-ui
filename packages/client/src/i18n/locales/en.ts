@@ -620,6 +620,8 @@ export default {
     unexpectedFormat: 'Unexpected response format',
     foundModels: 'Found {count} models',
     fetchFailed: 'Failed to fetch models',
+    clearVisibleModels: 'Show all models',
+    getApiKey: 'Get API Key',
   },
 
   // Profiles
@@ -1165,6 +1167,16 @@ export default {
 
   // Changelog
   changelog: {
+    new_0_5_22_1: 'Add MiMo TTS provider, proxy provider model fetches, Windows media path support, and mobile terminal fixes',
+    new_0_5_18_1: 'Add group chat room reset and clone',
+    new_0_5_18_2: 'Make web UI state directory configurable',
+    new_0_5_18_3: 'Add locked file updates for concurrent config writes',
+    new_0_5_18_4: 'Add QQBot and DingTalk channel settings',
+    new_0_5_18_5: 'Proxy provider model fetches through the server',
+    new_0_5_18_6: 'Support Windows markdown media paths',
+    new_0_5_18_7: 'Clarify Windows media path prompt',
+    new_0_5_18_8: 'Fix mobile terminal drawer sizing',
+    new_0_5_18_9: 'Fix session reset mode options',
     new_0_5_14_1: 'Add session export with full and compressed modes (JSON or plain text)',
     new_0_5_14_2: 'Fix terminal panel connecting on mount causing PTY resource exhaustion, switch to lazy connect',
     new_0_5_14_3: 'Fix WSL2 health check failure caused by IPv6 dual-stack binding',

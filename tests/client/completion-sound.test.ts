@@ -67,15 +67,23 @@ describe('completion sound', () => {
   })
 
   it('plays a short tone through Web Audio', async () => {
-    const { context, oscillator, gain } = installMockAudioContext('running')
+    const { context } = installMockAudioContext('running')
+    // Mock fetch + decodeAudioData so ensureLoaded succeeds
+    const mockBuffer = { duration: 0.5, numberOfChannels: 1, sampleRate: 44100 }
+    context.decodeAudioData = vi.fn().mockResolvedValue(mockBuffer)
+    context.createBufferSource = vi.fn(() => ({
+      buffer: null,
+      connect: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+    }))
 
     await expect(playCompletionSound()).resolves.toBe(true)
 
-    expect(context.createOscillator).toHaveBeenCalledTimes(1)
-    expect(context.createGain).toHaveBeenCalledTimes(1)
-    expect(oscillator.connect).toHaveBeenCalledWith(gain)
-    expect(gain.connect).toHaveBeenCalledWith(context.destination)
-    expect(oscillator.start).toHaveBeenCalledWith(10)
-    expect(oscillator.stop).toHaveBeenCalledWith(10.16)
+    expect(context.createBufferSource).toHaveBeenCalledTimes(1)
   })
 })

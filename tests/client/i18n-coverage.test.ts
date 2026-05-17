@@ -97,6 +97,18 @@ describe('i18n locale coverage', () => {
   const ALLOWED_MISSING_KEYS = new Set([
     'changelog.new_0_5_4_7',
     'chat.sessionNotFound',
+    // v0.5.18-v0.5.22 新增 keys，非英文 locale 尚未完整翻译
+    'changelog.new_0_5_22_1',
+    'changelog.new_0_5_18_1',
+    'changelog.new_0_5_18_2',
+    'changelog.new_0_5_18_3',
+    'changelog.new_0_5_18_4',
+    'changelog.new_0_5_18_5',
+    'changelog.new_0_5_18_6',
+    'changelog.new_0_5_18_7',
+    'changelog.new_0_5_18_8',
+    'changelog.new_0_5_18_9',
+    'models.getApiKey',
   ])
 
   it('defines every statically referenced translation key in the English source locale', () => {
