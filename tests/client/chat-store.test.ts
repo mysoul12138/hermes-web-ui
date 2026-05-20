@@ -101,6 +101,7 @@ const branchSessionMetaKey = `hermes_branch_session_meta_v1_${PROFILE}`
 const sessionModelOverrideKey = (sessionId: string) => `hermes_session_model_override_v1_${PROFILE}_${sessionId}`
 const sessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${PROFILE}_${sessionId}_`
 const inFlightKey = (sessionId: string) => `hermes_in_flight_v1_${PROFILE}_${sessionId}`
+const steerHistoryKey = (sessionId: string) => `hermes_steer_history_v1_${PROFILE}_${sessionId}`
 const legacySessionMessagesKey = (sessionId: string) => `hermes_session_msgs_v1_${sessionId}`
 
 describe('Chat Store', () => {
@@ -454,6 +455,143 @@ describe('Chat Store', () => {
       'hello from bridge',
       'streamed answer',
     ])
+  })
+
+  it('collapses the temporary bridge session into the persistent TUI session when resolved', async () => {
+    const webSessionId = 'mpebd2z90948mp'
+    const persistentSessionId = '20260521_010637_f388c9'
+
+    mockChatApi.startRun.mockResolvedValueOnce({
+      run_id: 'bridge-run-resolved-session',
+      status: 'queued',
+      bridge: true,
+      session_id: undefined,
+    })
+
+    const store = useChatStore()
+    store.sessions = [{
+      id: webSessionId,
+      title: 'Running bridge',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'same content', timestamp: 1 }],
+      createdAt: 1,
+      updatedAt: 1,
+    }]
+    store.activeSessionId = webSessionId
+    store.activeSession = store.sessions[0]
+
+    await store.sendMessage('same content')
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    onEvent({
+      event: 'session.resolved',
+      web_session_id: webSessionId,
+      persistent_session_id: persistentSessionId,
+      session_id: persistentSessionId,
+    })
+
+    expect(store.activeSessionId).toBe(persistentSessionId)
+    expect(store.sessions.map(session => session.id)).toEqual([persistentSessionId])
+    expect(store.messages.map(message => message.content)).toContain('same content')
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      ...makeSummary(persistentSessionId, 'Resolved session'),
+      source: 'tui',
+      represented_session_ids: [persistentSessionId, webSessionId],
+    }])
+    mockSessionsApi.fetchHermesSessions.mockResolvedValue([
+      { ...makeSummary(persistentSessionId, 'Resolved session'), source: 'tui' },
+    ])
+
+    await store.loadSessions()
+
+    expect(store.sessions.map(session => session.id)).toEqual([persistentSessionId])
+    expect(store.activeSessionId).toBe(persistentSessionId)
+  })
+
+  it('carries steer history from a temporary bridge session to the resolved persistent TUI session', async () => {
+    const webSessionId = 'mpe-steer-temp'
+    const persistentSessionId = '20260521_231218_46312e'
+
+    mockChatApi.startRun.mockResolvedValueOnce({
+      run_id: 'bridge-run-resolved-steer',
+      status: 'queued',
+      bridge: true,
+      session_id: undefined,
+    })
+
+    const store = useChatStore()
+    store.sessions = [{
+      id: webSessionId,
+      title: 'Running bridge',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010000 }],
+      createdAt: 1710000010000,
+      updatedAt: 1710000010000,
+    }]
+    store.activeSessionId = webSessionId
+    store.activeSession = store.sessions[0]
+
+    await store.sendMessage('start task')
+    await store.sendMessage('/steer 收到停止')
+    await flushPromises()
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    onEvent({
+      event: 'session.resolved',
+      web_session_id: webSessionId,
+      persistent_session_id: persistentSessionId,
+      session_id: persistentSessionId,
+    })
+
+    const persistentSteerHistory = JSON.parse(window.localStorage.getItem(steerHistoryKey(persistentSessionId)) || '[]')
+    expect(persistentSteerHistory).toEqual([
+      expect.objectContaining({ content: '收到停止' }),
+    ])
+
+    setActivePinia(createPinia())
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, persistentSessionId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: persistentSessionId,
+      title: 'Resolved steer',
+      source: 'tui',
+      messages: [],
+      createdAt: 1710000010000,
+      updatedAt: 1710000012000,
+    }]))
+    window.localStorage.removeItem(sessionMessagesKey(persistentSessionId))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      ...makeSummary(persistentSessionId, 'Resolved steer'),
+      source: 'tui',
+    }])
+    mockSessionsApi.fetchHermesSessions.mockResolvedValue([{
+      ...makeSummary(persistentSessionId, 'Resolved steer'),
+      source: 'tui',
+    }])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: persistentSessionId,
+      source: 'tui',
+      title: 'Resolved steer',
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010 },
+        { id: 'server-steer', role: 'user', content: '收到停止', timestamp: Date.now() / 1000 },
+      ],
+    } as any)
+
+    const reloadedStore = useChatStore()
+    await reloadedStore.loadSessions()
+    await reloadedStore.switchSession(persistentSessionId)
+    await flushPromises()
+
+    expect(reloadedStore.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'server-steer',
+          role: 'user',
+          content: '收到停止',
+          steered: true,
+        }),
+      ]),
+    )
   })
 
   it('cancels a slow-start run when stop is clicked before the run id arrives', async () => {
@@ -1952,6 +2090,57 @@ describe('Chat Store', () => {
     expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction while recovering')
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('does not treat a persisted steer bubble as an active run after refresh', async () => {
+    const sid = 'steer-ended-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Ended steer',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010000 },
+        { id: 'a1', role: 'assistant', content: 'done', timestamp: 1710000011000 },
+        { id: 'local-steer', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000012000,
+      endedAt: 1710000013000,
+    }]))
+    window.localStorage.setItem(steerHistoryKey(sid), JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000, previousMessageId: 'a1' },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(sid, 'Ended steer'), source: 'tui', ended_at: 1710000013 },
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Ended steer',
+      ended_at: 1710000013,
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010 },
+        { id: 'a1', role: 'assistant', content: 'done', timestamp: 1710000011 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.isRunActive).toBe(false)
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'local-steer',
+          role: 'user',
+          content: '收到停止',
+          steered: true,
+        }),
+      ]),
+    )
+    expect(mockChatApi.streamRunEvents).not.toHaveBeenCalled()
   })
 
   it('coalesces rapid stream deltas before updating the active message', async () => {

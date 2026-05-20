@@ -343,6 +343,9 @@ function appendSteerHistory(
 ) {
   return _appendSteerHistory(getProfileName(), sid, content, timestamp, anchors)
 }
+function writeSteerHistory(sid: string, entries: SteerHistoryEntry[]) {
+  saveJson(_steerHistoryKey(getProfileName(), sid), entries)
+}
 function saveJson(key: string, value: unknown) { _saveJson(key, value) }
 function saveJsonWithLegacy(key: string, value: unknown, legacyKey?: string | null) { _saveJsonWithLegacy(key, value, legacyKey) }
 function removeItem(key: string) { _removeItem(key) }
@@ -1301,6 +1304,7 @@ export const useChatStore = defineStore('chat', () => {
   function bindResolvedBridgeSession(webSessionId: string, persistentSessionId?: string | null) {
     const persistent = persistentSessionId?.trim()
     if (!webSessionId || !persistent || persistent === webSessionId) return
+    const wasActiveWebSession = activeSessionId.value === webSessionId
     markBridgeLocalSession(webSessionId, persistent)
     const webSession = sessions.value.find(session => session.id === webSessionId)
     let persistentSession = sessions.value.find(session => session.id === persistent)
@@ -1316,6 +1320,12 @@ export const useChatStore = defineStore('chat', () => {
       if (webSession.messages.length > 0) persistentSession.messages = webSession.messages
       persistentSession.updatedAt = Math.max(persistentSession.updatedAt || 0, webSession.updatedAt || 0)
       if (!persistentSession.title && webSession.title) persistentSession.title = webSession.title
+      persistentSession.representedSessionIds = Array.from(new Set([
+        ...(persistentSession.representedSessionIds || [persistentSession.id]),
+        ...(webSession.representedSessionIds || [webSession.id]),
+        webSessionId,
+        persistent,
+      ]))
     }
     if (webSession) {
       const rootId = rootSessionIdFor(webSessionId)
@@ -1327,8 +1337,36 @@ export const useChatStore = defineStore('chat', () => {
     if (inFlight && !readInFlight(persistent)) {
       markInFlight(persistent, inFlight.runId)
     }
-    if (activeSessionId.value === persistent && webSession?.messages.length) {
-      activeSession.value = persistentSession || webSession
+    const webSteerHistory = readSteerHistory(webSessionId)
+    if (webSteerHistory.length) {
+      const persistentSteerHistory = readSteerHistory(persistent)
+      const existingKeys = new Set(persistentSteerHistory.map(entry =>
+        `${entry.content.trim()}\u0000${entry.timestamp || 0}\u0000${entry.previousMessageId || ''}\u0000${entry.nextMessageId || ''}`,
+      ))
+      const mergedSteerHistory = [
+        ...persistentSteerHistory,
+        ...webSteerHistory.filter(entry => {
+          const key = `${entry.content.trim()}\u0000${entry.timestamp || 0}\u0000${entry.previousMessageId || ''}\u0000${entry.nextMessageId || ''}`
+          if (existingKeys.has(key)) return false
+          existingKeys.add(key)
+          return true
+        }),
+      ].slice(-50)
+      writeSteerHistory(persistent, mergedSteerHistory)
+    }
+    const shouldCollapseWebSession = !isPersistentTuiSessionId(webSessionId)
+    if (persistentSession && shouldCollapseWebSession) {
+      sessions.value = sessions.value.filter(session => session.id !== webSessionId)
+      if (webSession?.messages.length) {
+        saveJsonWithLegacy(msgsCacheKey(persistent), sanitizeForCache(webSession.messages), legacyMsgsCacheKey(persistent))
+      }
+    }
+    if ((wasActiveWebSession || activeSessionId.value === persistent) && persistentSession && shouldCollapseWebSession) {
+      activeSessionId.value = persistent
+      activeSession.value = persistentSession
+      setItemBestEffort(storageKey(), persistent)
+    } else if (activeSessionId.value === persistent && persistentSession) {
+      activeSession.value = persistentSession
     }
     persistSessionsList()
   }
@@ -1757,10 +1795,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       const isLocalRunActive = (sid: string) =>
         streamStates.value.has(sid) || pendingRunStarts.value.has(sid) || resumingRuns.value.has(sid) || !!readInFlight(sid)
-      const fresh = freshRaw.filter(s => {
-        const localBridge = bridgeLocalByPersistent.get(s.id)
-        return !(localBridge && isLocalRunActive(localBridge.id))
-      })
+      const fresh = freshRaw
       const logicalSeen = new Set<string>()
       const dedupedFresh = fresh.filter(session => {
         const represented = session.representedSessionIds?.length ? session.representedSessionIds : [session.id]
@@ -1834,7 +1869,6 @@ export const useChatStore = defineStore('chat', () => {
         const persistentId = readBridgeBackingSessionId(s.id)
         if (persistentId && freshRawIds.has(persistentId)) {
           if (isPersistentTuiSessionId(s.id) && persistentId !== s.id) return true
-          if (isLocalRunActive(s.id)) return true
           if (activeSessionId.value === s.id) {
             activeSessionId.value = persistentId
             setItemBestEffort(storageKey(), persistentId)
@@ -1867,7 +1901,12 @@ export const useChatStore = defineStore('chat', () => {
       logSessionLoad('local-only', {
         localOnlyIds: localOnly.map(session => session.id),
       })
-      sessions.value = [...localOnly, ...visibleFresh]
+      const localOnlyBackings = new Set<string>()
+      for (const session of localOnly) {
+        const backingId = readBridgeBackingSessionId(session.id)
+        if (backingId && backingId !== session.id && isPersistentTuiSessionId(session.id)) localOnlyBackings.add(backingId)
+      }
+      sessions.value = [...localOnly, ...visibleFresh.filter(session => !localOnlyBackings.has(session.id))]
       logTitleSnapshot('loadSessions.after-rebuild', {
         sessions: sessions.value.slice(0, 30).map(session => ({
           id: session.id,
@@ -2056,11 +2095,13 @@ export const useChatStore = defineStore('chat', () => {
     const pendingStreamDeltas = new Map<string, { content: string; reasoning: string }>()
     let runProducedAssistantText = false
     let runHadToolActivity = false
+    let resolvedStreamSessionId: string | null = null
+    const runSid = () => resolvedStreamSessionId || sid
     const schedulePersist = () => {
       if (persistTimer) return
       persistTimer = setTimeout(() => {
         persistTimer = null
-        persistSessionMessages(sid)
+        persistSessionMessages(runSid())
         persistSessionsList()
       }, 800)
     }
@@ -2073,7 +2114,8 @@ export const useChatStore = defineStore('chat', () => {
       if (pendingStreamDeltas.size === 0) return
       const pending = Array.from(pendingStreamDeltas.entries())
       pendingStreamDeltas.clear()
-      const msgs = getSessionMsgs(sid)
+      const targetSid = runSid()
+      const msgs = getSessionMsgs(targetSid)
       for (const [messageId, delta] of pending) {
         const message = msgs.find(m => m.id === messageId)
         if (!message) continue
@@ -2089,7 +2131,7 @@ export const useChatStore = defineStore('chat', () => {
           update.reasoning = (message.reasoning || '') + delta.reasoning
           noteReasoningStart(messageId)
         }
-        if (Object.keys(update).length > 0) updateMessage(sid, messageId, update)
+        if (Object.keys(update).length > 0) updateMessage(targetSid, messageId, update)
       }
       schedulePersist()
     }
@@ -2116,39 +2158,42 @@ export const useChatStore = defineStore('chat', () => {
 
     const eventState = { runProducedAssistantText: false, runHadToolActivity: false }
     const streamCallbacks: RunStreamCallbacks = {
-      getMessages: () => getSessionMsgs(sid),
-      addMessage: (msg) => addMessage(sid, msg),
-      updateMessage: (id, update) => updateMessage(sid, id, update),
+      getMessages: () => getSessionMsgs(runSid()),
+      addMessage: (msg) => addMessage(runSid(), msg),
+      updateMessage: (id, update) => updateMessage(runSid(), id, update),
       uid,
-      setCompressionState: (data) => setCompressionState(sid, data),
-      clearCompression: () => clearCompressionForSession(sid),
+      setCompressionState: (data) => setCompressionState(runSid(), data),
+      clearCompression: () => clearCompressionForSession(runSid()),
       upsertSubagentBranch: (evt) => upsertSubagentBranch(sid, evt),
       setApprovalPending: (evt) => {
-        setApprovalPending(sid, {
+        const targetSid = runSid()
+        setApprovalPending(targetSid, {
           approval_id: evt.approval_id,
           description: evt.description,
           command: evt.command,
           pattern_key: evt.pattern_key,
           pattern_keys: evt.pattern_keys,
-          _session_id: sid,
+          _session_id: targetSid,
         }, evt.pending_count || 1)
       },
-      startApprovalPolling: () => startApprovalPolling(sid),
+      startApprovalPolling: () => startApprovalPolling(runSid()),
       setClarifyPending: (evt) => {
-        setClarifyPending(sid, {
+        const targetSid = runSid()
+        setClarifyPending(targetSid, {
           request_id: typeof evt.request_id === 'string' ? evt.request_id : '',
           question: typeof evt.question === 'string' ? evt.question : '',
           choices: Array.isArray(evt.choices) ? evt.choices.map(String) : [],
           requested_at: typeof evt.timestamp === 'number' ? evt.timestamp : undefined,
-          _session_id: sid,
+          _session_id: targetSid,
         })
       },
-      startClarifyPolling: () => startClarifyPolling(sid),
+      startClarifyPolling: () => startClarifyPolling(runSid()),
       clearApproval: () => {
-        if (approvalsBySession.value[sid]?.pending?._optimistic) clearApproval(sid)
+        const targetSid = runSid()
+        if (approvalsBySession.value[targetSid]?.pending?._optimistic) clearApproval(targetSid)
       },
       applySessionUsage: (usage) => {
-        const target = sessions.value.find(s => s.id === sid)
+        const target = sessions.value.find(s => s.id === runSid())
         applySessionUsage(target, usage, { allowReset: true })
       },
       persistSessionsList: () => persistSessionsList(),
@@ -2173,6 +2218,9 @@ export const useChatStore = defineStore('chat', () => {
               ? evt.session_id.trim()
               : ''
           bindResolvedBridgeSession(webSessionId, persistentSessionId)
+          if (persistentSessionId && !isPersistentTuiSessionId(webSessionId)) {
+            resolvedStreamSessionId = persistentSessionId
+          }
           return
         }
 
@@ -2180,18 +2228,19 @@ export const useChatStore = defineStore('chat', () => {
         if (evt.event === 'run.completed') {
           runProducedAssistantText = eventState.runProducedAssistantText
           runHadToolActivity = eventState.runHadToolActivity
-          const msgs = getSessionMsgs(sid)
+          const targetSid = runSid()
+          const msgs = getSessionMsgs(targetSid)
           const lastMsg = msgs[msgs.length - 1]
           if (lastMsg?.isStreaming) {
-            updateMessage(sid, lastMsg.id, { isStreaming: false })
+            updateMessage(targetSid, lastMsg.id, { isStreaming: false })
           }
-          const target = sessions.value.find(s => s.id === sid)
+          const target = sessions.value.find(s => s.id === targetSid)
           applySessionUsage(target, usageFromRunEvent(evt))
           const finalOutput = typeof evt.output === 'string' ? evt.output : ''
           const eventOutput = finalOutput || textFromRunEvent(evt)
           const eventOutputTrimmed = eventOutput.trim()
           if (!runProducedAssistantText && eventOutputTrimmed !== '') {
-            addMessage(sid, {
+            addMessage(targetSid, {
               id: uid(),
               role: 'assistant',
               content: eventOutput,
@@ -2201,7 +2250,7 @@ export const useChatStore = defineStore('chat', () => {
           }
           const swallowedError = !runProducedAssistantText && !runHadToolActivity && eventOutputTrimmed === ''
           if (swallowedError) {
-            addMessage(sid, {
+            addMessage(targetSid, {
               id: uid(),
               role: 'system',
               content: 'Error: Agent returned no output. The model call may have failed (e.g. invalid API key, model not supported by provider, or context exceeded). Check the hermes-agent logs for details.',
@@ -2209,7 +2258,7 @@ export const useChatStore = defineStore('chat', () => {
             })
           }
           if (autoPlaySpeechEnabled.value) {
-            const lastAssistant = [...getSessionMsgs(sid)].reverse().find(m => m.role === 'assistant')
+            const lastAssistant = [...getSessionMsgs(targetSid)].reverse().find(m => m.role === 'assistant')
             if (lastAssistant?.content) {
               window.setTimeout(() => {
                 playMessageSpeech(lastAssistant.id, lastAssistant.content)
@@ -2219,30 +2268,32 @@ export const useChatStore = defineStore('chat', () => {
           playCompletionBellIfEnabled()
           finishLiveSubagentBranches(sid, 'complete')
           cleanup()
-          updateSessionTitle(sid)
-          persistSessionMessages(sid)
+          updateSessionTitle(targetSid)
+          persistSessionMessages(targetSid)
           persistSessionsList()
           clearInFlight(sid)
+          if (targetSid !== sid) clearInFlight(targetSid)
           stopPolling(sid)
           stopApprovalPolling(sid)
           stopClarifyPolling(sid)
           clearApproval(sid)
           clearClarify(sid)
-          void refreshSessionAfterRunSettled(sid)
+          void refreshSessionAfterRunSettled(targetSid)
           return
         }
 
         if (evt.event === 'run.failed') {
-          const msgs = getSessionMsgs(sid)
+          const targetSid = runSid()
+          const msgs = getSessionMsgs(targetSid)
           const lastErr = msgs[msgs.length - 1]
           if (lastErr?.isStreaming) {
-            updateMessage(sid, lastErr.id, {
+            updateMessage(targetSid, lastErr.id, {
               isStreaming: false,
               content: evt.error ? `Error: ${evt.error}` : 'Run failed',
               role: 'system',
             })
           } else {
-            addMessage(sid, {
+            addMessage(targetSid, {
               id: uid(),
               role: 'system',
               content: evt.error ? `Error: ${evt.error}` : 'Run failed',
@@ -2254,14 +2305,15 @@ export const useChatStore = defineStore('chat', () => {
               msgs[i] = { ...m, toolStatus: 'error' }
             }
           })
-          if (approvalsBySession.value[sid]?.pending?._optimistic) {
-            clearApproval(sid)
+          if (approvalsBySession.value[targetSid]?.pending?._optimistic) {
+            clearApproval(targetSid)
           }
           finishLiveSubagentBranches(sid, 'error')
           cleanup()
-          persistSessionMessages(sid)
+          persistSessionMessages(targetSid)
           persistSessionsList()
           clearInFlight(sid)
+          if (targetSid !== sid) clearInFlight(targetSid)
           stopPolling(sid)
           stopApprovalPolling(sid)
           stopClarifyPolling(sid)
@@ -2274,30 +2326,33 @@ export const useChatStore = defineStore('chat', () => {
         processRunEvent(evt, streamCallbacks, eventState)
       },
       () => {
-        const msgs = getSessionMsgs(sid)
+        const targetSid = runSid()
+        const msgs = getSessionMsgs(targetSid)
         const last = msgs[msgs.length - 1]
         if (last?.isStreaming) {
-          updateMessage(sid, last.id, { isStreaming: false })
+          updateMessage(targetSid, last.id, { isStreaming: false })
         }
         finishLiveSubagentBranches(sid, 'complete')
         cleanup()
-        updateSessionTitle(sid)
+        updateSessionTitle(targetSid)
         clearInFlight(sid)
+        if (targetSid !== sid) clearInFlight(targetSid)
         stopPolling(sid)
         stopApprovalPolling(sid)
         stopClarifyPolling(sid)
         clearApproval(sid)
         clearClarify(sid)
-        persistSessionMessages(sid)
+        persistSessionMessages(targetSid)
         persistSessionsList()
-        void submitNextQueuedMessage(sid)
+        void submitNextQueuedMessage(targetSid)
       },
       (err) => {
         console.warn('SSE connection dropped, resyncing from server:', err.message)
-        const msgs = getSessionMsgs(sid)
+        const targetSid = runSid()
+        const msgs = getSessionMsgs(targetSid)
         const last = msgs[msgs.length - 1]
         if (last?.isStreaming) {
-          updateMessage(sid, last.id, { isStreaming: false })
+          updateMessage(targetSid, last.id, { isStreaming: false })
         }
         msgs.forEach((m, i) => {
           if (m.role === 'tool' && m.toolStatus === 'running') {
@@ -2305,10 +2360,10 @@ export const useChatStore = defineStore('chat', () => {
           }
         })
         cleanup()
-        if (sid === activeSessionId.value) {
+        if (targetSid === activeSessionId.value || sid === activeSessionId.value) {
           void refreshActiveSession()
         }
-        persistSessionMessages(sid)
+        persistSessionMessages(targetSid)
         persistSessionsList()
         if (readInFlight(sid)) {
           startPolling(sid)
