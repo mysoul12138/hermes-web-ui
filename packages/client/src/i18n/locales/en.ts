@@ -621,7 +621,7 @@ export default {
     unexpectedFormat: 'Unexpected response format',
     foundModels: 'Found {count} models',
     fetchFailed: 'Failed to fetch models',
-    clearVisibleModels: 'Show all models',
+    clearVisibleModels: 'Deselect all',
     getApiKey: 'Get API Key',
   },
 

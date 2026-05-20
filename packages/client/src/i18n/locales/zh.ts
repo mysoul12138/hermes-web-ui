@@ -621,7 +621,7 @@ export default {
     unexpectedFormat: '响应格式异常',
     foundModels: '找到 {count} 个模型',
     fetchFailed: '获取模型失败',
-    clearVisibleModels: '显示全部模型',
+    clearVisibleModels: '取消全选',
     getApiKey: '获取 API Key',
   },
 
