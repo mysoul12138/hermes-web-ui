@@ -3,6 +3,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton } from 'naive-ui'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
+import { buildMentionOptions } from './mention-options'
 
 const { t } = useI18n()
 const emit = defineEmits<{ send: [content: string] }>()
@@ -53,10 +54,7 @@ const dropdownBottom = ref(0)
 const placement = ref<'bottom' | 'top'>('bottom')
 const activeIndex = ref(0)
 
-const filteredAgents = computed(() => {
-    const query = mentionQuery.value.toLowerCase()
-    return store.agents.filter(a => a.name.toLowerCase().includes(query))
-})
+const filteredMentionOptions = computed(() => buildMentionOptions(store.agents, mentionQuery.value))
 
 const canSend = computed(() => !!inputText.value.trim())
 
@@ -125,7 +123,7 @@ function updateMentionState() {
     dropdownX.value = rect.left + mirrorRect.width - el.scrollLeft
 
     // Decide placement: if dropdown would go below viewport, flip upward
-    const estimatedHeight = Math.min(filteredAgents.value.length * 36 + 8, 240)
+    const estimatedHeight = Math.min(filteredMentionOptions.value.length * 36 + 8, 240)
     const spaceBelow = window.innerHeight - rect.top + el.scrollTop - 8
     if (spaceBelow < estimatedHeight && rect.top - el.scrollTop - 8 > estimatedHeight) {
         placement.value = 'top'
@@ -137,7 +135,7 @@ function updateMentionState() {
 
     dropdownBottom.value = window.innerHeight - dropdownY.value
 
-    mentionActive.value = filteredAgents.value.length > 0
+    mentionActive.value = filteredMentionOptions.value.length > 0
 }
 
 function selectMention(name: string) {
@@ -166,22 +164,22 @@ function selectMention(name: string) {
 
 function handleKeydown(e: KeyboardEvent) {
     // Mention navigation — fully custom, no NDropdown interference
-    if (mentionActive.value && filteredAgents.value.length > 0) {
+    if (mentionActive.value && filteredMentionOptions.value.length > 0) {
         if (e.key === 'ArrowDown') {
             e.preventDefault()
-            activeIndex.value = (activeIndex.value + 1) % filteredAgents.value.length
+            activeIndex.value = (activeIndex.value + 1) % filteredMentionOptions.value.length
             scrollToActive()
             return
         }
         if (e.key === 'ArrowUp') {
             e.preventDefault()
-            activeIndex.value = (activeIndex.value - 1 + filteredAgents.value.length) % filteredAgents.value.length
+            activeIndex.value = (activeIndex.value - 1 + filteredMentionOptions.value.length) % filteredMentionOptions.value.length
             scrollToActive()
             return
         }
         if (e.key === 'Enter' || e.key === 'Tab') {
             e.preventDefault()
-            selectMention(filteredAgents.value[activeIndex.value].name)
+            selectMention(filteredMentionOptions.value[activeIndex.value].name)
             return
         }
         if (e.key === 'Escape') {
@@ -290,7 +288,7 @@ function handleCompositionEnd() {
         </div>
         <Transition name="dropdown-fade">
             <div
-                v-if="mentionActive && filteredAgents.length > 0"
+                v-if="mentionActive && filteredMentionOptions.length > 0"
                 ref="dropdownRef"
                 class="mention-dropdown"
                 :class="{ 'placement-top': placement === 'top' }"
@@ -301,15 +299,15 @@ function handleCompositionEnd() {
                 }"
             >
                 <div
-                    v-for="(agent, i) in filteredAgents"
-                    :key="agent.name"
+                    v-for="(option, i) in filteredMentionOptions"
+                    :key="option.key"
                     class="mention-dropdown-item"
-                    :class="{ active: i === activeIndex }"
-                    @mousedown.prevent="handleMentionClick(agent.name)"
+                    :class="{ active: i === activeIndex, 'mention-all-option': option.type === 'all' }"
+                    @mousedown.prevent="handleMentionClick(option.name)"
                     @mouseenter="handleMentionHover(i)"
                 >
-                    <span class="mention-name">@{{ agent.name }}</span>
-                    <span class="mention-profile">{{ agent.profile }}</span>
+                    <span class="mention-name">{{ option.label }}</span>
+                    <span class="mention-profile">{{ option.description }}</span>
                 </div>
             </div>
         </Transition>

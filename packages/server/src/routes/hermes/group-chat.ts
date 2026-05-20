@@ -1,6 +1,7 @@
 import Router from '@koa/router'
 import type { Context } from 'koa'
 import type { GroupChatServer } from '../../services/hermes/group-chat'
+import { isReservedMentionName } from '../../services/hermes/group-chat/mention-routing'
 
 export const groupChatRoutes = new Router()
 
@@ -44,6 +45,12 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms', async (ctx: Context) => {
     if (!name || !inviteCode) {
         ctx.status = 400
         ctx.body = { error: 'name and inviteCode are required' }
+        return
+    }
+    const reservedAgent = (agents || []).find(a => isReservedMentionName(a.name || a.profile))
+    if (reservedAgent) {
+        ctx.status = 400
+        ctx.body = { error: '`all` is reserved for @all mentions' }
         return
     }
 
@@ -212,6 +219,11 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms/:roomId/agents', async (ctx: 
     if (!profile) {
         ctx.status = 400
         ctx.body = { error: 'profile is required' }
+        return
+    }
+    if (isReservedMentionName(name || profile)) {
+        ctx.status = 400
+        ctx.body = { error: '`all` is reserved for @all mentions' }
         return
     }
 

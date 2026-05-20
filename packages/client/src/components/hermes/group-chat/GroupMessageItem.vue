@@ -31,7 +31,7 @@ const avatarSvg = computed(() => {
     return multiavatar(props.message.senderName || props.message.senderId)
 })
 
-const mentionNames = computed(() => props.agents.map(a => a.name).filter(Boolean))
+const mentionNames = computed(() => ['all', ...props.agents.map(a => a.name).filter(Boolean)])
 </script>
 
 <template>

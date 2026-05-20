@@ -7,6 +7,7 @@ import { getActiveProfileName } from '../hermes-profile'
 import { logger } from '../../../services/logger'
 import { updateUsage } from '../../../db/hermes/usage-store'
 import { getSessionDetailFromDbWithProfile } from '../../../db/hermes/sessions-db'
+import { resolveMentionTargets, stripMentionRoutingTokens } from './mention-routing'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -288,8 +289,8 @@ class AgentClient {
                 }
             }
 
-            // Strip @mention from input — agent already knows it was mentioned
-            const input = msg.content.replace(new RegExp(`@${this.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'gi'), '').trim() || msg.content
+            // Strip routing mentions from input — agent already knows it was mentioned
+            const input = stripMentionRoutingTokens(msg.content, this.name) || msg.content
             // Start a run on Hermes gateway
             const runRes = await fetch(`${upstream}/v1/runs`, {
                 method: 'POST',
@@ -644,10 +645,9 @@ export class AgentClients {
     async processMentions(roomId: string, msg: { content: string; senderName: string; senderId: string; timestamp: number }): Promise<void> {
         if (!this._gatewayManager) return
 
-        const content = msg.content.toLowerCase()
         const agents = this.getAgents(roomId)
 
-        const mentioned = agents.filter(a => content.includes(`@${a.name.toLowerCase()}`))
+        const mentioned = resolveMentionTargets(agents, msg.content, msg.senderId)
         if (mentioned.length === 0) return
 
         logger.debug(`[AgentClients] ${mentioned.map(a => a.name).join(', ')} mentioned by ${msg.senderName}`)
