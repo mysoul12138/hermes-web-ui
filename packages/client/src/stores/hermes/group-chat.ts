@@ -22,6 +22,31 @@ import {
     clearRoomContext,
 } from '@/api/hermes/group-chat'
 
+const STREAM_FINAL_CONTENT_RECOVERY_DELAY_MS = 300
+
+function hasText(value?: string | null): boolean {
+    return !!value?.trim()
+}
+
+function hasToolCalls(message: ChatMessage): boolean {
+    return !!message.tool_calls?.length
+}
+
+function needsFinalContentRecovery(message: ChatMessage): boolean {
+    return message.role === 'assistant' && !hasText(message.content) && hasText(message.reasoning) && !hasToolCalls(message)
+}
+
+function mergeFinalMessage(existing: ChatMessage | null, msg: ChatMessage): ChatMessage {
+    return {
+        ...msg,
+        content: hasText(msg.content) ? msg.content : existing?.content || msg.content || '',
+        reasoning: hasText(msg.reasoning) ? msg.reasoning : existing?.reasoning ?? msg.reasoning ?? null,
+        reasoning_content: hasText(msg.reasoning_content) ? msg.reasoning_content : existing?.reasoning_content ?? msg.reasoning_content ?? null,
+        isStreaming: false,
+        attachments: existing?.attachments || msg.attachments,
+    }
+}
+
 export const useGroupChatStore = defineStore('groupChat', () => {
     // ─── State ─────────────────────────────────────────────
     const connected = ref(false)
@@ -35,6 +60,31 @@ export const useGroupChatStore = defineStore('groupChat', () => {
     const error = ref<string | null>(null)
     const typingUsers = ref<Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>>(new Map())
     const contextStatuses = ref<Map<string, { agentName: string; status: string }>>(new Map())
+
+    async function recoverMissingFinalContent(roomId: string, messageId: string) {
+        if (currentRoomId.value !== roomId) return
+        const idx = messages.value.findIndex(m => m.id === messageId)
+        if (idx < 0 || !needsFinalContentRecovery(messages.value[idx])) return
+
+        try {
+            const res = await getRoomDetail(roomId)
+            const recovered = res.messages.find(m => m.id === messageId)
+            if (!recovered || !hasText(recovered.content)) return
+
+            const currentIdx = messages.value.findIndex(m => m.id === messageId)
+            if (currentIdx < 0 || !needsFinalContentRecovery(messages.value[currentIdx])) return
+            messages.value[currentIdx] = mergeFinalMessage(messages.value[currentIdx], recovered)
+            messages.value = [...messages.value]
+        } catch {
+            // Keep the reasoning-only bubble visible; a later final message event can still merge it.
+        }
+    }
+
+    function scheduleMissingFinalContentRecovery(roomId: string, messageId: string) {
+        setTimeout(() => {
+            void recoverMissingFinalContent(roomId, messageId)
+        }, STREAM_FINAL_CONTENT_RECOVERY_DELAY_MS)
+    }
 
     // Computed: returns first active status for backward compat
     const contextStatus = computed(() => {
@@ -94,7 +144,91 @@ export const useGroupChatStore = defineStore('groupChat', () => {
 
         socket.on('message', (msg: ChatMessage) => {
             if (msg.roomId === currentRoomId.value) {
+                const idx = messages.value.findIndex(m => m.id === msg.id)
+                const existing = idx >= 0 ? messages.value[idx] : null
+                const resolvedMsg = mergeFinalMessage(existing, msg)
+                if (idx >= 0) {
+                    messages.value[idx] = resolvedMsg
+                    messages.value = [...messages.value]
+                } else {
+                    messages.value.push(resolvedMsg)
+                }
+            }
+        })
+
+        socket.on('message_stream_start', (msg: ChatMessage) => {
+            if (msg.roomId !== currentRoomId.value) return
+            messages.value = messages.value.filter(m => !(
+                m.roomId === msg.roomId &&
+                m.senderId === msg.senderId &&
+                m.id !== msg.id &&
+                m.isStreaming &&
+                !m.content?.trim() &&
+                !m.reasoning?.trim() &&
+                !m.tool_calls?.length
+            ))
+            msg.isStreaming = true
+            const idx = messages.value.findIndex(m => m.id === msg.id)
+            if (idx >= 0) {
+                const existing = messages.value[idx]
+                if (!existing.isStreaming) return
+                messages.value[idx] = {
+                    ...existing,
+                    ...msg,
+                    content: hasText(msg.content) ? msg.content : existing.content || '',
+                    reasoning: hasText(msg.reasoning) ? msg.reasoning : existing.reasoning,
+                    reasoning_content: hasText(msg.reasoning_content) ? msg.reasoning_content : existing.reasoning_content,
+                    isStreaming: true,
+                }
+                messages.value = [...messages.value]
+            } else {
                 messages.value.push(msg)
+            }
+        })
+
+        socket.on('message_stream_delta', (data: { roomId: string; id: string; delta: string }) => {
+            if (data.roomId !== currentRoomId.value) return
+            const idx = messages.value.findIndex(m => m.id === data.id)
+            if (idx < 0 || !messages.value[idx].isStreaming) return
+            messages.value[idx] = {
+                ...messages.value[idx],
+                content: messages.value[idx].content + data.delta,
+            }
+            messages.value = [...messages.value]
+        })
+
+        socket.on('message_reasoning_delta', (data: { roomId: string; id: string; delta: string }) => {
+            if (data.roomId !== currentRoomId.value) return
+            const idx = messages.value.findIndex(m => m.id === data.id)
+            if (idx < 0 || !messages.value[idx].isStreaming) return
+            messages.value[idx] = {
+                ...messages.value[idx],
+                reasoning: (messages.value[idx].reasoning || '') + data.delta,
+                reasoning_content: (messages.value[idx].reasoning_content || '') + data.delta,
+                isStreaming: true,
+            }
+            messages.value = [...messages.value]
+        })
+
+        socket.on('message_stream_end', (data: { roomId: string; id: string }) => {
+            if (data.roomId !== currentRoomId.value) return
+            const idx = messages.value.findIndex(m => m.id === data.id)
+            if (
+                idx >= 0 &&
+                !messages.value[idx].content?.trim() &&
+                !messages.value[idx].reasoning?.trim() &&
+                !messages.value[idx].tool_calls?.length
+            ) {
+                messages.value.splice(idx, 1)
+            } else if (idx >= 0) {
+                messages.value[idx] = {
+                    ...messages.value[idx],
+                    isStreaming: false,
+                }
+                messages.value = [...messages.value]
+                if (needsFinalContentRecovery(messages.value[idx])) {
+                    scheduleMissingFinalContentRecovery(data.roomId, data.id)
+                }
             }
         })
 
