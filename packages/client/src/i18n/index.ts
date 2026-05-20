@@ -32,9 +32,23 @@ function resolveLocale(saved: string | null, detected: string[]): SupportedLocal
   return 'en'
 }
 
+function setHtmlLang(locale: SupportedLocale) {
+  document.documentElement.lang = locale
+}
+
+const locale = resolveLocale(saved, browserLanguages)
+setHtmlLang(locale)
+
 export const i18n = createI18n({
   legacy: false,
-  locale: resolveLocale(saved, browserLanguages),
+  locale,
   fallbackLocale: 'en',
   messages,
 })
+
+export function switchLocale(newLocale: string): void {
+  const locale = normalizeLocale(newLocale) || 'en'
+  ;(i18n.global.locale as any).value = locale
+  localStorage.setItem('hermes_locale', locale)
+  setHtmlLang(locale)
+}
