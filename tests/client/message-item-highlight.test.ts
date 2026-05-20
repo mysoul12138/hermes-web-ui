@@ -168,6 +168,24 @@ describe('MessageItem tool details', () => {
     expect(toolWrapper.find('.tool-status-badge').exists()).toBe(true)
   })
 
+  it('keeps the copy action rendered while timestamp remains a separate hover-only element', () => {
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-copy-meta',
+          role: 'assistant',
+          content: 'copyable content',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    const meta = wrapper.find('.message-meta-hover')
+    expect(meta.exists()).toBe(true)
+    expect(meta.find('.copy-bubble-btn').exists()).toBe(true)
+    expect(meta.find('.message-time').exists()).toBe(true)
+  })
+
   it('does not render a thinking block when reasoning duplicates assistant content', () => {
     const wrapper = mount(MessageItem, {
       props: {

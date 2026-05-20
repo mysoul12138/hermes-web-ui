@@ -1452,6 +1452,12 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: $text-muted;
   user-select: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+
+  .message:hover & {
+    opacity: 1;
+  }
 
   .dark & {
     color: #999999;
