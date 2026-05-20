@@ -67,6 +67,7 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms', async (ctx: Context) => {
 
         try {
             const client = await chatServer.agentClients.createAgent({
+                agentId: agent.agentId,
                 profile: agent.profile,
                 name: agent.name,
                 description: agent.description,
@@ -122,6 +123,7 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms/:roomId/clone', async (ctx) =
 
         try {
             const client = await chatServer.agentClients.createAgent({
+                agentId: agent.agentId,
                 profile: agent.profile,
                 name: agent.name,
                 description: agent.description,
@@ -241,6 +243,7 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms/:roomId/agents', async (ctx: 
     // Auto-connect agent via Socket.IO
     try {
         const client = await chatServer.agentClients.createAgent({
+            agentId: agent.agentId,
             profile: agent.profile,
             name: agent.name,
             description: agent.description,
@@ -274,9 +277,24 @@ groupChatRoutes.delete('/api/hermes/group-chat/rooms/:roomId/agents/:agentId', a
         return
     }
 
-    chatServer.getStorage().removeRoomAgent(ctx.params.agentId)
-    chatServer.agentClients.removeAgentFromRoom(ctx.params.roomId, ctx.params.agentId)
-    ctx.body = { success: true }
+    const roomId = ctx.params.roomId
+    const requestedAgentId = ctx.params.agentId
+    const storage = chatServer.getStorage()
+    const agent = storage.getRoomAgent(roomId, requestedAgentId)
+    if (!agent) {
+        ctx.status = 404
+        ctx.body = { error: 'Agent not found' }
+        return
+    }
+
+    storage.removeRoomMembersForAgent(roomId, agent)
+    storage.removeRoomAgent(roomId, requestedAgentId)
+    chatServer.agentClients.removeAgentFromRoom(roomId, agent.agentId)
+    ctx.body = {
+        success: true,
+        agents: storage.getRoomAgents(roomId),
+        members: storage.getRoomMembers(roomId),
+    }
 })
 
 // Delete room
