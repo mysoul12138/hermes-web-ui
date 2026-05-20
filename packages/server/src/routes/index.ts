@@ -24,6 +24,7 @@ import { gatewayRoutes } from './hermes/gateways'
 import { weixinRoutes } from './hermes/weixin'
 import { fileRoutes } from './hermes/files'
 import { downloadRoutes } from './hermes/download'
+import { mediaRoutes } from './hermes/media'
 import { jobRoutes } from './hermes/jobs'
 import { approvalRoutes } from './hermes/approval'
 import { clarifyRoutes } from './hermes/clarify'
@@ -69,6 +70,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(groupChatRoutes.routes())       // Must be before proxy
   app.use(fileRoutes.routes())              // Must be before proxy (proxy catch-all matches everything)
   app.use(downloadRoutes.routes())          // Must be before proxy
+  app.use(mediaRoutes.routes())             // Must be before proxy
   app.use(jobRoutes.routes())               // Must be before proxy
   app.use(approvalRoutes.routes())
   app.use(clarifyRoutes.routes())
