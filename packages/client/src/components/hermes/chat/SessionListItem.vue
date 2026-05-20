@@ -16,6 +16,7 @@ const props = defineProps<{
   streaming?: boolean
   selectable?: boolean
   selected?: boolean
+  displayModel?: string
 }>()
 
 const emit = defineEmits<{
@@ -122,7 +123,7 @@ onUnmounted(() => {
         </span>
       </span>
       <span class="session-item-meta">
-        <span v-if="session.model" class="session-item-model">{{ session.model }}</span>
+        <span v-if="displayModel || session.model" class="session-item-model">{{ displayModel || session.model }}</span>
         <span class="session-item-time">{{ formatTimestampMs(session.createdAt) }}</span>
       </span>
     </div>

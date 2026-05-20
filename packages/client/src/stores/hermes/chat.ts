@@ -407,7 +407,9 @@ export const useChatStore = defineStore('chat', () => {
     const sid = activeSessionId.value
     if (sid == null) return false
     if (activeSession.value?.endedAt != null) {
-      return streamStates.value.has(sid) || pendingRunStarts.value.has(sid) || resumingRuns.value.has(sid)
+      return candidateSessionIdsForRun(sid).some(candidateId =>
+        streamStates.value.has(candidateId) || pendingRunStarts.value.has(candidateId) || resumingRuns.value.has(candidateId),
+      )
     }
     return !!activeRunSessionId()
   })
@@ -1296,6 +1298,41 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function bindResolvedBridgeSession(webSessionId: string, persistentSessionId?: string | null) {
+    const persistent = persistentSessionId?.trim()
+    if (!webSessionId || !persistent || persistent === webSessionId) return
+    markBridgeLocalSession(webSessionId, persistent)
+    const webSession = sessions.value.find(session => session.id === webSessionId)
+    let persistentSession = sessions.value.find(session => session.id === persistent)
+    if (!persistentSession && webSession) {
+      persistentSession = {
+        ...webSession,
+        id: persistent,
+        representedSessionIds: Array.from(new Set([...(webSession.representedSessionIds || [webSession.id]), persistent])),
+      }
+      sessions.value.push(persistentSession)
+    }
+    if (webSession && persistentSession) {
+      if (webSession.messages.length > 0) persistentSession.messages = webSession.messages
+      persistentSession.updatedAt = Math.max(persistentSession.updatedAt || 0, webSession.updatedAt || 0)
+      if (!persistentSession.title && webSession.title) persistentSession.title = webSession.title
+    }
+    if (webSession) {
+      const rootId = rootSessionIdFor(webSessionId)
+      appendRepresentedSessionId(rootId, webSessionId)
+      appendRepresentedSessionId(rootId, persistent)
+      webSession.representedSessionIds = Array.from(new Set([...(webSession.representedSessionIds || [webSession.id]), persistent]))
+    }
+    const inFlight = readInFlight(webSessionId)
+    if (inFlight && !readInFlight(persistent)) {
+      markInFlight(persistent, inFlight.runId)
+    }
+    if (activeSessionId.value === persistent && webSession?.messages.length) {
+      activeSession.value = persistentSession || webSession
+    }
+    persistSessionsList()
+  }
+
   function clearCompressionNoticeTimer(sid: string) {
     const existing = compressionNoticeTimers.get(sid)
     if (!existing) return
@@ -1655,9 +1692,6 @@ export const useChatStore = defineStore('chat', () => {
       const representedIds = new Set<string>()
       for (const item of list) {
         for (const id of representedSessionIdsOf(item)) representedIds.add(id)
-      }
-      for (const session of sessions.value) {
-        for (const id of session.representedSessionIds || []) representedIds.add(id)
       }
 
       const supplementalCandidates = tuiRaw.filter(item => !representedIds.has(item.id))
@@ -2129,6 +2163,19 @@ export const useChatStore = defineStore('chat', () => {
     const ctrl = streamRunEvents(
       runId,
       (evt: RunEvent) => {
+        if (evt.event === 'session.resolved') {
+          const webSessionId = typeof evt.web_session_id === 'string' && evt.web_session_id.trim()
+            ? evt.web_session_id.trim()
+            : sid
+          const persistentSessionId = typeof evt.persistent_session_id === 'string' && evt.persistent_session_id.trim()
+            ? evt.persistent_session_id.trim()
+            : typeof evt.session_id === 'string'
+              ? evt.session_id.trim()
+              : ''
+          bindResolvedBridgeSession(webSessionId, persistentSessionId)
+          return
+        }
+
         // Handle run.completed and run.failed in the store (require extensive cleanup)
         if (evt.event === 'run.completed') {
           runProducedAssistantText = eventState.runProducedAssistantText
@@ -2309,6 +2356,11 @@ export const useChatStore = defineStore('chat', () => {
     setItemBestEffort(storageKey(), sessionId)
     const legacyActiveKey = legacyStorageKey()
     if (legacyActiveKey) removeItem(legacyActiveKey)
+    for (const session of sessions.value) {
+      if (readBridgeBackingSessionId(session.id) === sessionId) {
+        bindResolvedBridgeSession(session.id, sessionId)
+      }
+    }
     activeSession.value = sessions.value.find(s => s.id === sessionId) || null
     const targetSession = activeSession.value
     logActiveBinding('switchSession:set-active', {
@@ -2357,7 +2409,9 @@ export const useChatStore = defineStore('chat', () => {
         // queued user turns) and the server snapshot would clobber them.
         // The active SSE stream or polling will keep messages current.
         const switchingSessions = previousSessionId !== sessionId
-        const targetHasActiveStream = streamStates.value.has(sessionId) || resumingRuns.value.has(sessionId)
+        const targetHasActiveStream = candidateSessionIdsForRun(sessionId).some(candidateId =>
+          streamStates.value.has(candidateId) || resumingRuns.value.has(candidateId) || readInFlight(candidateId),
+        )
         const local = targetSession.messages
         if (targetHasActiveStream) {
           // Only merge tool detail enrichment from the server; never overwrite

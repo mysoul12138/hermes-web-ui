@@ -689,6 +689,29 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).closeRun(result.run_id)
   })
 
+  it('emits a session.resolved event when the persistent session id is discovered after startRun returns', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+    vi.spyOn(bridge as any, 'waitForNewPersistentSessionId').mockResolvedValueOnce(undefined)
+
+    const result = await bridge.startRun('current question', 'web-session-late-persistent', [])
+    await vi.advanceTimersByTimeAsync(600)
+
+    const events = (bridge as any).runs.get(result.run_id).events
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'session.resolved',
+        web_session_id: 'web-session-late-persistent',
+        session_id: 'persistent-session-1',
+        persistent_session_id: 'persistent-session-1',
+      }),
+    ]))
+    ;(bridge as any).closeRun(result.run_id)
+    vi.useRealTimers()
+  })
+
   it('keeps a stable logical lineage root across bridge context handoff continuations', async () => {
     closeDb()
     const runtimeDir = join(tmpdir(), `hermes-webui-lineage-${Date.now()}-${Math.random().toString(36).slice(2)}`)

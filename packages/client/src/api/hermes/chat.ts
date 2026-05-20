@@ -133,6 +133,10 @@ export interface RunEvent {
     total_tokens: number
     source?: string
   }
+  web_session_id?: string
+  session_id?: string
+  persistent_session_id?: string
+  bridge_session_id?: string
 }
 
 function emitParsedEvent(eventName: string, raw: string, onEvent: (event: RunEvent) => void) {
@@ -177,6 +181,7 @@ const NAMED_RUN_EVENTS = [
   'compression.started',
   'compression.completed',
   'run.started',
+  'session.resolved',
   'run.completed',
   'run.failed',
   'subagent.spawn_requested',

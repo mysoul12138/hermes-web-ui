@@ -102,6 +102,10 @@ export interface BridgeRunEvent {
     source?: string
   }
   usage_source?: string
+  web_session_id?: string
+  session_id?: string
+  persistent_session_id?: string
+  bridge_session_id?: string
 }
 
 interface PendingRpc {
@@ -986,6 +990,21 @@ export class TuiBridgeService {
     this.pendingPersistentResolutions.delete(webSessionId)
   }
 
+  private publishPersistentSessionResolution(webSessionId: string, persistentSessionId: string) {
+    for (const state of this.runs.values()) {
+      if (state.webSessionId !== webSessionId || state.closed) continue
+      this.push(state.runId, {
+        event: 'session.resolved',
+        run_id: state.runId,
+        timestamp: Date.now() / 1000,
+        web_session_id: webSessionId,
+        session_id: persistentSessionId,
+        persistent_session_id: persistentSessionId,
+        bridge_session_id: state.bridgeSessionId,
+      })
+    }
+  }
+
   private schedulePersistentSessionResolution(webSessionId: string, before: Set<string>) {
     if (this.persistentSessionsByWebSession.has(webSessionId)) return
     this.pendingPersistentResolutions.set(webSessionId, {
@@ -1006,6 +1025,11 @@ export class TuiBridgeService {
       const found = await this.findNewPersistentSessionIdOnce(pending.before).catch(() => undefined)
       if (found?.id) {
         this.rememberPersistentSessionId(webSessionId, found.id)
+        this.publishPersistentSessionResolution(webSessionId, found.id)
+        logBridgeControl('session:resolved', {
+          webSessionId,
+          persistentSessionId: found.id,
+        })
         return
       }
       await new Promise(resolve => setTimeout(resolve, 500))

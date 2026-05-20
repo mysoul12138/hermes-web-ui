@@ -404,6 +404,58 @@ describe('Chat Store', () => {
     expect(store.isRunActive).toBe(false)
   })
 
+  it('keeps live bridge messages visible after the persistent TUI session id resolves asynchronously', async () => {
+    const webSessionId = 'mpe9nzbl762q5t'
+    const persistentSessionId = '20260521_002116_0d8340'
+
+    let capturedWebSessionId = ''
+    mockChatApi.startRun.mockResolvedValueOnce({
+      run_id: 'bridge-run-late-session-id',
+      status: 'queued',
+      bridge: true,
+      session_id: undefined,
+    })
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
+      if (id === persistentSessionId) return makeDetail(persistentSessionId, [])
+      return null
+    })
+
+    const store = useChatStore()
+    store.newChat()
+    capturedWebSessionId = store.activeSessionId!
+    await store.sendMessage('hello from bridge')
+    await flushPromises()
+    expect(store.messages.map(message => message.content)).toEqual(['hello from bridge'])
+
+    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
+    expect(typeof onEvent).toBe('function')
+
+    onEvent({
+      event: 'session.resolved',
+      web_session_id: capturedWebSessionId,
+      persistent_session_id: persistentSessionId,
+      session_id: persistentSessionId,
+    })
+    expect(window.localStorage.getItem(bridgePersistentSessionKey(capturedWebSessionId))).toBe(persistentSessionId)
+    onEvent({ event: 'message.delta', delta: 'streamed answer' })
+    await flushPromises()
+    expect(store.messages.map(message => message.content)).toEqual([
+      'hello from bridge',
+      'streamed answer',
+    ])
+
+    await store.switchSession(persistentSessionId)
+    await flushPromises()
+
+    expect(window.localStorage.getItem(bridgePersistentSessionKey(capturedWebSessionId))).toBe(persistentSessionId)
+    expect(store.activeSessionId).toBe(persistentSessionId)
+    expect(store.isRunActive).toBe(true)
+    expect(store.messages.map(message => message.content)).toEqual([
+      'hello from bridge',
+      'streamed answer',
+    ])
+  })
+
   it('cancels a slow-start run when stop is clicked before the run id arrives', async () => {
     let resolveStartRun: (value: { run_id: string; status: string }) => void = () => {}
     mockChatApi.startRun.mockImplementationOnce(() => new Promise(resolve => {
@@ -930,6 +982,39 @@ describe('Chat Store', () => {
     await store.loadSessions()
 
     expect(store.sessions.map(session => session.id)).toEqual([visibleId, missingId])
+  })
+
+  it('does not hide raw tui sessions based on stale represented ids from the previous cache', async () => {
+    const rootId = 'root-tui'
+    const staleRepresentedId = 'stale-child-tui'
+
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: rootId,
+      title: 'Cached aggregate',
+      source: 'tui',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+      representedSessionIds: [rootId, staleRepresentedId],
+    }]))
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      {
+        ...makeSummary(rootId, 'Fresh root'),
+        source: 'tui',
+        represented_session_ids: [rootId],
+      },
+    ])
+    mockSessionsApi.fetchHermesSessions.mockResolvedValue([
+      { ...makeSummary(rootId, 'Fresh root'), source: 'tui' },
+      { ...makeSummary(staleRepresentedId, 'Real TUI session'), source: 'tui' },
+    ])
+    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => makeDetail(id, []))
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.sessions.map(session => session.id)).toEqual([rootId, staleRepresentedId])
   })
 
   it('does not remove a session locally when single delete fails on the server', async () => {

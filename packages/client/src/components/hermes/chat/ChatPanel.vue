@@ -318,6 +318,10 @@ async function copySessionId(id?: string) {
   }
 }
 
+function sessionDisplayModel(session: Session): string {
+  return appStore.selectedModel || session.model || ''
+}
+
 async function handleDeleteSession(id: string) {
   const ok = await chatStore.deleteSession(id)
   if (!ok) {
@@ -648,6 +652,7 @@ async function handleWorkspaceConfirm() {
               :streaming="chatStore.isSessionLive(s.id)"
               :selectable="isBatchMode"
               :selected="isSessionSelected(s.id)"
+              :display-model="sessionDisplayModel(s)"
               @select="handleSessionClick(s.id)"
               @toggle-branches="toggleSessionBranches(s.id)"
               @contextmenu="handleContextMenu($event, s.id)"
@@ -708,6 +713,7 @@ async function handleWorkspaceConfirm() {
                 :streaming="chatStore.isSessionLive(s.id)"
                 :selectable="isBatchMode"
                 :selected="isSessionSelected(s.id)"
+                :display-model="sessionDisplayModel(s)"
                 @select="handleSessionClick(s.id)"
                 @toggle-branches="toggleSessionBranches(s.id)"
                 @contextmenu="handleContextMenu($event, s.id)"

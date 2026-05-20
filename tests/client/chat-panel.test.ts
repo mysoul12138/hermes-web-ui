@@ -63,9 +63,9 @@ vi.mock('@/components/hermes/chat/DrawerPanel.vue', () => ({
 
 vi.mock('@/components/hermes/chat/SessionListItem.vue', () => ({
   default: {
-    props: ['session', 'active', 'live', 'pinned', 'canDelete', 'branchCount', 'branchesExpanded'],
+    props: ['session', 'active', 'live', 'pinned', 'canDelete', 'branchCount', 'branchesExpanded', 'displayModel'],
     emits: ['select', 'contextmenu', 'delete', 'toggleBranches'],
-    template: '<button class="session-item" :class="{ active, live }" @click="$emit(\'select\')"><span class="session-item-title">{{ session.title }}</span><span v-if="live" class="session-item-active-indicator">chat.liveMode</span></button>',
+    template: '<button class="session-item" :class="{ active, live }" @click="$emit(\'select\')"><span class="session-item-title">{{ session.title }}</span><span class="session-item-model">{{ displayModel || session.model }}</span><span v-if="live" class="session-item-active-indicator">chat.liveMode</span></button>',
   },
 }))
 
@@ -98,6 +98,7 @@ vi.mock('naive-ui', async () => {
 })
 
 import ChatPanel from '@/components/hermes/chat/ChatPanel.vue'
+import { useAppStore } from '@/stores/hermes/app'
 
 function makeSession(id: string, overrides: Record<string, any> = {}) {
   return {
@@ -189,5 +190,28 @@ describe('ChatPanel session list', () => {
 
     const groupLabelsAfterClick = wrapper.findAll('.session-group-label').map(node => node.text())
     expect(groupLabelsAfterClick[0]).toBe('Discord')
+  })
+
+  it('passes the global selected model to session list rows', () => {
+    const appStore = useAppStore()
+    appStore.selectedModel = 'global-selected-model'
+
+    const wrapper = mount(ChatPanel, {
+      global: {
+        stubs: {
+          ChatInput: true,
+          MessageList: true,
+          NButton: true,
+          NDropdown: true,
+          NInput: true,
+          NModal: true,
+          NPopconfirm: true,
+          NTooltip: true,
+        },
+      },
+    })
+
+    const apiRow = wrapper.findAll('.session-item').find(node => node.text().includes('API Session'))
+    expect(apiRow?.find('.session-item-model').text()).toBe('global-selected-model')
   })
 })
