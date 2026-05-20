@@ -97,6 +97,7 @@ locale.sidebar = {
     messageQueue: '訊息佇列',
     removeQueuedMessage: '移除佇列訊息',
     stop: '停止',
+    stopping: '正在停止...',
     start: '啟動',
     stopGateway: '停止閘道',
     send: '發送',

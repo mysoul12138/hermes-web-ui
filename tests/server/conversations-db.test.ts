@@ -246,6 +246,86 @@ describe('conversation DB service', () => {
     expect(detail?.branches || []).toEqual([])
   })
 
+  it('infers parentless bridge continuations from full parent message history when the parent tail moved on', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 500,
+      end_reason: 'tui_shutdown',
+      message_count: 5,
+      tool_call_count: 1,
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'continuation',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 300,
+      ended_at: 360,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'root', role: 'user', content: '我要测试/steer 功能', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'root', role: 'assistant', content: '第一轮正常：todo 返回空列表。', timestamp: 200 })
+    insertMessage(db, { id: 3, session_id: 'root', role: 'assistant', content: '后面又继续产生的新尾部内容，子会话历史里不会包含。', timestamp: 450 })
+    insertMessage(db, {
+      id: 4,
+      session_id: 'continuation',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 第一轮正常：todo 返回空列表。\n\nCurrent user message:\n再测一次',
+      timestamp: 301,
+    })
+    insertMessage(db, { id: 5, session_id: 'continuation', role: 'assistant', content: '继续测试完成。', timestamp: 350 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['root'])
+    expect(summaries[0]).toMatchObject({
+      thread_session_count: 2,
+      branch_session_count: 0,
+    })
+
+    const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => `${message.session_id}:${message.content}`)).toEqual([
+      'root:我要测试/steer 功能',
+      'root:第一轮正常：todo 返回空列表。',
+      'continuation:再测一次',
+      'continuation:继续测试完成。',
+      'root:后面又继续产生的新尾部内容，子会话历史里不会包含。',
+    ])
+  })
+
   it('does not fold adjacent bridge context sessions when the child context references different history', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
@@ -961,7 +1041,7 @@ describe('conversation DB service', () => {
       model: 'openai/gpt-5.4',
       title: null,
       started_at: 100,
-      ended_at: 200,
+      ended_at: 420,
       end_reason: 'compression',
       message_count: 1,
       tool_call_count: 0,
@@ -1711,6 +1791,177 @@ describe('conversation DB service', () => {
 
     const detail = await mod.getConversationDetailFromDb('empty-tui-stub', { humanOnly: true })
     expect(detail).toBeNull()
+  })
+
+  it('bridges a parentless empty compression pivot back to the prior compression chain', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'seraphine-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 4,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'empty-pivot',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 260,
+      ended_at: 300,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'pivot-child',
+      parent_session_id: 'empty-pivot',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 300,
+      ended_at: 360,
+      end_reason: 'tui_shutdown',
+      message_count: 4,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'seraphine-root', role: 'user', content: 'E:\\Seraphine 理解这个项目', timestamp: 110 })
+    insertMessage(db, { id: 2, session_id: 'seraphine-root', role: 'assistant', content: '这是一个 LoL 桌面辅助工具。', timestamp: 120 })
+    insertMessage(db, { id: 5, session_id: 'seraphine-root', role: 'assistant', content: '父会话晚于空压缩 pivot 才结束。', timestamp: 400 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'pivot-child',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 这是一个 LoL 桌面辅助工具。\n\nCurrent user message:\n继续分析',
+      timestamp: 310,
+    })
+    insertMessage(db, { id: 4, session_id: 'pivot-child', role: 'assistant', content: '继续分析模式筛选逻辑。', timestamp: 320 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['seraphine-root'])
+    expect(summaries[0]?.represented_session_ids).toEqual(['seraphine-root', 'empty-pivot', 'pivot-child'])
+
+    const detail = await mod.getConversationDetailFromDb('seraphine-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'E:\\Seraphine 理解这个项目',
+      '这是一个 LoL 桌面辅助工具。',
+      '继续分析',
+      '继续分析模式筛选逻辑。',
+      '父会话晚于空压缩 pivot 才结束。',
+    ])
+  })
+
+  it('does not fold a one-message bridge context stub into an unrelated conversation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'seraphine-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 4,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'queue-stub',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 260,
+      ended_at: 500,
+      end_reason: 'tui_shutdown',
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'seraphine-root', role: 'user', content: 'E:\\Seraphine 理解这个项目', timestamp: 110 })
+    insertMessage(db, { id: 2, session_id: 'seraphine-root', role: 'assistant', content: '这是一个 LoL 桌面辅助工具。', timestamp: 120 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'queue-stub',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 我先把设置页的“队列筛选卡”完整看一遍。\nassistant: 现在对齐模式索引实现。\n\nCurrent user message:\n你好',
+      timestamp: 270,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['queue-stub', 'seraphine-root'])
+    const seraphine = summaries.find((summary: any) => summary.id === 'seraphine-root')
+    expect(seraphine?.represented_session_ids).toEqual(['seraphine-root'])
+
+    const detail = await mod.getConversationDetailFromDb('seraphine-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'E:\\Seraphine 理解这个项目',
+      '这是一个 LoL 桌面辅助工具。',
+    ])
   })
 
   it('prefers explicit bridge continuation links over inferred root-level prompt matching', async () => {

@@ -18,8 +18,10 @@ import { shouldHideFromPromptHistory } from './injected-message-rules'
 import { writeBridgeContinuationLink } from './bridge-continuation-links'
 import { getActiveConfigPath } from './hermes-profile'
 import { isSessionCompressionEnded } from '../../db/hermes/sessions-db'
+import { resolveLineageSeed, upsertSessionLineage } from '../../db/hermes/session-lineage'
 import { updateUsage } from '../../db/hermes/usage-store'
 import { countTokens } from '../../lib/context-compressor'
+import { logger } from '../logger'
 
 export interface BridgeRunEvent {
   event: string
@@ -144,6 +146,8 @@ interface PendingPersistentResolution {
 interface BridgeRunOptions {
   model?: string
   provider?: string
+  lineageParentSessionId?: string
+  lineageRootSessionId?: string
 }
 
 const STARTUP_TIMEOUT_MS = Math.max(5000, Number(process.env.HERMES_TUI_STARTUP_TIMEOUT_MS || 15000))
@@ -152,6 +156,54 @@ const IDLE_HEARTBEAT_MS = Math.max(5000, Number(process.env.HERMES_TUI_IDLE_HEAR
 const COMPLETE_GRACE_MS = Math.max(250, Number(process.env.HERMES_TUI_COMPLETE_GRACE_MS || 1500))
 const CANCEL_STATUS_POLL_MS = Math.max(100, Number(process.env.HERMES_TUI_CANCEL_STATUS_POLL_MS || 250))
 const CANCEL_STATUS_TIMEOUT_MS = Math.max(1000, Number(process.env.HERMES_TUI_CANCEL_STATUS_TIMEOUT_MS || 5000))
+
+function logBridgeControl(event: string, detail: Record<string, unknown>) {
+  logger.info({ event, ...detail }, '[tui-bridge] control')
+}
+
+function logicalConversationIdForSession(sessionId: string): string {
+  return sessionId
+}
+
+function lineageSeedForSession(
+  webSessionId: string,
+  ...relatedSessionIds: Array<string | null | undefined>
+): { logicalConversationId: string, rootSessionId: string } {
+  return resolveLineageSeed(...relatedSessionIds, webSessionId) || {
+    logicalConversationId: logicalConversationIdForSession(webSessionId),
+    rootSessionId: webSessionId,
+  }
+}
+
+function continuationSeedForSession(
+  webSessionId: string,
+  ...relatedSessionIds: Array<string | null | undefined>
+): { logicalConversationId: string, rootSessionId: string } {
+  return resolveLineageSeed(...relatedSessionIds) || {
+    logicalConversationId: logicalConversationIdForSession(webSessionId),
+    rootSessionId: webSessionId,
+  }
+}
+
+function hintSeedForSession(
+  webSessionId: string,
+  options: BridgeRunOptions,
+): { logicalConversationId: string, rootSessionId: string } | null {
+  const hintedRoot = options.lineageRootSessionId?.trim()
+  if (!hintedRoot) return null
+  return {
+    logicalConversationId: hintedRoot,
+    rootSessionId: hintedRoot,
+  }
+}
+
+function explicitRootSeedForSession(webSessionId: string): { logicalConversationId: string, rootSessionId: string } {
+  return {
+    logicalConversationId: logicalConversationIdForSession(webSessionId),
+    rootSessionId: webSessionId,
+  }
+}
+
 function resolveHermesHome(): string {
   return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
 }
@@ -468,7 +520,8 @@ export class TuiBridgeService {
     options: BridgeRunOptions = {},
   ) {
     if (!this.isEnabled()) throw new Error('Hermes WebUI bridge is disabled')
-    let bridgeSession = await this.ensureBridgeSession(webSessionId)
+    const previousKnownPersistentSessionId = this.persistentSessionsByWebSession.get(webSessionId)
+    let bridgeSession = await this.ensureBridgeSession(webSessionId, options)
     let bridgeSessionId = bridgeSession.id
     let persistentSessionId = bridgeSession.persistentSessionId
     const runId = `bridge_run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -486,11 +539,51 @@ export class TuiBridgeService {
     this.runs.set(runId, state)
     setRunSession(runId, webSessionId)
     this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
+    const previousPersistentSessionId = bridgeSession.created
+      ? (options.lineageParentSessionId?.trim() || previousKnownPersistentSessionId || undefined)
+      : undefined
+    const hintedLineage = hintSeedForSession(webSessionId, options)
+    const initialLineage = hintedLineage || (bridgeSession.created
+      ? continuationSeedForSession(webSessionId, options.lineageParentSessionId, previousPersistentSessionId, persistentSessionId)
+      : continuationSeedForSession(webSessionId, options.lineageParentSessionId, persistentSessionId, webSessionId))
+    logBridgeControl('lineage:start-run', {
+      webSessionId,
+      bridgeSessionId,
+      persistentSessionId: persistentSessionId || null,
+      created: bridgeSession.created,
+      lineageParentSessionId: options.lineageParentSessionId || null,
+      lineageRootSessionId: options.lineageRootSessionId || null,
+      hintedLineage: hintedLineage || null,
+      initialLineage,
+    })
+    upsertSessionLineage({
+      session_id: webSessionId,
+      logical_conversation_id: initialLineage.logicalConversationId,
+      source: 'webui-bridge',
+      authority: 'explicit',
+      relation_kind: bridgeSession.created && initialLineage.rootSessionId === webSessionId ? 'root' : 'continuation',
+      parent_session_id: initialLineage.rootSessionId === webSessionId
+        ? null
+        : (persistentSessionId && persistentSessionId !== webSessionId ? persistentSessionId : initialLineage.rootSessionId),
+      root_session_id: initialLineage.rootSessionId,
+      web_session_id: webSessionId,
+      bridge_session_id: bridgeSessionId,
+      persistent_session_id: persistentSessionId || null,
+    })
+    logBridgeControl('start-run:init', {
+      runId,
+      webSessionId,
+      bridgeSessionId,
+      persistentSessionId,
+      previousPersistentSessionId: previousPersistentSessionId || null,
+      previousKnownPersistentSessionId: previousKnownPersistentSessionId || null,
+      created: bridgeSession.created,
+      contextHandoff: bridgeSession.created && contextPrompt !== input,
+    })
     this.push(runId, { event: 'run.started', run_id: runId, timestamp: Date.now() / 1000 })
     const contextTokenCount = countTokens(contextPrompt)
     const contextMessageCount = conversationHistory.filter(item => item.content?.trim()).length
     const usesContextHandoff = bridgeSession.created && contextPrompt !== input
-    const previousPersistentSessionId = bridgeSession.created ? webSessionId : undefined
     if (usesContextHandoff) {
       this.push(runId, {
         event: 'compression.started',
@@ -533,16 +626,49 @@ export class TuiBridgeService {
       }
 
       this.activeRunsByBridgeSession.delete(bridgeSessionId)
-      const recreated = await this.createBridgeSession(webSessionId)
+      const recreated = await this.createBridgeSession(webSessionId, options)
       bridgeSessionId = recreated.id
       persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
       state.contextInputTokens = countTokens(this.buildPrompt(input, conversationHistory))
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
+      logBridgeControl('start-run:recreate-after-busy', {
+        runId,
+        webSessionId,
+        bridgeSessionId,
+        persistentSessionId,
+      })
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
     if (usesContextHandoff && persistentSessionId && previousPersistentSessionId && persistentSessionId !== previousPersistentSessionId) {
       writeBridgeContinuationLink(persistentSessionId, previousPersistentSessionId)
+      const continuationLineage = hintedLineage || continuationSeedForSession(
+        webSessionId,
+        options.lineageParentSessionId,
+        previousPersistentSessionId,
+        persistentSessionId,
+      )
+      logBridgeControl('lineage:context-handoff', {
+        webSessionId,
+        bridgeSessionId,
+        previousPersistentSessionId,
+        persistentSessionId,
+        lineageParentSessionId: options.lineageParentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
+        continuationLineage,
+      })
+      upsertSessionLineage({
+        session_id: persistentSessionId,
+        logical_conversation_id: continuationLineage.logicalConversationId,
+        source: 'tui',
+        authority: 'explicit',
+        relation_kind: 'continuation',
+        parent_session_id: previousPersistentSessionId,
+        root_session_id: continuationLineage.rootSessionId,
+        web_session_id: webSessionId,
+        bridge_session_id: bridgeSessionId,
+        persistent_session_id: persistentSessionId,
+      })
     }
     return {
       run_id: runId,
@@ -610,6 +736,13 @@ export class TuiBridgeService {
     const bridgeSessionId = this.bridgeSessionsByWebSession.get(webSessionId)
     if (!bridgeSessionId) throw new Error('bridge session not found')
     const runId = this.activeRunsByBridgeSession.get(bridgeSessionId)
+    logBridgeControl('steer:attempt', {
+      webSessionId,
+      bridgeSessionId,
+      hasRunId: !!runId,
+      runId: runId || null,
+      textPreview: text.slice(0, 120),
+    })
     if (!runId) throw new Error('session is not running')
     let result: { status?: string, text?: string }
     try {
@@ -634,7 +767,8 @@ export class TuiBridgeService {
     try {
       const dispatched = await this.client.request<{ type?: string, output?: string, message?: string }>('command.dispatch', {
         session_id: bridgeSessionId,
-        command: `/steer ${text}`,
+        name: 'steer',
+        arg: text,
       })
       if (dispatched?.type === 'exec') return { status: 'queued', text }
       if (dispatched?.type === 'send') {
@@ -659,6 +793,11 @@ export class TuiBridgeService {
   async cancelRun(runId: string) {
     const state = this.runs.get(runId)
     if (!state) return null
+    logBridgeControl('cancel:attempt', {
+      runId,
+      webSessionId: state.webSessionId,
+      bridgeSessionId: state.bridgeSessionId,
+    })
 
     this.clearIdleTimer(state)
     state.pendingApproval = false
@@ -674,6 +813,19 @@ export class TuiBridgeService {
     })
     const stopped = await this.waitForBridgeSessionStop(state.bridgeSessionId)
     if (!stopped) {
+      try {
+        await this.client.request('session.interrupt', {
+          session_id: state.bridgeSessionId,
+        })
+      } catch {
+        // Preserve the original interrupt result; WebUI can keep polling
+        // the live bridge run instead of pretending the stop already landed.
+      }
+      logBridgeControl('cancel:interrupt-pending', {
+        runId,
+        webSessionId: state.webSessionId,
+        bridgeSessionId: state.bridgeSessionId,
+      })
       return { ok: false, cancelled: false, bridge: true, status: 'interrupt_sent', result }
     }
 
@@ -685,6 +837,11 @@ export class TuiBridgeService {
       usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     })
     this.closeRun(runId)
+    logBridgeControl('cancel:stopped', {
+      runId,
+      webSessionId: state.webSessionId,
+      bridgeSessionId: state.bridgeSessionId,
+    })
     return { ok: true, cancelled: true, bridge: true, result }
   }
 
@@ -702,7 +859,7 @@ export class TuiBridgeService {
     }
   }
 
-  private async ensureBridgeSession(webSessionId: string): Promise<BridgeSessionRef> {
+  private async ensureBridgeSession(webSessionId: string, options: BridgeRunOptions = {}): Promise<BridgeSessionRef> {
     const existing = this.bridgeSessionsByWebSession.get(webSessionId)
     if (existing) {
       return {
@@ -711,29 +868,59 @@ export class TuiBridgeService {
         persistentSessionId: this.persistentSessionsByWebSession.get(webSessionId),
       }
     }
-    const resumed = await this.tryResumeBridgeSession(webSessionId)
+    const resumed = await this.tryResumeBridgeSession(webSessionId, options)
     if (resumed) return resumed
-    return this.createBridgeSession(webSessionId)
+    return this.createBridgeSession(webSessionId, options)
   }
 
-  private async createBridgeSession(webSessionId: string): Promise<BridgeSessionRef> {
+  private async createBridgeSession(webSessionId: string, options: BridgeRunOptions = {}): Promise<BridgeSessionRef> {
     const before = await this.listPersistentSessionIds().catch(() => new Set<string>())
     const created = await this.client.request<{ session_id: string }>('session.create', { cols: 100 })
     const bridgeSessionId = created.session_id
     const persistentSessionId = await this.waitForNewPersistentSessionId(before).catch(() => undefined)
+    const hintedLineage = hintSeedForSession(webSessionId, options)
     const previous = this.bridgeSessionsByWebSession.get(webSessionId)
     if (previous) this.webSessionsByBridgeSession.delete(previous)
     this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
     this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
     if (persistentSessionId) {
       this.rememberPersistentSessionId(webSessionId, persistentSessionId)
+      const createdLineage = hintedLineage || (options.lineageParentSessionId
+        ? continuationSeedForSession(webSessionId, options.lineageParentSessionId, persistentSessionId)
+        : explicitRootSeedForSession(webSessionId))
+      logBridgeControl('lineage:create-bridge-session', {
+        webSessionId,
+        bridgeSessionId,
+        persistentSessionId,
+        lineageParentSessionId: options.lineageParentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
+        hintedLineage: hintedLineage || null,
+        createdLineage,
+      })
+      upsertSessionLineage({
+        session_id: persistentSessionId,
+        logical_conversation_id: createdLineage.logicalConversationId,
+        source: 'tui',
+        authority: 'explicit',
+        relation_kind: persistentSessionId === createdLineage.rootSessionId ? 'root' : 'continuation',
+        parent_session_id: persistentSessionId === createdLineage.rootSessionId ? null : createdLineage.rootSessionId,
+        root_session_id: createdLineage.rootSessionId,
+        web_session_id: webSessionId,
+        bridge_session_id: bridgeSessionId,
+        persistent_session_id: persistentSessionId,
+      })
     } else {
       this.schedulePersistentSessionResolution(webSessionId, before)
     }
+    logBridgeControl('session:create', {
+      webSessionId,
+      bridgeSessionId,
+      persistentSessionId: persistentSessionId || null,
+    })
     return { id: bridgeSessionId, created: true, persistentSessionId }
   }
 
-  private async tryResumeBridgeSession(webSessionId: string): Promise<BridgeSessionRef | null> {
+  private async tryResumeBridgeSession(webSessionId: string, options: BridgeRunOptions = {}): Promise<BridgeSessionRef | null> {
     if (!/^\d{8}_\d{6}_/.test(webSessionId)) return null
     if (await isSessionCompressionEnded(webSessionId)) return null
     try {
@@ -742,10 +929,47 @@ export class TuiBridgeService {
         cols: 100,
       })
       const bridgeSessionId = resumed.session_id
+      const hintedLineage = hintSeedForSession(webSessionId, options)
       this.bridgeSessionsByWebSession.set(webSessionId, bridgeSessionId)
       this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
       const persistentSessionId = resumed.resumed || webSessionId
       this.rememberPersistentSessionId(webSessionId, persistentSessionId)
+      const resumedLineage = hintedLineage || continuationSeedForSession(
+        webSessionId,
+        options.lineageParentSessionId,
+        persistentSessionId,
+        webSessionId,
+      )
+      const resumedParentSessionId = persistentSessionId === resumedLineage.rootSessionId
+        ? null
+        : resumedLineage.rootSessionId
+      logBridgeControl('lineage:resume-bridge-session', {
+        webSessionId,
+        bridgeSessionId,
+        persistentSessionId,
+        lineageParentSessionId: options.lineageParentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
+        hintedLineage: hintedLineage || null,
+        resumedLineage,
+        resumedParentSessionId,
+      })
+      upsertSessionLineage({
+        session_id: persistentSessionId,
+        logical_conversation_id: resumedLineage.logicalConversationId,
+        source: 'tui',
+        authority: 'explicit',
+        relation_kind: resumedParentSessionId ? 'continuation' : 'root',
+        parent_session_id: resumedParentSessionId,
+        root_session_id: resumedLineage.rootSessionId,
+        web_session_id: webSessionId,
+        bridge_session_id: bridgeSessionId,
+        persistent_session_id: persistentSessionId,
+      })
+      logBridgeControl('session:resume', {
+        webSessionId,
+        bridgeSessionId,
+        persistentSessionId,
+      })
       return { id: bridgeSessionId, created: false, persistentSessionId }
     } catch {
       return null

@@ -4,7 +4,7 @@
  */
 import { isSqliteAvailable, getDb } from '../index'
 import { SESSIONS_TABLE, MESSAGES_TABLE } from './schemas'
-import { config } from '../config'
+import { config } from '../../config'
 
 // Re-export types for compatibility with sessions-db.ts consumers
 export interface HermesSessionRow {

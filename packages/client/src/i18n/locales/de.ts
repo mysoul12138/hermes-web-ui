@@ -123,6 +123,7 @@ export default {
     messageQueue: 'Nachrichtenwarteschlange',
     removeQueuedMessage: 'Nachricht aus Warteschlange entfernen',
     stop: 'Stopp',
+    stopping: 'Stoppt...',
     send: 'Senden',
     steerMessage: 'Steuern',
     messageSteered: '/steer eingefügt',

@@ -122,6 +122,8 @@ export interface Message {
   isStreaming?: boolean
   queued?: boolean
   steered?: boolean
+  previousMessageId?: string
+  nextMessageId?: string
   subagentId?: string
   subagentDepth?: number
   attachments?: Attachment[]
@@ -213,11 +215,13 @@ function representedSessionIdsOf(summary: SessionSummary | ConversationSummary):
 }
 
 function logSessionLoad(stage: string, detail: Record<string, unknown>) {
+  if (!(globalThis as any)?.__HERMES_CHAT_DEBUG__) return
   console.info(`[chat.loadSessions] ${stage}`, detail)
 }
 
 function logTitleMutation(source: string, sessionId: string, before: string | undefined, after: string | undefined, detail: Record<string, unknown> = {}) {
   if ((before || '') === (after || '')) return
+  if (!(globalThis as any)?.__HERMES_CHAT_DEBUG__) return
   console.info('[chat.title]', {
     source,
     sessionId,
@@ -228,6 +232,7 @@ function logTitleMutation(source: string, sessionId: string, before: string | un
 }
 
 function logTitleSnapshot(source: string, detail: Record<string, unknown>) {
+  if (!(globalThis as any)?.__HERMES_CHAT_DEBUG__) return
   console.info('[chat.title.snapshot]', {
     source,
     ...detail,
@@ -238,6 +243,26 @@ function looksLikeContinuationPrompt(text: string | null | undefined): boolean {
   const normalized = (text || '').replace(/\s+/g, ' ').trim().toLowerCase()
   return normalized.startsWith('previous conversation context:')
     || normalized.startsWith('current user message:')
+}
+
+function looksLikeWrapperOnlyMessages(messages: Message[] | null | undefined): boolean {
+  if (!Array.isArray(messages) || messages.length !== 1) return false
+  const [message] = messages
+  return message.role === 'user' && looksLikeContinuationPrompt(message.content)
+}
+
+function parseExplicitSteerCommand(content: string): string | null {
+  const match = content.trim().match(/^\/steer(?:\s+([\s\S]+))?$/i)
+  if (!match) return null
+  const text = (match[1] || '').trim()
+  return text || null
+}
+
+function normalizeMessageTimestamp(timestamp: number): number {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 0
+  if (timestamp > 10000000000000000) return Math.round(timestamp / 1000000)
+  if (timestamp > 100000000000000) return Math.round(timestamp / 1000)
+  return timestamp < 100000000000 ? Math.round(timestamp * 1000) : Math.round(timestamp)
 }
 
 function looksLikeEmptyTuiStub(session: SessionSummary): boolean {
@@ -258,6 +283,7 @@ function looksLikeEmptyTuiStubSession(session: Session): boolean {
 }
 
 function logActiveBinding(source: string, detail: Record<string, unknown>) {
+  if (!(globalThis as any)?.__HERMES_CHAT_DEBUG__) return
   console.info('[chat.active]', detail.source ? detail : { source, ...detail })
 }
 
@@ -378,12 +404,12 @@ export const useChatStore = defineStore('chat', () => {
   const resumingRuns = ref<Set<string>>(new Set())
   const abortingSessions = ref<Set<string>>(new Set())
   const isRunActive = computed(() => {
-    if (isStreaming.value) return true
     const sid = activeSessionId.value
     if (sid == null) return false
-    if (isSessionLive(sid)) return true
-    if (activeSession.value?.endedAt != null) return false
-    return !!readInFlight(sid)
+    if (activeSession.value?.endedAt != null) {
+      return streamStates.value.has(sid) || pendingRunStarts.value.has(sid) || resumingRuns.value.has(sid)
+    }
+    return !!activeRunSessionId()
   })
   const isAborting = computed(() => {
     const sid = activeSessionId.value
@@ -443,6 +469,38 @@ export const useChatStore = defineStore('chat', () => {
         ...dbBranchesBySession.value,
         ...liveBranchesBySession.value,
       }).some(rootId => !!findBranchById(sessionBranches(rootId), sessionId)?.is_active)
+  }
+
+  function candidateSessionIdsForRun(sessionId: string): string[] {
+    const session = sessions.value.find(item => item.id === sessionId)
+    const ids = new Set<string>([sessionId])
+    for (const id of session?.representedSessionIds || []) ids.add(id)
+    if (session?.rootSessionId) ids.add(session.rootSessionId)
+    const persistent = readBridgePersistentSessionId(sessionId) || readBridgeBackingSessionId(sessionId)
+    if (persistent) ids.add(persistent)
+    for (const item of sessions.value) {
+      const represented = item.representedSessionIds || []
+      if (represented.includes(sessionId)) {
+        ids.add(item.id)
+        for (const id of represented) ids.add(id)
+      }
+    }
+    return [...ids].filter(Boolean)
+  }
+
+  function activeRunSessionId(): string | null {
+    const sid = activeSessionId.value
+    if (!sid) return null
+    for (const candidateId of candidateSessionIdsForRun(sid)) {
+      if (streamStates.value.has(candidateId)
+        || pendingRunStarts.value.has(candidateId)
+        || resumingRuns.value.has(candidateId)
+        || isSessionLive(candidateId)
+        || readInFlight(candidateId)) {
+        return candidateId
+      }
+    }
+    return null
   }
 
   function loadBranchSessionMetaIndex(): Record<string, BranchSessionMeta> {
@@ -1141,7 +1199,7 @@ export const useChatStore = defineStore('chat', () => {
     const pendingEntries = history
       .map(entry => ({
         content: entry.content.trim(),
-        timestamp: entry.timestamp || 0,
+        timestamp: normalizeMessageTimestamp(entry.timestamp || 0),
         previousMessageId: entry.previousMessageId,
         nextMessageId: entry.nextMessageId,
       }))
@@ -1149,25 +1207,38 @@ export const useChatStore = defineStore('chat', () => {
     if (!pendingEntries.length) return messages
     return messages.map(message => {
       if (message.role !== 'user') return message
-      if (message.steered) return message
       const text = message.content.trim()
       if (!text) return message
-      const matchIndex = pendingEntries.findIndex(entry => {
-        if (entry.content !== text) return false
-        if (!entry.timestamp || !message.timestamp) return true
-        return message.timestamp >= entry.timestamp - 5000
-      })
+      let matchIndex = -1
+      let matchDistance = Number.POSITIVE_INFINITY
+      const messageTimestamp = normalizeMessageTimestamp(message.timestamp || 0)
+      for (const [index, entry] of pendingEntries.entries()) {
+        if (entry.content !== text) continue
+        if (!entry.timestamp || !messageTimestamp) {
+          if (matchIndex < 0) matchIndex = index
+          continue
+        }
+        const distance = Math.abs(messageTimestamp - entry.timestamp)
+        if (distance > 5000 || distance >= matchDistance) continue
+        matchIndex = index
+        matchDistance = distance
+      }
       if (matchIndex < 0) return message
-      pendingEntries.splice(matchIndex, 1)
-      return { ...message, steered: true }
+      const entry = pendingEntries.splice(matchIndex, 1)[0]
+      return {
+        ...message,
+        steered: true,
+        previousMessageId: message.previousMessageId || entry.previousMessageId,
+        nextMessageId: message.nextMessageId || entry.nextMessageId,
+      }
     })
   }
 
-  async function steerBusyInput(sid: string, content: string, attachments?: Attachment[]) {
+  async function steerBusyInput(sid: string, content: string, attachments?: Attachment[], targetSessionId = sid) {
     const text = content.trim()
     const optimisticId = addSteeredMessage(sid, text, attachments)
     try {
-      const result = await steerSession(sid, text)
+      const result = await steerSession(targetSessionId, text)
       if (result?.ok) {
         return
       }
@@ -1306,6 +1377,15 @@ export const useChatStore = defineStore('chat', () => {
 
   function rootSessionIdFor(sid: string): string {
     return sessions.value.find(session => session.id === sid)?.rootSessionId || sid
+  }
+
+  function appendRepresentedSessionId(rootId: string, representedId: string) {
+    if (!rootId || !representedId) return
+    const root = sessions.value.find(session => session.id === rootId)
+    if (!root) return
+    const next = new Set(root.representedSessionIds?.length ? root.representedSessionIds : [root.id])
+    next.add(representedId)
+    root.representedSessionIds = [...next]
   }
 
   function normalizeProviderSelection(provider: string, model?: string): string {
@@ -1575,6 +1655,9 @@ export const useChatStore = defineStore('chat', () => {
       const representedIds = new Set<string>()
       for (const item of list) {
         for (const id of representedSessionIdsOf(item)) representedIds.add(id)
+      }
+      for (const session of sessions.value) {
+        for (const id of session.representedSessionIds || []) representedIds.add(id)
       }
 
       const supplementalCandidates = tuiRaw.filter(item => !representedIds.has(item.id))
@@ -2255,8 +2338,18 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const detail = prefetchedDetail ?? await fetchResolvedSessionDetail(sessionId)
       if (switchRequestId !== latestSwitchRequestId || activeSessionId.value !== sessionId || activeSession.value?.id !== sessionId || targetSession.id !== sessionId) return
+      if (!detail && looksLikeWrapperOnlyMessages(targetSession.messages)) {
+        targetSession.messages = []
+        persistActiveMessages()
+      }
       if (detail && detail.messages) {
-        if (isBridgeFallbackSession(detail) && targetSession.messages.length > 0) return
+        if (isBridgeFallbackSession(detail)) {
+          if (looksLikeWrapperOnlyMessages(targetSession.messages)) {
+            targetSession.messages = []
+            persistActiveMessages()
+          }
+          if (targetSession.messages.length > 0) return
+        }
         const mapped = reapplySteerHistory(sessionId, mapHermesMessages(detail.messages))
         // When switching to a different session, accept the server's messages
         // — but NOT if the target session has a live stream or a resuming run.
@@ -2754,6 +2847,19 @@ export const useChatStore = defineStore('chat', () => {
 
       const target = sessions.value.find(s => s.id === sid)
       const { model: sessionModel, provider: sessionProvider } = resolveSendModelSelection(target)
+      const lineageParentSessionId = target?.parentSessionId || null
+      const lineageRootSessionId = target?.rootSessionId || null
+      if ((globalThis as any)?.__HERMES_CHAT_DEBUG__) {
+        console.info('[chat.startRun.lineage]', {
+          sid,
+          targetId: target?.id || null,
+          lineageParentSessionId,
+          lineageRootSessionId,
+          representedSessionIds: target?.representedSessionIds || [],
+          source: target?.source || null,
+          isBranchSession: !!target?.isBranchSession,
+        })
+      }
       if (target) {
         if (sessionModel) target.model = sessionModel
         target.provider = sessionProvider
@@ -2766,6 +2872,8 @@ export const useChatStore = defineStore('chat', () => {
         session_id: sid,
         model: sessionModel || undefined,
         provider: sessionProvider || undefined,
+        lineage_parent_session_id: lineageParentSessionId || undefined,
+        lineage_root_session_id: lineageRootSessionId || undefined,
       })
 
       const runId = (run as any).run_id || (run as any).id
@@ -2784,6 +2892,9 @@ export const useChatStore = defineStore('chat', () => {
         const target = sessions.value.find(s => s.id === sid)
         if (target) target.source = 'tui'
         markBridgeLocalSession(sid, run.session_id)
+        const rootId = rootSessionIdFor(sid)
+        appendRepresentedSessionId(rootId, sid)
+        if (run.session_id) appendRepresentedSessionId(rootId, run.session_id)
         if (run.context_handoff) {
           setCompressionState(sid, {
             status: 'completed',
@@ -2839,13 +2950,31 @@ export const useChatStore = defineStore('chat', () => {
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
     if (isRunActive.value) {
+      const explicitSteerText = parseExplicitSteerCommand(content)
+      if (explicitSteerText) {
+        const targetRunSessionId = activeRunSessionId() || sid
+        await steerBusyInput(sid, explicitSteerText, attachments, targetRunSessionId)
+        return
+      }
       const settingsStore = useSettingsStore()
       if (!settingsStore.loaded && !settingsStore.loading) {
         await settingsStore.fetchSettings()
       }
       const busyMode = settingsStore.display.busy_input_mode || 'queue'
+      const targetRunSessionId = activeRunSessionId() || sid
+      if ((globalThis as any)?.__HERMES_CHAT_DEBUG__) {
+        console.info('[chat.busy-input]', {
+          sid,
+          busyMode,
+          targetRunSessionId,
+          activeSessionEndedAt: activeSession.value?.endedAt ?? null,
+          representedSessionIds: activeSession.value?.representedSessionIds || [],
+          candidateSessionIds: candidateSessionIdsForRun(sid),
+          hasInFlight: !!readInFlight(sid),
+        })
+      }
       if (busyMode === 'steer') {
-        await steerBusyInput(sid, content, attachments)
+        await steerBusyInput(sid, content, attachments, targetRunSessionId)
         return
       }
       queueBusyInput(sid, content, attachments)
@@ -2866,8 +2995,22 @@ export const useChatStore = defineStore('chat', () => {
     clearPendingRunStart(sid)
     if (stoppedBeforeRunId) cancelledPendingStarts.value.add(sid)
     try {
+      let cancelResult: Awaited<ReturnType<typeof cancelRun>> | null = null
       if (inFlight?.runId) {
-        await cancelRun(inFlight.runId)
+        cancelResult = await cancelRun(inFlight.runId)
+      }
+      const cancelPending = !!inFlight?.runId && cancelResult?.status === 'interrupt_sent'
+      if (cancelPending) {
+        stopPolling(sid)
+        stopApprovalPolling(sid)
+        stopClarifyPolling(sid)
+        if (ctrl) {
+          ctrl.abort()
+          streamStates.value.delete(sid)
+        }
+        if (sid === activeSessionId.value) persistActiveMessages()
+        persistSessionsList()
+        return
       }
       if (ctrl) {
         ctrl.abort()

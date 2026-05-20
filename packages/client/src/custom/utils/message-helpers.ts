@@ -216,6 +216,8 @@ export function mapHermesSession(s: SessionSummary | ConversationSummary): Sessi
     lastActiveAt: s.last_active != null ? Math.round(s.last_active * 1000) : undefined,
     workspace: (s as any).workspace || null,
     branchSessionCount: 'branch_session_count' in s ? s.branch_session_count : 0,
+    rootSessionId: s.id,
+    parentSessionId: null,
     representedSessionIds: [...new Set(representedSessionIds)],
   }
 }
@@ -369,16 +371,12 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     localSteeredByText.set(text, queue)
   }
   const matchedLocalSteeredIds = new Set<string>()
+  const matchedSteeredPlacements: Array<{ mappedId: string, localSteered: Message, mappedIndex: number }> = []
 
-  const merged = mapped.map(message => {
+  const merged = mapped.map((message, mappedIndex) => {
     if (message.role !== 'user') return message
     const candidates = localSteeredByText.get(message.content.trim())
-    const localSteered = candidates?.find(candidate => {
-      const serverTs = message.timestamp || 0
-      const localTs = candidate.timestamp || 0
-      if (!serverTs || !localTs) return true
-      return serverTs >= localTs - STEER_TIMESTAMP_MATCH_WINDOW_MS
-    })
+    const localSteered = findClosestSteeredMessage(message, candidates)
     if (!localSteered) return message
     matchedLocalSteeredIds.add(localSteered.id)
     if (candidates) {
@@ -386,12 +384,14 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
       if (matchedIndex >= 0) candidates.splice(matchedIndex, 1)
       if (candidates.length === 0) localSteeredByText.delete(message.content.trim())
     }
+    matchedSteeredPlacements.push({ mappedId: message.id, localSteered, mappedIndex })
     return {
       ...message,
       steered: true,
       attachments: message.attachments || localSteered.attachments,
     }
   })
+  const reorderedMerged = restoreMatchedSteeredPositions(merged, current, matchedSteeredPlacements)
   // Preserve both steered (in-run) and queued (waiting for next turn) user
   // messages that the server hasn't seen yet.  Without the queued check,
   // switching away from a session with pending queued messages would lose them.
@@ -400,14 +400,22 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     if (!message.steered) return false
     return !matchedLocalSteeredIds.has(message.id)
   })
-  if (!localPreserved.length) return merged
-  const result = [...merged]
+  if (!localPreserved.length) return reorderedMerged
+  const result = [...reorderedMerged]
   const anchorIds = new Set(result.map(message => message.id))
   const currentIndexById = new Map(current.map((message, index) => [message.id, index] as const))
   for (const msg of localPreserved) {
+    if (msg.steered) {
+      const anchoredInsertIndex = findSteeredInsertIndex(result, current, currentIndexById, msg)
+      if (anchoredInsertIndex != null) {
+        result.splice(anchoredInsertIndex, 0, msg)
+        anchorIds.add(msg.id)
+        continue
+      }
+    }
     const currentIdx = currentIndexById.get(msg.id) ?? -1
     let inserted = false
-    const nextAnchorId = (msg as Message & { nextMessageId?: string }).nextMessageId
+    const nextAnchorId = msg.nextMessageId
     if (nextAnchorId && anchorIds.has(nextAnchorId)) {
       const insertIdx = result.findIndex(message => message.id === nextAnchorId)
       if (insertIdx >= 0) {
@@ -442,7 +450,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
       }
     }
     if (!inserted) {
-      const previousAnchorId = (msg as Message & { previousMessageId?: string }).previousMessageId
+      const previousAnchorId = msg.previousMessageId
       if (previousAnchorId && anchorIds.has(previousAnchorId)) {
         const anchorIdx = result.findIndex(message => message.id === previousAnchorId)
         if (anchorIdx >= 0) {
@@ -455,6 +463,147 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     anchorIds.add(msg.id)
   }
   return result
+}
+
+function findClosestSteeredMessage(message: Message, candidates: Message[] | undefined): Message | undefined {
+  if (!candidates?.length) return undefined
+  const serverTs = normalizeMessageTimestamp(message.timestamp || 0)
+  if (!serverTs) return candidates[0]
+  let best: Message | undefined
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const candidate of candidates) {
+    const localTs = normalizeMessageTimestamp(candidate.timestamp || 0)
+    if (!localTs) return candidate
+    const distance = Math.abs(serverTs - localTs)
+    if (distance > STEER_TIMESTAMP_MATCH_WINDOW_MS || distance >= bestDistance) continue
+    best = candidate
+    bestDistance = distance
+  }
+  return best
+}
+
+function restoreMatchedSteeredPositions(
+  mapped: Message[],
+  current: Message[],
+  placements: Array<{ mappedId: string, localSteered: Message, mappedIndex: number }>,
+): Message[] {
+  if (!placements.length) return mapped
+  const result = [...mapped]
+  const currentIndexById = new Map(current.map((message, index) => [message.id, index] as const))
+  for (const placement of placements) {
+    const resultIndex = result.findIndex(message => message.id === placement.mappedId)
+    if (resultIndex < 0) continue
+    const [message] = result.splice(resultIndex, 1)
+    const insertIndex = findSteeredInsertIndex(result, current, currentIndexById, placement.localSteered)
+    if (insertIndex == null) {
+      result.splice(Math.min(placement.mappedIndex, result.length), 0, message)
+    } else {
+      result.splice(insertIndex, 0, message)
+    }
+  }
+  return result
+}
+
+function findSteeredInsertIndex(
+  result: Message[],
+  current: Message[],
+  currentIndexById: Map<string, number>,
+  localSteered: Message,
+): number | null {
+  const anchorIds = new Set(result.map(message => message.id))
+  const localTs = normalizeMessageTimestamp(localSteered.timestamp || 0)
+  const currentAnchors = localSteeredCurrentAnchors(current, currentIndexById, anchorIds, localSteered)
+  const nextAnchorId = anchorIds.has(localSteered.nextMessageId || '')
+    ? localSteered.nextMessageId
+    : currentAnchors.nextAnchorId
+  const nextAnchorIdx = nextAnchorId
+    ? result.findIndex(message => message.id === nextAnchorId)
+    : -1
+  const previousAnchorId = anchorIds.has(localSteered.previousMessageId || '')
+    ? localSteered.previousMessageId
+    : currentAnchors.previousAnchorId
+  const previousAnchorIdx = previousAnchorId
+    ? result.findIndex(message => message.id === previousAnchorId)
+    : -1
+
+  if (previousAnchorIdx >= 0 && nextAnchorIdx >= 0 && previousAnchorIdx < nextAnchorIdx) {
+    return insertionIndexByTimestamp(result, previousAnchorIdx + 1, nextAnchorIdx, localTs)
+  }
+
+  if (previousAnchorIdx >= 0) {
+    return insertionIndexByTimestamp(result, previousAnchorIdx + 1, result.length, localTs)
+  }
+
+  if (nextAnchorId && anchorIds.has(nextAnchorId)) {
+    return insertionIndexByTimestamp(result, 0, nextAnchorIdx, localTs)
+  }
+
+  const currentIdx = currentIndexById.get(localSteered.id) ?? -1
+  if (currentIdx >= 0) {
+    for (let i = currentIdx + 1; i < current.length; i += 1) {
+      const candidateNextId = current[i]?.id
+      if (!candidateNextId || !anchorIds.has(candidateNextId)) continue
+      const insertIdx = result.findIndex(message => message.id === candidateNextId)
+      if (insertIdx >= 0) return insertIdx
+    }
+    for (let i = currentIdx - 1; i >= 0; i -= 1) {
+      const previousId = current[i]?.id
+      if (!previousId || !anchorIds.has(previousId)) continue
+      const anchorIdx = result.findIndex(message => message.id === previousId)
+      if (anchorIdx >= 0) return anchorIdx + 1
+    }
+  }
+
+  if (localTs) return insertionIndexByTimestamp(result, 0, result.length, localTs)
+  return null
+}
+
+function localSteeredCurrentAnchors(
+  current: Message[],
+  currentIndexById: Map<string, number>,
+  anchorIds: Set<string>,
+  localSteered: Message,
+): { previousAnchorId?: string, nextAnchorId?: string } {
+  const currentIdx = currentIndexById.get(localSteered.id) ?? -1
+  if (currentIdx < 0) return {}
+
+  let previousAnchorId: string | undefined
+  for (let i = currentIdx - 1; i >= 0; i -= 1) {
+    const candidateId = current[i]?.id
+    if (candidateId && anchorIds.has(candidateId)) {
+      previousAnchorId = candidateId
+      break
+    }
+  }
+
+  let nextAnchorId: string | undefined
+  for (let i = currentIdx + 1; i < current.length; i += 1) {
+    const candidateId = current[i]?.id
+    if (candidateId && anchorIds.has(candidateId)) {
+      nextAnchorId = candidateId
+      break
+    }
+  }
+
+  return { previousAnchorId, nextAnchorId }
+}
+
+function insertionIndexByTimestamp(result: Message[], start: number, end: number, timestamp: number): number {
+  const lower = Math.max(0, Math.min(start, result.length))
+  const upper = Math.max(lower, Math.min(end, result.length))
+  if (!timestamp) return lower
+  for (let index = lower; index < upper; index += 1) {
+    const currentTs = normalizeMessageTimestamp(result[index]?.timestamp || 0)
+    if (currentTs && currentTs > timestamp) return index
+  }
+  return upper
+}
+
+function normalizeMessageTimestamp(timestamp: number): number {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 0
+  if (timestamp > 10000000000000000) return Math.round(timestamp / 1000000)
+  if (timestamp > 100000000000000) return Math.round(timestamp / 1000)
+  return timestamp < 100000000000 ? Math.round(timestamp * 1000) : Math.round(timestamp)
 }
 
 export function isStaleBridgeRunError(error: unknown): boolean {

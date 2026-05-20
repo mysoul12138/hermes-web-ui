@@ -2,6 +2,7 @@ import type { Context } from 'koa'
 import { config } from '../../config'
 import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { updateUsage } from '../../db/hermes/usage-store'
+import { logger } from '../../services/logger'
 import { tuiBridge } from '../../services/hermes/tui-bridge'
 import {
   clearLivePendingApprovalForRun,
@@ -238,9 +239,18 @@ export async function proxy(ctx: Context) {
             ? String(parsed.input.at(-1)?.content || '')
             : ''
         if (sessionId && input) {
+          logger.info({
+            sessionId,
+            hasConversationHistory: Array.isArray(parsed.conversation_history),
+            conversationHistoryCount: Array.isArray(parsed.conversation_history) ? parsed.conversation_history.length : 0,
+            lineageParentSessionId: typeof parsed.lineage_parent_session_id === 'string' ? parsed.lineage_parent_session_id : null,
+            lineageRootSessionId: typeof parsed.lineage_root_session_id === 'string' ? parsed.lineage_root_session_id : null,
+          }, '[proxy-handler] bridge startRun request')
           const run = await tuiBridge.startRun(input, sessionId, Array.isArray(parsed.conversation_history) ? parsed.conversation_history : [], {
             model: typeof parsed.model === 'string' ? parsed.model : undefined,
             provider: typeof parsed.provider === 'string' ? parsed.provider : undefined,
+            lineageParentSessionId: typeof parsed.lineage_parent_session_id === 'string' ? parsed.lineage_parent_session_id : undefined,
+            lineageRootSessionId: typeof parsed.lineage_root_session_id === 'string' ? parsed.lineage_root_session_id : undefined,
           })
           ctx.status = 200
           ctx.set('Content-Type', 'application/json')
@@ -259,6 +269,10 @@ export async function proxy(ctx: Context) {
       try {
         const parsed = JSON.parse(body)
         const text = typeof parsed.text === 'string' ? parsed.text : ''
+        logger.info({
+          sessionId: bridgeSteerMatch[1],
+          textPreview: text.slice(0, 120),
+        }, '[proxy-handler] bridge steer request')
         const result = await tuiBridge.steer(bridgeSteerMatch[1], text)
         ctx.status = 200
         ctx.set('Content-Type', 'application/json')

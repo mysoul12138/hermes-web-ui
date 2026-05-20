@@ -123,6 +123,7 @@ export default {
     messageQueue: '메시지 대기열',
     removeQueuedMessage: '대기열 메시지 제거',
     stop: '중지',
+    stopping: '중지 중...',
     send: '전송',
     steerMessage: '방향 조정',
     messageSteered: '/steer 주입됨',

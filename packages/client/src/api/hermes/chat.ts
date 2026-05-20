@@ -17,6 +17,8 @@ export interface StartRunRequest {
   session_id?: string
   model?: string
   provider?: string
+  lineage_parent_session_id?: string
+  lineage_root_session_id?: string
 }
 
 export interface StartRunResponse {
@@ -36,6 +38,14 @@ export interface SteerSessionResponse {
   bridge?: boolean
   run_id?: string
   text?: string
+}
+
+export interface CancelRunResponse {
+  ok?: boolean
+  cancelled?: boolean
+  bridge?: boolean
+  status?: string
+  result?: unknown
 }
 
 // SSE event types from /v1/runs/{id}/events
@@ -191,8 +201,8 @@ export async function startRun(body: StartRunRequest): Promise<StartRunResponse>
   })
 }
 
-export async function cancelRun(runId: string): Promise<void> {
-  await request(`/api/hermes/v1/runs/${encodeURIComponent(runId)}/cancel`, {
+export async function cancelRun(runId: string): Promise<CancelRunResponse> {
+  return request<CancelRunResponse>(`/api/hermes/v1/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
   })
 }

@@ -123,6 +123,7 @@ export default {
     messageQueue: 'メッセージキュー',
     removeQueuedMessage: 'キューのメッセージを削除',
     stop: '停止',
+    stopping: '停止中...',
     send: '送信',
     steerMessage: '微調整',
     messageSteered: '/steer 注入済み',

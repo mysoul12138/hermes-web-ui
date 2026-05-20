@@ -126,7 +126,7 @@ describe('Chat Store', () => {
     mockCompletionSound.primeCompletionSound.mockClear()
     mockCompletionSound.playCompletionSound.mockClear()
     mockChatApi.startRun.mockResolvedValue({ run_id: 'run-1', status: 'queued' })
-    mockChatApi.cancelRun.mockResolvedValue(undefined)
+    mockChatApi.cancelRun.mockResolvedValue({ ok: true, cancelled: true })
     mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1' })
     mockChatApi.streamRunEvents.mockImplementation(() => ({
       abort: vi.fn(),
@@ -628,9 +628,29 @@ describe('Chat Store', () => {
     expect(store.isRunActive).toBe(false)
   })
 
+  it('keeps the run active when bridge cancel only reports interrupt_sent', async () => {
+    mockChatApi.cancelRun.mockResolvedValueOnce({
+      ok: false,
+      cancelled: false,
+      bridge: true,
+      status: 'interrupt_sent',
+    })
+
+    const store = useChatStore()
+    await flushPromises()
+    await store.sendMessage('cancel still running')
+    await flushPromises()
+
+    expect(store.isRunActive).toBe(true)
+    await store.stopStreaming()
+
+    expect(mockChatApi.cancelRun).toHaveBeenCalledWith('run-1')
+    expect(store.isRunActive).toBe(true)
+  })
+
   it('ignores repeated stop clicks while a cancel is already in progress', async () => {
     let resolveCancel: (() => void) | null = null
-    mockChatApi.cancelRun.mockImplementationOnce(() => new Promise<void>(resolve => {
+    mockChatApi.cancelRun.mockImplementationOnce(() => new Promise(resolve => {
       resolveCancel = resolve
     }))
 
@@ -1463,6 +1483,190 @@ describe('Chat Store', () => {
       ]),
     )
     expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('steers busy input from the visible aggregate session when the run belongs to a represented session', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'steer'
+    settings.loaded = true
+    const rootId = '20260520_113017_a8ef31'
+    const childId = '20260520_125149_77f613'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: rootId,
+      title: 'Visible aggregate',
+      source: 'tui',
+      representedSessionIds: [rootId, childId],
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(inFlightKey(childId), JSON.stringify({ runId: 'bridge_run_child', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      id: rootId,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Visible aggregate',
+      started_at: Date.now() / 1000,
+      ended_at: null,
+      last_active: Date.now() / 1000,
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: 'estimated',
+      preview: 'start task',
+      is_active: true,
+      thread_session_count: 2,
+      branch_session_count: 0,
+      represented_session_ids: [rootId, childId],
+    } as any])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(rootId)
+    expect(store.isRunActive).toBe(true)
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(childId, 'adjust direction')
+    expect(mockChatApi.startRun).not.toHaveBeenCalled()
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+        }),
+      ]),
+    )
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('treats explicit /steer input as steer even when busy input mode is queue', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'queue'
+    settings.loaded = true
+    const sid = 'web-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Running bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: Date.now() }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('/steer adjust direction')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.startRun).not.toHaveBeenCalled()
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+        }),
+      ]),
+    )
+    expect(store.messages.some(message => message.content === '/steer adjust direction')).toBe(false)
+    expect(store.messages.some(message => message.queued)).toBe(false)
+  })
+
+  it('clears stale wrapper-only cached messages when server returns an empty bridge fallback detail', async () => {
+    const sid = '20260520_113007_08c81e'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: '你好',
+      source: 'tui',
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(sessionMessagesKey(sid), JSON.stringify([
+      {
+        id: 'cached-wrapper',
+        role: 'user',
+        content: 'Previous conversation context:\nassistant: stale history\n\nCurrent user message:\n你好',
+        timestamp: Date.now(),
+      },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      id: sid,
+      source: 'tui',
+      model: 'deepseek-v4-flash',
+      title: '你好',
+      started_at: Date.now() / 1000,
+      ended_at: null,
+      last_active: Date.now() / 1000,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'deepseek',
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: 'estimated',
+      preview: '你好',
+      is_active: false,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      represented_session_ids: [sid],
+    } as any])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'webui-bridge',
+      model: '',
+      title: null,
+      started_at: Date.now() / 1000,
+      ended_at: null,
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: 'unknown',
+      messages: [],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(sid)
+    expect(store.messages).toEqual([])
+    expect(window.localStorage.getItem(sessionMessagesKey(sid))).toBe('[]')
   })
 
   it('sends a new turn instead of queueing when bridge steer reports the run is already done', async () => {
@@ -2799,6 +3003,211 @@ describe('Chat Store', () => {
       content: 'adjust direction',
       steered: true,
     })
+  })
+
+  it('keeps a recorded steer bubble at its original local position after server refresh', async () => {
+    const sid = 'steer-recorded-position-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Recorded Steer Position',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run three tools', timestamp: 1710000010000 },
+        { id: 'tool-1', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-1', toolStatus: 'done', timestamp: 1710000011000 },
+        { id: 'local-steer', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+        { id: 'tool-2', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-2', toolStatus: 'done', timestamp: 1710000013000 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000014000 },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000014000,
+    }]))
+    window.localStorage.setItem(`hermes_steer_history_v1_default_${sid}`, JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000, previousMessageId: 'tool-1' },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Recorded Steer Position', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Recorded Steer Position',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run three tools', timestamp: 1710000010 },
+        { id: 'tool-1', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-1', timestamp: 1710000011 },
+        { id: 'tool-2', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-2', timestamp: 1710000013 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000014 },
+        { id: 'server-steer', role: 'user', content: '收到停止', timestamp: 1710000012 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual(['u1', 'tool-1', 'server-steer', 'tool-2', 'a1'])
+    expect(store.messages[2]).toMatchObject({
+      id: 'server-steer',
+      role: 'user',
+      content: '收到停止',
+      steered: true,
+    })
+  })
+
+  it('restores a local-only steer bubble from history anchors even when cache had drifted to the end', async () => {
+    const sid = 'steer-local-only-drifted-position-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Local Only Steer Position',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run three tools', timestamp: 1710000010000 },
+        { id: 'tool-1', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-1', toolStatus: 'done', timestamp: 1710000011000 },
+        { id: 'tool-2', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-2', toolStatus: 'done', timestamp: 1710000013000 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000014000 },
+        { id: 'local-steer', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000014000,
+    }]))
+    window.localStorage.setItem(`hermes_steer_history_v1_default_${sid}`, JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000, previousMessageId: 'tool-1' },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Local Only Steer Position', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Local Only Steer Position',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run three tools', timestamp: 1710000010 },
+        { id: 'tool-1', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-1', timestamp: 1710000011 },
+        { id: 'tool-2', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-2', timestamp: 1710000013 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000014 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual(['u1', 'tool-1', 'local-steer', 'tool-2', 'a1'])
+    expect(store.messages[2]).toMatchObject({
+      id: 'local-steer',
+      role: 'user',
+      content: '收到停止',
+      steered: true,
+    })
+  })
+
+  it('does not group multiple local-only steer bubbles with the same text after refresh', async () => {
+    const sid = 'steer-local-only-duplicate-text-position-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Duplicate Steer Position',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run many tools', timestamp: 1710000010000 },
+        { id: 'tool-1', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-1', toolStatus: 'done', timestamp: 1710000011000 },
+        { id: 'tool-2', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-2', toolStatus: 'done', timestamp: 1710000013000 },
+        { id: 'tool-3', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-3', toolStatus: 'done', timestamp: 1710000015000 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000017000 },
+        { id: 'local-steer-1', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+        { id: 'local-steer-2', role: 'user', content: '收到停止', timestamp: 1710000014000, steered: true },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000017000,
+    }]))
+    window.localStorage.setItem(`hermes_steer_history_v1_default_${sid}`, JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000, previousMessageId: 'tool-1' },
+      { content: '收到停止', timestamp: 1710000014000, previousMessageId: 'tool-2' },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Duplicate Steer Position', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Duplicate Steer Position',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run many tools', timestamp: 1710000010 },
+        { id: 'tool-1', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-1', timestamp: 1710000011 },
+        { id: 'tool-2', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-2', timestamp: 1710000013 },
+        { id: 'tool-3', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-3', timestamp: 1710000015 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000017 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual([
+      'u1',
+      'tool-1',
+      'local-steer-1',
+      'tool-2',
+      'local-steer-2',
+      'tool-3',
+      'a1',
+    ])
+  })
+
+  it('does not group duplicate local-only steer bubbles when server timestamps are missing', async () => {
+    const sid = 'steer-local-only-duplicate-text-no-server-timestamps-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Duplicate Steer No Timestamp Position',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run many tools', timestamp: 1710000010000 },
+        { id: 'tool-1', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-1', toolStatus: 'done', timestamp: 1710000011000 },
+        { id: 'local-steer-1', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+        { id: 'tool-2', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-2', toolStatus: 'done', timestamp: 1710000013000 },
+        { id: 'local-steer-2', role: 'user', content: '收到停止', timestamp: 1710000014000, steered: true },
+        { id: 'tool-3', role: 'tool', content: '', toolName: 'terminal', toolCallId: 'call-3', toolStatus: 'done', timestamp: 1710000015000 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000017000 },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000017000,
+    }]))
+    window.localStorage.setItem(`hermes_steer_history_v1_default_${sid}`, JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000 },
+      { content: '收到停止', timestamp: 1710000014000 },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Duplicate Steer No Timestamp Position', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Duplicate Steer No Timestamp Position',
+      messages: [
+        { id: 'u1', role: 'user', content: 'run many tools', timestamp: 0 },
+        { id: 'tool-1', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-1', timestamp: 0 },
+        { id: 'tool-2', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-2', timestamp: 0 },
+        { id: 'tool-3', role: 'tool', content: '', tool_name: 'terminal', tool_call_id: 'call-3', timestamp: 0 },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 0 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual([
+      'u1',
+      'tool-1',
+      'local-steer-1',
+      'tool-2',
+      'local-steer-2',
+      'tool-3',
+      'a1',
+    ])
   })
 
   it('does not move a steer badge onto an older duplicate user message', async () => {

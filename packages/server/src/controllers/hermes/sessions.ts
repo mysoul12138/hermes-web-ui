@@ -2,6 +2,7 @@ import * as hermesCli from '../../services/hermes/hermes-cli'
 import { listConversationSummaries, getConversationDetail } from '../../services/hermes/conversations'
 import { listConversationSummariesFromDb, getConversationDetailFromDb } from '../../db/hermes/conversations-db'
 import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries, getUsageStatsFromDb } from '../../db/hermes/sessions-db'
+import { listSessionLineage, resolveCanonicalSessionId } from '../../db/hermes/session-lineage'
 import {
   listSessions as localListSessions,
   searchSessions as localSearchSessions,
@@ -82,6 +83,15 @@ function createBridgeConversationFallback(id: string): ConversationDetail {
   }
 }
 
+function isBridgeContinuationWrapperOnlyDetail(session: any): boolean {
+  if (!session || session.source !== 'tui') return false
+  const messages = Array.isArray(session.messages) ? session.messages : []
+  if (messages.length !== 1) return false
+  const message = messages[0]
+  const content = String(message?.content || '').trim().toLowerCase()
+  return message?.role === 'user' && content.startsWith('previous conversation context:')
+}
+
 function getPendingDeletedSessionIds(): Set<string> {
   return getGroupChatServer()?.getStorage().getPendingDeletedSessionIds() || new Set<string>()
 }
@@ -123,6 +133,31 @@ function hasPendingDeletedSessionDetail(session: { id: string; messages?: Array<
 
 function getGroupChatStorage() {
   return getGroupChatServer()?.getStorage() || null
+}
+
+function dedupeTuiSessionsByLineage<T extends { id: string }>(
+  sessions: T[],
+  source = 'tui',
+): T[] {
+  const lineageRows = listSessionLineage(source)
+  if (!lineageRows.length) return sessions
+  const aliasToLogical = new Map<string, string>()
+  for (const row of lineageRows) {
+    const logical = resolveCanonicalSessionId(row.session_id)
+      || row.root_session_id
+      || row.logical_conversation_id
+      || row.session_id
+    aliasToLogical.set(row.session_id, logical)
+    if (row.web_session_id) aliasToLogical.set(row.web_session_id, logical)
+    if (row.persistent_session_id) aliasToLogical.set(row.persistent_session_id, logical)
+    if (row.bridge_session_id) aliasToLogical.set(row.bridge_session_id, logical)
+  }
+  const deduped = new Map<string, T>()
+  for (const session of sessions) {
+    const key = aliasToLogical.get(session.id) || session.id
+    if (!deduped.has(key)) deduped.set(key, session)
+  }
+  return [...deduped.values()]
 }
 
 export async function listConversations(ctx: any) {
@@ -181,9 +216,46 @@ export async function list(ctx: any) {
     const source = (ctx.query.source as string) || undefined
     const limit = ctx.query.limit ? parseInt(ctx.query.limit as string, 10) : undefined
     const profile = getActiveProfileName()
-    const sessions = localListSessions(profile, source, limit && limit > 0 ? limit : 2000)
-    ctx.body = { sessions: filterPendingDeletedSessions(sessions) }
-    return
+    const effectiveLimit = limit && limit > 0 ? limit : 2000
+    const localSessions = localListSessions(profile, source, effectiveLimit)
+      .filter(session => session.source !== 'tui')
+    if (source && source !== 'tui') {
+      logger.info({
+        route: 'list',
+        mode: 'local-store-only',
+        source: source || null,
+        localCount: localSessions.length,
+        effectiveLimit,
+      }, '[sessions-controller] route-choice')
+      ctx.body = { sessions: filterPendingDeletedSessions(localSessions) }
+      return
+    }
+    try {
+      const tuiSessions = await listSessionSummaries(source === 'tui' ? 'tui' : undefined, effectiveLimit)
+      logger.info({
+        route: 'list',
+        source: source || null,
+        localCount: localSessions.length,
+        tuiCount: tuiSessions.length,
+        effectiveLimit,
+      }, '[sessions-controller] list mixed local+tui')
+      const merged = [...localSessions, ...dedupeTuiSessionsByLineage(tuiSessions)]
+      const deduped = Array.from(new Map(merged.map(session => [session.id, session])).values())
+        .sort((a, b) => Number(b.last_active || b.started_at || 0) - Number(a.last_active || a.started_at || 0))
+        .slice(0, effectiveLimit)
+      ctx.body = { sessions: filterPendingDeletedSessions(deduped) }
+      return
+    } catch (err) {
+      logger.warn(err, 'Hermes Session DB: summary query failed in local-session mode, falling back to local store only')
+      logger.info({
+        route: 'list',
+        source: source || null,
+        localCount: localSessions.length,
+        effectiveLimit,
+      }, '[sessions-controller] list local-only-fallback')
+      ctx.body = { sessions: filterPendingDeletedSessions(localSessions) }
+      return
+    }
   }
 
   const source = (ctx.query.source as string) || undefined
@@ -191,6 +263,12 @@ export async function list(ctx: any) {
 
   try {
     const sessions = await listSessionSummaries(source, limit && limit > 0 ? limit : 2000)
+    logger.info({
+      route: 'list',
+      mode: 'db',
+      source: source || null,
+      count: sessions.length,
+    }, '[sessions-controller] route-choice')
     ctx.body = { sessions: filterPendingDeletedSessions(sessions) }
     return
   } catch (err) {
@@ -208,9 +286,24 @@ export async function list(ctx: any) {
 export async function listHermesSessions(ctx: any) {
   const source = (ctx.query.source as string) || undefined
   const limit = ctx.query.limit ? parseInt(ctx.query.limit as string, 10) : undefined
+  const effectiveLimit = limit && limit > 0 ? limit : 2000
+
+  if (!source || source === 'tui') {
+    try {
+      const conversations = await listConversationSummariesFromDb({
+        source: 'tui',
+        humanOnly: true,
+        limit: effectiveLimit,
+      })
+      ctx.body = { sessions: filterPendingDeletedConversationSummaries(conversations) }
+      return
+    } catch (err) {
+      logger.warn(err, 'Hermes Conversation DB: tui summary query failed, falling back to session DB')
+    }
+  }
 
   try {
-    const sessions = await listSessionSummaries(source, limit && limit > 0 ? limit : 2000)
+    const sessions = await listSessionSummaries(source, effectiveLimit)
     ctx.body = { sessions: filterPendingDeletedSessions(sessions.filter(s => s.source !== 'api_server' && s.source !== 'cron')) }
     return
   } catch (err) {
@@ -231,6 +324,7 @@ export async function search(ctx: any) {
     const profile = getActiveProfileName()
     const effectiveLimit = limit && limit > 0 ? limit : 20
     const localResults = localSearchSessions(profile, q, effectiveLimit)
+      .filter(session => session.source !== 'tui')
     let tuiResults: Array<Awaited<ReturnType<typeof listSessionSummaries>>[number] & { matched_message_id: null, snippet: string, rank: number }> = []
     if (!source || source === 'tui') {
       try {
@@ -279,6 +373,15 @@ export async function search(ctx: any) {
             }
           })
           .slice(0, effectiveLimit)
+        tuiResults = dedupeTuiSessionsByLineage(tuiResults as any) as typeof tuiResults
+        logger.info({
+          route: 'search',
+          source: source || null,
+          localCount: localResults.length,
+          tuiCount: tuiResults.length,
+          effectiveLimit,
+          query: q,
+        }, '[sessions-controller] search mixed local+tui')
       } catch (err) {
         logger.warn(err, 'Hermes Session DB: tui search supplement failed')
       }
@@ -306,6 +409,12 @@ export async function search(ctx: any) {
 
   try {
     const results = await searchSessionSummaries(q, source, limit && limit > 0 ? limit : 20)
+    logger.info({
+      route: 'search',
+      mode: 'db',
+      source: source || null,
+      count: results.length,
+    }, '[sessions-controller] route-choice')
     ctx.body = { results: filterPendingDeletedSessions(results) }
   } catch (err) {
     logger.error(err, 'Hermes Session DB: search failed')
@@ -315,6 +424,15 @@ export async function search(ctx: any) {
 }
 
 export async function get(ctx: any) {
+  const requestedSessionId = ctx.params.id
+  const canonicalSessionId = resolveCanonicalSessionId(requestedSessionId) || requestedSessionId
+  logger.info({
+    route: 'get',
+    requestedSessionId,
+    canonicalSessionId,
+    useLocalSessionStore: useLocalSessionStore(),
+  }, '[sessions-controller] route-start')
+
   if (isPendingDeletedSession(ctx.params.id)) {
     ctx.status = 404
     ctx.body = { error: 'Session not found' }
@@ -322,33 +440,65 @@ export async function get(ctx: any) {
   }
 
   if (useLocalSessionStore()) {
-    const session = localGetSessionDetail(ctx.params.id)
-    if (session && !hasPendingDeletedSessionDetail(session)) {
+    const session = localGetSessionDetail(canonicalSessionId)
+    if (session && session.source !== 'tui' && !hasPendingDeletedSessionDetail(session)) {
+      logger.info({
+        route: 'get',
+        sessionId: requestedSessionId,
+        canonicalSessionId,
+        source: session.source,
+      }, '[sessions-controller] get local-hit')
       ctx.body = { session }
       return
+    }
+    if (session) {
+      logger.info({
+        route: 'get',
+        sessionId: requestedSessionId,
+        canonicalSessionId,
+        source: session.source,
+        messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+      }, '[sessions-controller] get local-bypassed')
     }
   }
 
   try {
-    const session = await getSessionDetailFromDb(ctx.params.id)
+    const session = await getSessionDetailFromDb(canonicalSessionId)
     if (session) {
       if (hasPendingDeletedSessionDetail(session)) {
         ctx.status = 404
         ctx.body = { error: 'Session not found' }
         return
       }
+      logger.info({
+        sessionId: requestedSessionId,
+        canonicalSessionId,
+        source: session.source,
+        messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+      }, '[sessions-controller] get db-hit')
       ctx.body = { session }
       return
     }
+    logger.info({
+      route: 'get',
+      sessionId: requestedSessionId,
+      canonicalSessionId,
+    }, '[sessions-controller] get db-null')
   } catch (err) {
     logger.warn(err, 'Hermes Session DB: detail query failed, falling back to CLI')
   }
 
-  const persistentSessionId = tuiBridge.getPersistentSessionId(ctx.params.id)
-  if (persistentSessionId && persistentSessionId !== ctx.params.id) {
+  const persistentSessionId = tuiBridge.getPersistentSessionId(canonicalSessionId)
+  if (persistentSessionId && persistentSessionId !== canonicalSessionId) {
     try {
       const mappedSession = await getSessionDetailFromDb(persistentSessionId)
       if (mappedSession && !hasPendingDeletedSessionDetail(mappedSession)) {
+        logger.info({
+          route: 'get',
+          sessionId: requestedSessionId,
+          canonicalSessionId,
+          persistentSessionId,
+        }, '[sessions-controller] get mapped-db-hit')
         ctx.body = { session: mappedSession }
         return
       }
@@ -358,21 +508,41 @@ export async function get(ctx: any) {
 
     const mappedCliSession = await hermesCli.getSession(persistentSessionId)
     if (mappedCliSession) {
+      logger.info({
+        route: 'get',
+        sessionId: requestedSessionId,
+        canonicalSessionId,
+        persistentSessionId,
+      }, '[sessions-controller] get mapped-cli-hit')
       ctx.body = { session: mappedCliSession }
       return
     }
   }
 
-  const session = await hermesCli.getSession(ctx.params.id)
-  if (!session) {
-    if (bridgeSessionFallbackEnabled()) {
-      ctx.body = { session: createBridgeSessionFallback(ctx.params.id) }
+  const session = await hermesCli.getSession(canonicalSessionId)
+  const wrapperOnlyCliSession = isBridgeContinuationWrapperOnlyDetail(session)
+  if (!session || wrapperOnlyCliSession) {
+    logger.info({
+      route: 'get',
+      sessionId: requestedSessionId,
+      canonicalSessionId,
+      fallback: !session ? 'none' : 'wrapper-only-cli',
+    }, '[sessions-controller] get cli-suppressed')
+    if (wrapperOnlyCliSession || bridgeSessionFallbackEnabled()) {
+      ctx.body = { session: createBridgeSessionFallback(requestedSessionId) }
       return
     }
     ctx.status = 404
     ctx.body = { error: 'Session not found' }
     return
   }
+  logger.info({
+    route: 'get',
+    sessionId: requestedSessionId,
+    canonicalSessionId,
+    source: session.source,
+    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+  }, '[sessions-controller] get cli-hit')
   ctx.body = { session }
 }
 

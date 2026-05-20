@@ -31,15 +31,20 @@ const SYNTHETIC_USER_PREFIXES = [
 ]
 
 function shouldTraceContinuationSession(sessionId: string): boolean {
-  return [
-    '20260505_130417_fdf139',
-    '20260430_080229_bb620b',
-    '20260429_103212_a0ee59',
-    '20260424_104940_452355',
-    '20260424_105802_37304c',
-    '20260424_104759_4261bf',
-    '20260424_103744_2a9add',
-  ].includes(sessionId)
+  return process.env.HERMES_TRACE_CONTINUATION_SESSION === sessionId
+}
+
+function shouldTraceConversationAggregation(): boolean {
+  return process.env.HERMES_TRACE_CONVERSATION_AGGREGATION === '1'
+}
+
+function traceAggregationTiming(stage: string, startedAt: number, detail: Record<string, unknown> = {}) {
+  if (!shouldTraceConversationAggregation()) return
+  logger.info({
+    stage,
+    elapsedMs: Date.now() - startedAt,
+    ...detail,
+  }, '[conversations-db] aggregation timing')
 }
 
 const VISIBLE_HUMAN_MESSAGE_SQL = `
@@ -80,6 +85,7 @@ interface ConversationSessionRow {
   cost_status: string
   raw_preview: string
   raw_context_anchor: string
+  raw_visible_history: string
   preview: string
   last_active: number
   has_visible_messages: boolean
@@ -200,6 +206,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
   const endedAt = normalizeNullableNumber(row.ended_at)
   const rawPreview = safeText(row.raw_preview || row.preview || '')
   const rawContextAnchor = safeText(row.raw_context_anchor || '')
+  const rawVisibleHistory = safeText(row.raw_visible_history || '')
   const preview = excerpt(bridgeContextDisplayText(rawPreview) || rawPreview)
   const rawTitle = normalizeNullableString(row.title)
   const title = rawTitle || (preview ? (preview.length > 40 ? `${preview.slice(0, 40)}...` : preview) : null)
@@ -230,6 +237,7 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
     cost_status: String(row.cost_status || ''),
     raw_preview: rawPreview,
     raw_context_anchor: rawContextAnchor,
+    raw_visible_history: rawVisibleHistory,
     preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
     last_active: lastActive,
     has_visible_messages: !!normalizeNumber(row.has_visible_messages) || isLiveTuiProcess,
@@ -263,6 +271,7 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     cost_status: '',
     raw_preview: 'Running TUI session',
     raw_context_anchor: 'Running TUI session',
+    raw_visible_history: 'Running TUI session',
     preview: 'Running TUI session',
     last_active: nowSeconds,
     has_visible_messages: true,
@@ -286,6 +295,25 @@ function timingMatchesParent(parent: ConversationSessionRow | undefined, child: 
 
 function isCompressionEndReason(reason: string | null): boolean {
   return reason === 'compression' || reason === 'compressed'
+}
+
+function hasConversationContent(session: ConversationSessionRow | undefined): boolean {
+  return !!session && (session.has_visible_messages || Number(session.tool_call_count || 0) > 0 || !!session.title)
+}
+
+function isEmptyCompressionPivot(session: ConversationSessionRow | undefined): boolean {
+  return !!session
+    && session.source === 'tui'
+    && session.parent_session_id == null
+    && isCompressionEndReason(session.end_reason)
+    && !hasConversationContent(session)
+}
+
+function isEmptyCompressionSession(session: ConversationSessionRow | undefined): boolean {
+  return !!session
+    && session.source === 'tui'
+    && isCompressionEndReason(session.end_reason)
+    && !hasConversationContent(session)
 }
 
 function isBridgeContextPrompt(value: unknown): boolean {
@@ -333,27 +361,75 @@ function bridgeContextAssistantHistorySnippets(value: unknown): string[] {
   return [...new Set(snippets.map(snippet => normalizeText(snippet)).filter(snippet => snippet.length >= 12))]
 }
 
-function contextReferencesParent(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
-  const history = bridgeContextHistoryText(child.raw_preview || child.preview || child.title)
-  if (!history) {
-    logger.info({
-      parentId: parent.id,
-      childId: child.id,
-      childPreview: child.preview,
-      childRawPreview: child.raw_preview,
-    }, '[conversations-db] bridge-context parent-reference miss: no history text')
-    return false
+function bridgeContextRoleHistorySnippets(value: unknown): string[] {
+  const history = bridgeContextHistoryText(value).replace(/^previous conversation context:\s*/, '')
+  if (!history) return []
+
+  const snippets: string[] = []
+  const rolePattern = /(?:^|\s)(assistant|user):\s*/g
+  let currentRole: string | null = null
+  let contentStart = 0
+  let match: RegExpExecArray | null
+
+  while ((match = rolePattern.exec(history))) {
+    if (currentRole === 'assistant' || currentRole === 'user') snippets.push(history.slice(contentStart, match.index).trim())
+    currentRole = match[1]
+    contentStart = rolePattern.lastIndex
   }
-  const anchors = [
-    parent.raw_context_anchor,
-    parent.raw_preview,
-    parent.preview,
-    parent.title,
+
+  if (currentRole === 'assistant' || currentRole === 'user') snippets.push(history.slice(contentStart).trim())
+  return [...new Set(snippets.map(snippet => normalizeText(snippet)).filter(snippet => snippet.length >= 12))]
+}
+
+function conversationHistoryAnchors(session: ConversationSessionRow): string[] {
+  return [
+    session.raw_visible_history,
+    session.raw_context_anchor,
+    session.raw_preview,
+    session.preview,
+    session.title,
+    assistantTextTail(session.raw_visible_history),
+    assistantTextTail(session.raw_context_anchor),
+    assistantTextTail(session.raw_preview),
+    assistantTextTail(session.preview),
+    bridgeAssistantHistoryTail(session.raw_visible_history),
+    bridgeAssistantHistoryTail(session.raw_context_anchor),
+    bridgeAssistantHistoryTail(session.raw_preview),
+    bridgeAssistantHistoryTail(session.preview),
   ]
     .map(anchor => normalizeText(anchor))
-    .filter(anchor => anchor.length >= 8)
-  const matched = anchors.some(anchor => history.includes(anchor) || anchor.includes(history))
-  if (!matched) {
+    .filter(anchor => anchor.length >= 12)
+}
+
+function bridgeContextHistoryMatchesSession(session: ConversationSessionRow, bridgeContextPrompt: unknown): boolean {
+  const history = bridgeContextHistoryText(bridgeContextPrompt)
+  if (!history) return false
+
+  const anchors = conversationHistoryAnchors(session)
+  if (anchors.some(anchor => history.includes(anchor) || anchor.includes(history))) return true
+
+  const snippets = bridgeContextRoleHistorySnippets(bridgeContextPrompt)
+  if (!snippets.length) return false
+  return snippets.some(snippet => anchors.some(anchor => anchor.includes(snippet) || snippet.includes(anchor)))
+}
+
+function contextReferencesParent(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  const prompt = child.raw_preview || child.preview || child.title
+  const history = bridgeContextHistoryText(prompt)
+  if (!history) {
+    if (shouldTraceContinuationSession(child.id) || shouldTraceContinuationSession(parent.id)) {
+      logger.info({
+        parentId: parent.id,
+        childId: child.id,
+        childPreview: child.preview,
+        childRawPreview: child.raw_preview,
+      }, '[conversations-db] bridge-context parent-reference miss: no history text')
+    }
+    return false
+  }
+  const anchors = conversationHistoryAnchors(parent)
+  const matched = bridgeContextHistoryMatchesSession(parent, prompt)
+  if (!matched && (shouldTraceContinuationSession(child.id) || shouldTraceContinuationSession(parent.id))) {
     logger.info({
       parentId: parent.id,
       childId: child.id,
@@ -371,8 +447,6 @@ function isLikelyOrphanContinuation(parent: ConversationSessionRow, child: Conve
   if (delta < 0) return false
   if (delta <= LINEAGE_TOLERANCE_SECONDS) return true
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
-
-  if (parent.source === 'tui' && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return true
 
   const parentPreview = normalizeText(parent.preview)
   const childPreview = normalizeText(child.preview)
@@ -431,6 +505,62 @@ function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) 
     if (!parentId) continue
     const child = sessions.find(session => session.id === childId)
     if (child && child.parent_session_id == null) child.parent_session_id = parentId
+  }
+}
+
+function linkParentlessEmptyCompressionPivots(sessions: ConversationSessionRow[]) {
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  const children = new Map<string, ConversationSessionRow[]>()
+  const childIdsByParent = new Map<string | null, string[]>()
+  for (const session of sessions) {
+    const key = session.parent_session_id ?? null
+    const childIds = childIdsByParent.get(key) || []
+    childIds.push(session.id)
+    childIdsByParent.set(key, childIds)
+
+    if (!session.parent_session_id) continue
+    const siblings = children.get(session.parent_session_id) || []
+    siblings.push(session)
+    children.set(session.parent_session_id, siblings)
+  }
+
+  for (const pivot of sessions) {
+    if (!isEmptyCompressionPivot(pivot)) continue
+    const descendants = children.get(pivot.id) || []
+    if (descendants.length !== 1) continue
+    const firstChild = descendants[0]
+    if (firstChild.source !== pivot.source) continue
+
+    const visibleDescendant = collectConversationChain(firstChild.id, byId, childIdsByParent)
+      .find(session => hasConversationContent(session) && isBridgeContextPrompt(session.raw_preview || session.preview || session.title))
+    if (!visibleDescendant) continue
+
+    const pivotStarted = Number(pivot.started_at || 0)
+    const candidate = sessions
+      .filter(session => session.id !== pivot.id && !descendants.some(descendant => descendant.id === session.id))
+      .filter(session => session.source === pivot.source)
+      .filter(session => hasConversationContent(session))
+      .filter(session => Number(session.started_at || 0) <= pivotStarted)
+      .filter(session => !isBridgeContextPrompt(session.raw_preview || session.preview || session.title))
+      .filter(session => bridgeContextHistoryMatchesSession(session, visibleDescendant.raw_preview || visibleDescendant.preview || visibleDescendant.title))
+      .sort((left, right) => {
+        const leftAnchor = Number(left.last_active || left.started_at || 0)
+        const rightAnchor = Number(right.last_active || right.started_at || 0)
+        if (rightAnchor !== leftAnchor) return rightAnchor - leftAnchor
+        if (right.started_at !== left.started_at) return right.started_at - left.started_at
+        return right.id.localeCompare(left.id)
+      })[0]
+
+    if (candidate) {
+      pivot.parent_session_id = candidate.id
+      if (shouldTraceConversationAggregation() || shouldTraceContinuationSession(pivot.id) || shouldTraceContinuationSession(candidate.id)) {
+        logger.info({
+          pivotId: pivot.id,
+          parentId: candidate.id,
+          evidenceChildId: visibleDescendant.id,
+        }, '[conversations-db] linked parentless empty compression pivot')
+      }
+    }
   }
 }
 
@@ -559,9 +689,20 @@ function isLikelyExplicitContinuation(parent: ConversationSessionRow, child: Con
   return true
 }
 
-function isBridgeContextBranchContinuationChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
+function isBridgeContextBranchContinuationChild(
+  session: ConversationSessionRow | undefined,
+  byId: Map<string, ConversationSessionRow>,
+  inferredChildren?: Map<string, string[]>,
+): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
+  if (
+    parent
+    && session.source === 'tui'
+    && (inferredChildren?.get(session.id) || []).length > 0
+    && parent.ended_at != null
+    && (isCompressionEndReason(parent.end_reason) || parent.end_reason === 'tui_shutdown')
+  ) return true
   return !!parent
     && (isLikelyBridgeContextBranchContinuation(parent, session) || isLikelyBridgeContextRootContinuation(parent, session) || isLikelyExplicitContinuation(parent, session))
 }
@@ -577,6 +718,7 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
     .filter(candidate => candidate.source === session.source)
     .filter(candidate => candidate.source !== 'tool')
     .filter(candidate => Number(candidate.started_at || 0) <= sessionStarted)
+    .filter(candidate => sessionStarted - Number(candidate.last_active || candidate.started_at || 0) <= DUPLICATE_CONTINUATION_WINDOW_SECONDS)
     .filter(candidate => candidate.has_visible_messages || Number(candidate.tool_call_count || 0) > 0)
     .sort((left, right) => {
       const leftAnchor = Number(left.last_active || left.started_at || 0)
@@ -612,20 +754,7 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
     if (isBridgeContextPrompt(candidate.raw_preview || candidate.preview || candidate.title)) return false
     const candidateTitle = normalizeText(candidate.title)
     const titleMatches = !!sessionTitle && !!candidateTitle && candidateTitle === sessionTitle
-    const candidateAnchors = [
-      candidate.raw_context_anchor,
-      candidate.raw_preview,
-      candidate.preview,
-      candidate.title,
-      assistantTextTail(candidate.raw_context_anchor),
-      assistantTextTail(candidate.raw_preview),
-      assistantTextTail(candidate.preview),
-      bridgeAssistantHistoryTail(candidate.raw_context_anchor),
-      bridgeAssistantHistoryTail(candidate.raw_preview),
-      bridgeAssistantHistoryTail(candidate.preview),
-    ]
-      .map(anchor => normalizeText(anchor))
-      .filter(anchor => anchor.length >= 16)
+    const candidateAnchors = conversationHistoryAnchors(candidate).filter(anchor => anchor.length >= 16)
     const anchorMatches = candidateAnchors.some(anchor => {
       const window = Math.min(48, anchor.length)
       const fragmentWindow = Math.min(16, anchor.length)
@@ -643,7 +772,8 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
       return Array.from(fragments).some(fragment => fragment.length >= 12 && history.includes(fragment))
     })
     const assistantHistoryMatches = assistantHistorySnippets.some(snippet => candidateAnchors.some(anchor => anchor.includes(snippet) || snippet.includes(anchor)))
-    if (!titleMatches && !anchorMatches && !assistantHistoryMatches) return false
+    const fullHistoryMatches = bridgeContextHistoryMatchesSession(candidate, session.raw_preview || session.preview || session.title)
+    if (!titleMatches && !anchorMatches && !assistantHistoryMatches && !fullHistoryMatches) return false
     const anchor = Number(candidate.last_active || candidate.started_at || 0)
     const delta = sessionStarted - anchor
     return delta >= 0 && delta <= DUPLICATE_CONTINUATION_WINDOW_SECONDS
@@ -682,6 +812,18 @@ function buildInferredBridgeContextParentMap(sessions: ConversationSessionRow[])
   const map = new Map<string, string>()
   const explicitLinks = readBridgeContinuationLinks()
   const byId = new Map(sessions.map(session => [session.id, session]))
+  const sortedCandidates = sessions
+    .filter(candidate => candidate.source === 'tui')
+    .filter(candidate => candidate.source !== 'tool')
+    .filter(candidate => candidate.has_visible_messages || Number(candidate.tool_call_count || 0) > 0)
+    .sort((left, right) => {
+      const leftAnchor = Number(left.last_active || left.started_at || 0)
+      const rightAnchor = Number(right.last_active || right.started_at || 0)
+      if (leftAnchor !== rightAnchor) return leftAnchor - rightAnchor
+      if (left.started_at !== right.started_at) return left.started_at - right.started_at
+      return left.id.localeCompare(right.id)
+    })
+
   for (const session of sessions) {
     const explicitParentId = explicitLinks[session.id]
     if (explicitParentId && !session.parent_session_id) {
@@ -691,7 +833,23 @@ function buildInferredBridgeContextParentMap(sessions: ConversationSessionRow[])
         continue
       }
     }
-    const parent = findInferredBridgeContextParent(session, sessions)
+    if (session.parent_session_id != null) continue
+    if (!isBridgeContextPrompt(session.raw_preview || session.preview || session.title)) continue
+    const sessionStarted = Number(session.started_at || 0)
+    const windowCandidates: ConversationSessionRow[] = []
+    for (let index = sortedCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = sortedCandidates[index]
+      if (candidate.id === session.id) continue
+      if (Number(candidate.started_at || 0) > sessionStarted) continue
+      const anchor = Number(candidate.last_active || candidate.started_at || 0)
+      const delta = sessionStarted - anchor
+      if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) {
+        if (anchor < sessionStarted - DUPLICATE_CONTINUATION_WINDOW_SECONDS) break
+        continue
+      }
+      windowCandidates.push(candidate)
+    }
+    const parent = findInferredBridgeContextParent(session, windowCandidates)
     if (parent) map.set(session.id, parent.id)
   }
   return map
@@ -747,16 +905,21 @@ function isSubagentSession(session: ConversationSessionRow | undefined): boolean
   return !!session && session.source === 'subagent'
 }
 
-function isAgentLikeBranchSession(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
+function isAgentLikeBranchSession(
+  session: ConversationSessionRow | undefined,
+  byId: Map<string, ConversationSessionRow>,
+  inferredChildren?: Map<string, string[]>,
+): boolean {
   if (!session || session.source === 'tool') return false
   if (session.source === 'subagent') return true
+  if (isEmptyCompressionSession(session)) return false
   if ((session.source !== 'tui' && session.source !== 'webui-bridge') || !session.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
   if (!parent || parent.source === 'tool') return false
   if (isBridgeContextPrompt(session.raw_preview || session.preview || session.title)) return false
   if (isCompressionLineageChild(session, byId)) return false
   if (isExplicitHandoffContinuationChild(session, byId)) return false
-  if (isBridgeContextBranchContinuationChild(session, byId)) return false
+  if (isBridgeContextBranchContinuationChild(session, byId, inferredChildren)) return false
 
   const childStarted = Number(session.started_at || 0)
   const parentStarted = Number(parent.started_at || 0)
@@ -832,11 +995,12 @@ function mainlineSessionsForRoot(
   sessions: ConversationSessionRow[],
   byId: Map<string, ConversationSessionRow>,
   inferredParents: Map<string, string>,
+  inferredChildren?: Map<string, string[]>,
 ): ConversationSessionRow[] {
   const memo = new Map<string, string | null>()
   return sessions
     .filter(session => session.source !== 'tool')
-    .filter(session => !isAgentLikeBranchSession(session, byId))
+    .filter(session => !isAgentLikeBranchSession(session, byId, inferredChildren))
     .filter(session => rootConversationIdForSession(session.id, byId, inferredParents, memo) === rootId)
     .sort((left, right) => {
       if (left.started_at !== right.started_at) return left.started_at - right.started_at
@@ -844,17 +1008,47 @@ function mainlineSessionsForRoot(
     })
 }
 
+function buildMainlineByRoot(
+  sessions: ConversationSessionRow[],
+  byId: Map<string, ConversationSessionRow>,
+  inferredParents: Map<string, string>,
+  inferredChildren?: Map<string, string[]>,
+): Map<string, ConversationSessionRow[]> {
+  const rootMemo = new Map<string, string | null>()
+  const grouped = new Map<string, ConversationSessionRow[]>()
+
+  for (const session of sessions) {
+    if (session.source === 'tool') continue
+    if (isAgentLikeBranchSession(session, byId, inferredChildren)) continue
+    const rootId = rootConversationIdForSession(session.id, byId, inferredParents, rootMemo)
+    if (!rootId) continue
+    const group = grouped.get(rootId) || []
+    group.push(session)
+    grouped.set(rootId, group)
+  }
+
+  for (const group of grouped.values()) {
+    group.sort((left, right) => {
+      if (left.started_at !== right.started_at) return left.started_at - right.started_at
+      return left.id.localeCompare(right.id)
+    })
+  }
+
+  return grouped
+}
+
 function collectSubagentBranchRoots(
   mainlineIds: Set<string>,
   byId: Map<string, ConversationSessionRow>,
   effectiveChildren: Map<string | null, string[]>,
+  inferredChildren?: Map<string, string[]>,
 ): ConversationSessionRow[] {
   const roots: ConversationSessionRow[] = []
   for (const parentId of mainlineIds) {
       const childIds = effectiveChildren.get(parentId) || []
     for (const childId of childIds) {
       const child = byId.get(childId)
-      if (child && isAgentLikeBranchSession(child, byId)) roots.push(child)
+      if (child && isAgentLikeBranchSession(child, byId, inferredChildren)) roots.push(child)
     }
   }
   return roots.sort((left, right) => {
@@ -868,15 +1062,16 @@ function buildSubagentBranchTree(
   root: ConversationSessionRow,
   byId: Map<string, ConversationSessionRow>,
   effectiveChildren: Map<string | null, string[]>,
+  inferredChildren?: Map<string, string[]>,
   seen = new Set<string>(),
 ): ConversationBranch | null {
-  if (!isAgentLikeBranchSession(root, byId) || seen.has(root.id)) return null
+  if (!isAgentLikeBranchSession(root, byId, inferredChildren) || seen.has(root.id)) return null
   seen.add(root.id)
 
   const childBranches = (effectiveChildren.get(root.id) || [])
     .map(childId => byId.get(childId))
-    .filter((child): child is ConversationSessionRow => isAgentLikeBranchSession(child, byId))
-    .map(child => buildSubagentBranchTree(db, child, byId, effectiveChildren, seen))
+    .filter((child): child is ConversationSessionRow => isAgentLikeBranchSession(child, byId, inferredChildren))
+    .map(child => buildSubagentBranchTree(db, child, byId, effectiveChildren, inferredChildren, seen))
     .filter((branch): branch is ConversationBranch => !!branch)
 
   const messages = loadVisibleMessagesForSessions(db, [root])
@@ -1076,6 +1271,7 @@ function representedSessionIds(chain: ConversationSessionRow[]): string[] {
 
 function logConversationDecision(stage: string, session: ConversationSessionRow | undefined, detail: Record<string, unknown> = {}) {
   if (!session) return
+  if (!shouldTraceConversationAggregation() && !shouldTraceContinuationSession(session.id)) return
   logger.info({
     sessionId: session.id,
     source: session.source,
@@ -1156,16 +1352,18 @@ function aggregateSummary(
   const normalizedBranchSessionCount = requestedRoot && isBridgeContextBranchContinuationChild(requestedRoot, byId)
     ? 0
     : branchSessionCount
-  logger.info({
-    rootId,
-    chainIds: unifiedChain.map(session => session.id),
-    summaryChainIds: summaryChain.map(session => session.id),
-    compressionHistoryIds: fallbackCompressionHistory.map(session => session.id),
-    bridgeContextHistoryIds: fallbackBridgeContextHistory.map(session => session.id),
-    mainlineIds: normalizedMainline.map(session => session.id),
-    representedSessionIds: representedSessionIds(unifiedChain),
-    branchSessionCount: normalizedBranchSessionCount,
-  }, '[conversations-db] aggregate-summary')
+  if (shouldTraceConversationAggregation() || shouldTraceContinuationSession(rootId)) {
+    logger.info({
+      rootId,
+      chainIds: unifiedChain.map(session => session.id),
+      summaryChainIds: summaryChain.map(session => session.id),
+      compressionHistoryIds: fallbackCompressionHistory.map(session => session.id),
+      bridgeContextHistoryIds: fallbackBridgeContextHistory.map(session => session.id),
+      mainlineIds: normalizedMainline.map(session => session.id),
+      representedSessionIds: representedSessionIds(unifiedChain),
+      branchSessionCount: normalizedBranchSessionCount,
+    }, '[conversations-db] aggregate-summary')
+  }
 
   return {
     ...toSummary(visibleHead),
@@ -1460,6 +1658,19 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
         ),
         ''
       ) AS raw_context_anchor,
+      COALESCE(
+        (
+          SELECT GROUP_CONCAT(role || ': ' || REPLACE(REPLACE(content, CHAR(10), ' '), CHAR(13), ' '), CHAR(10))
+          FROM (
+            SELECT m.role AS role, m.content AS content
+            FROM messages m
+            WHERE m.session_id = s.id
+              AND ${VISIBLE_HUMAN_MESSAGE_SQL}
+            ORDER BY m.timestamp, m.id
+          )
+        ),
+        ''
+      ) AS raw_visible_history,
       COALESCE((SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id), s.started_at) AS last_active,
       CASE WHEN EXISTS (
         SELECT 1
@@ -1485,23 +1696,28 @@ async function loadConversationSessions(source?: string, includeTool = false): P
     const nowSeconds = Date.now() / 1000
     const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
     linkOrphanCompressionContinuations(sessions)
+    linkParentlessEmptyCompressionPivots(sessions)
     linkOrphanBridgeContextRootContinuations(sessions)
     linkOrphanBridgeContextBranchContinuations(sessions)
-    logger.info({
-      source: source || 'all',
-      includeTool,
-      rowCount: rows.length,
-      sessionCount: sessions.length,
-      liveTuiCount: liveTuiSessionKeys.size,
-      sampleIds: sessions.slice(0, 20).map(session => session.id),
-    }, '[conversations-db] load-conversation-sessions')
+    if (shouldTraceConversationAggregation()) {
+      logger.info({
+        source: source || 'all',
+        includeTool,
+        rowCount: rows.length,
+        sessionCount: sessions.length,
+        liveTuiCount: liveTuiSessionKeys.size,
+        sampleIds: sessions.slice(0, 20).map(session => session.id),
+      }, '[conversations-db] load-conversation-sessions')
+    }
     if (source && source !== 'tui') return sessions
 
     const knownIds = new Set(sessions.map(session => session.id))
     for (const sessionKey of liveTuiSessionKeys) {
       if (!knownIds.has(sessionKey)) {
         sessions.push(createLiveTuiPlaceholderSession(sessionKey, nowSeconds))
-        logger.info({ sessionKey }, '[conversations-db] add-live-tui-placeholder')
+        if (shouldTraceConversationAggregation() || shouldTraceContinuationSession(sessionKey)) {
+          logger.info({ sessionKey }, '[conversations-db] add-live-tui-placeholder')
+        }
       }
     }
     return sessions
@@ -1511,11 +1727,14 @@ async function loadConversationSessions(source?: string, includeTool = false): P
 }
 
 export async function listConversationSummariesFromDb(options: ConversationListOptions = {}): Promise<ConversationSummary[]> {
+  const startedAt = Date.now()
   const humanOnly = options.humanOnly !== false
   const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_CONVERSATION_LIMIT
   const sessions = await loadConversationSessions(options.source)
+  traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
   const byId = new Map(sessions.map(session => [session.id, session]))
   const inferredParents = buildInferredBridgeContextParentMap(sessions)
+  traceAggregationTiming('built-inferred-parents', startedAt, { inferredParentCount: inferredParents.size })
   const inferredChildren = buildInferredBridgeContextChildrenMap(inferredParents)
   const directChildrenByParent = new Map<string | null, string[]>()
   for (const session of sessions) {
@@ -1526,10 +1745,12 @@ export async function listConversationSummariesFromDb(options: ConversationListO
   }
   const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
   const rootMemo = new Map<string, string | null>()
+  const mainlineByRoot = buildMainlineByRoot(sessions, byId, inferredParents, inferredChildren)
+  traceAggregationTiming('built-mainlines', startedAt, { rootCount: mainlineByRoot.size })
 
   if (!humanOnly) {
     return sortByRecency(sessions.map(toSummary)).slice(0, limit)
-  }
+    }
 
   const db = await openConversationDb()
   try {
@@ -1540,18 +1761,20 @@ export async function listConversationSummariesFromDb(options: ConversationListO
       .map(session => rootConversationIdForSession(session.id, byId, inferredParents, rootMemo))
       .filter((id): id is string => !!id)
     const uniqueRootIds = [...new Set(rootIds)]
+    traceAggregationTiming('built-root-ids', startedAt, { uniqueRootCount: uniqueRootIds.length })
     const summaries = uniqueRootIds
       .map(rootId => {
-        const mainline = mainlineSessionsForRoot(rootId, sessions, byId, inferredParents)
+        const mainline = mainlineByRoot.get(rootId) || []
         if (!mainline.length) return null
         const mainlineIds = new Set(mainline.map(session => session.id))
-        const subagentRoots = collectSubagentBranchRoots(mainlineIds, byId, childrenByParent)
+        const subagentRoots = collectSubagentBranchRoots(mainlineIds, byId, childrenByParent, inferredChildren)
         const branches = subagentRoots
-          .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent))
+          .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent, inferredChildren))
           .filter((branch): branch is ConversationBranch => !!branch)
         return aggregateSummary(rootId, byId, childrenByParent, countBranches(branches), inferredParents, mainline)
       })
       .filter((summary): summary is ConversationSummary => !!summary)
+    traceAggregationTiming('built-summaries', startedAt, { summaryCount: summaries.length })
 
     return sortByRecency(summaries).slice(0, limit)
   } finally {
@@ -1585,7 +1808,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     if (!session || session.source === 'tool' || isSubagentSession(session)) return null
     const rootId = rootConversationIdForSession(sessionId, byId, inferredParents, rootMemo)
     if (!rootId) return null
-    chain = mainlineSessionsForRoot(rootId, sessions, byId, inferredParents)
+    chain = mainlineSessionsForRoot(rootId, sessions, byId, inferredParents, inferredChildren)
   }
 
   if (!chain.length) return null
@@ -1594,8 +1817,8 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
   try {
     const messages = loadVisibleMessagesForSessions(db, chain)
     const branches = humanOnly
-      ? collectSubagentBranchRoots(new Set(chain.map(session => session.id)), byId, childrenByParent)
-          .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent))
+      ? collectSubagentBranchRoots(new Set(chain.map(session => session.id)), byId, childrenByParent, inferredChildren)
+          .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent, inferredChildren))
           .filter((branch): branch is ConversationBranch => !!branch)
       : []
 

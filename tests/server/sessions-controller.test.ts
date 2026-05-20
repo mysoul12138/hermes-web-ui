@@ -199,6 +199,37 @@ describe('session conversations controller', () => {
     expect(ctx.body).toMatchObject({ ok: true, deleted: 2, failed: 0 })
   })
 
+  it('returns an empty fallback for wrapper-only TUI detail instead of leaking raw continuation context', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue(null)
+    getSessionMock.mockResolvedValue({
+      id: 'wrapper-only',
+      source: 'tui',
+      title: 'Wrapper only',
+      messages: [
+        {
+          id: 1,
+          session_id: 'wrapper-only',
+          role: 'user',
+          content: 'Previous conversation context:\nassistant: old work\n\nCurrent user message:\n你好',
+          timestamp: 1,
+        },
+      ],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'wrapper-only' }, body: null }
+    await mod.get(ctx)
+
+    expect(getSessionMock).toHaveBeenCalledWith('wrapper-only')
+    expect(ctx.status).toBeUndefined()
+    expect(ctx.body.session).toMatchObject({
+      id: 'wrapper-only',
+      source: 'webui-bridge',
+      messages: [],
+      message_count: 0,
+    })
+  })
+
   it('supplements local session-store search results with tui sessions from state.db', async () => {
     useLocalSessionStoreState.value = true
     getActiveProfileNameMock.mockReturnValue('default')

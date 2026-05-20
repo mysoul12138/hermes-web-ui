@@ -35,8 +35,9 @@ function rotateIfNeeded() {
 // Rotate on startup
 rotateIfNeeded()
 
-// Periodic rotation check — prevents unbounded log growth
-setInterval(rotateIfNeeded, CHECK_INTERVAL)
+// Periodic rotation check — prevents unbounded log growth.
+// Do not keep one-off scripts/tests alive just because they imported logger.
+setInterval(rotateIfNeeded, CHECK_INTERVAL).unref()
 
 export const logger = pino({
   level: process.env.LOG_LEVEL || 'info',

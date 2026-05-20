@@ -137,6 +137,7 @@ export default {
     messageQueue: '消息队列',
     removeQueuedMessage: '移除队列消息',
     stop: '停止',
+    stopping: '正在停止...',
     start: '启动',
     stopGateway: '停止网关',
     send: '发送',

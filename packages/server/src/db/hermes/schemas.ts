@@ -189,6 +189,27 @@ export const GC_SESSION_PROFILES_SCHEMA: Record<string, string> = {
 }
 
 // ============================================================================
+// Session Lineage Registry
+// ============================================================================
+
+export const SESSION_LINEAGE_TABLE = 'session_lineage'
+
+export const SESSION_LINEAGE_SCHEMA: Record<string, string> = {
+  session_id: 'TEXT PRIMARY KEY',
+  logical_conversation_id: 'TEXT NOT NULL',
+  source: "TEXT NOT NULL DEFAULT 'unknown'",
+  authority: "TEXT NOT NULL DEFAULT 'explicit'",
+  relation_kind: "TEXT NOT NULL DEFAULT 'root'",
+  parent_session_id: 'TEXT',
+  root_session_id: 'TEXT',
+  web_session_id: 'TEXT',
+  bridge_session_id: 'TEXT',
+  persistent_session_id: 'TEXT',
+  created_at: 'INTEGER NOT NULL',
+  updated_at: 'INTEGER NOT NULL',
+}
+
+// ============================================================================
 // Schema Sync Utilities
 // ============================================================================
 
@@ -326,6 +347,7 @@ export function initAllHermesTables(): void {
     syncTable(GC_CONTEXT_SNAPSHOTS_TABLE, GC_CONTEXT_SNAPSHOTS_SCHEMA)
     syncTable(GC_PENDING_SESSION_DELETES_TABLE, GC_PENDING_SESSION_DELETES_SCHEMA)
     syncTable(GC_SESSION_PROFILES_TABLE, GC_SESSION_PROFILES_SCHEMA)
+    syncTable(SESSION_LINEAGE_TABLE, SESSION_LINEAGE_SCHEMA)
 
     // Group chat - single-column primary key tables (PRIMARY KEY in column definition)
     syncTable(GC_ROOM_AGENTS_TABLE, GC_ROOM_AGENTS_SCHEMA, {

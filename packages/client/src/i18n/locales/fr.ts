@@ -123,6 +123,7 @@ export default {
     messageQueue: 'File de messages',
     removeQueuedMessage: 'Retirer le message de la file',
     stop: 'Arreter',
+    stopping: 'Arret...',
     send: 'Envoyer',
     contextUsed: 'Contexte utilise :',
     sessions: 'Sessions',

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockUpdateUsage = vi.hoisted(() => vi.fn())
 const mockIsSessionCompressionEnded = vi.hoisted(() => vi.fn())
@@ -16,6 +16,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { TuiBridgeService, resolveBridgeRoot } from '../../packages/server/src/services/hermes/tui-bridge'
+import { closeDb } from '../../packages/server/src/db'
+import { getSessionLineage } from '../../packages/server/src/db/hermes/session-lineage'
 
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
@@ -62,6 +64,13 @@ describe('TuiBridgeService steer compatibility', () => {
     delete process.env.HERMES_PYTHON_SRC_ROOT
     delete process.env.HERMES_AGENT_ROOT
     delete process.env.HERMES_HOME
+    delete process.env.NODE_ENV
+    process.env.VITEST = 'true'
+    closeDb()
+  })
+
+  afterEach(() => {
+    closeDb()
   })
 
   it('prefers the live hermes-agent tree over the old publish snapshot by default', () => {
@@ -197,7 +206,7 @@ describe('TuiBridgeService steer compatibility', () => {
     })
     expect(client.requests).toEqual([
       { method: 'session.steer', params: { session_id: 'tui-session', text: 'adjust direction' } },
-      { method: 'command.dispatch', params: { session_id: 'tui-session', command: '/steer adjust direction' } },
+      { method: 'command.dispatch', params: { session_id: 'tui-session', name: 'steer', arg: 'adjust direction' } },
     ])
     ;(bridge as any).closeRun('bridge_run_1')
   })
@@ -281,6 +290,32 @@ describe('TuiBridgeService steer compatibility', () => {
     expect(result).toMatchObject({
       bridge: true,
       context_handoff: true,
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('writes continuation lineage against the previous persistent session during bridge handoff', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).persistentSessionsByWebSession.set('root-web-session', 'persistent-session-root')
+
+    const result = await bridge.startRun('follow-up request', 'root-web-session', [
+      { role: 'user', content: 'older request' },
+      { role: 'assistant', content: 'older answer' },
+    ])
+
+    const persistentLineage = getSessionLineage('persistent-session-1')
+    expect(result).toMatchObject({
+      bridge: true,
+      context_handoff: true,
+      session_id: 'persistent-session-1',
+    })
+    expect(persistentLineage).toMatchObject({
+      session_id: 'persistent-session-1',
+      relation_kind: 'continuation',
+      parent_session_id: 'persistent-session-root',
     })
     ;(bridge as any).closeRun(result.run_id)
   })
@@ -652,6 +687,51 @@ describe('TuiBridgeService steer compatibility', () => {
     })
     expect(result.context_token_count).toBeGreaterThan(0)
     ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('keeps a stable logical lineage root across bridge context handoff continuations', async () => {
+    closeDb()
+    const runtimeDir = join(tmpdir(), `hermes-webui-lineage-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    process.env.HERMES_HOME = runtimeDir
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const first = await bridge.startRun('first request', 'root-web-session', [])
+    ;(bridge as any).closeRun(first.run_id)
+
+    const second = await bridge.startRun('follow-up request', 'continued-web-session', [
+      { role: 'user', content: 'first request' },
+      { role: 'assistant', content: 'first answer' },
+    ], {
+      lineageParentSessionId: 'root-web-session',
+      lineageRootSessionId: 'root-web-session',
+    })
+    ;(bridge as any).closeRun(second.run_id)
+
+    const rootWeb = getSessionLineage('root-web-session')
+    const continuedWeb = getSessionLineage('continued-web-session')
+    const firstPersistent = getSessionLineage('persistent-session-1')
+    const secondPersistent = getSessionLineage('persistent-session-2')
+    expect(rootWeb).toMatchObject({
+      root_session_id: 'root-web-session',
+    })
+    expect(continuedWeb).toMatchObject({
+      logical_conversation_id: 'root-web-session',
+      root_session_id: 'root-web-session',
+    })
+    expect(firstPersistent).toMatchObject({
+      logical_conversation_id: 'root-web-session',
+      root_session_id: 'root-web-session',
+      relation_kind: 'continuation',
+    })
+    expect(secondPersistent).toMatchObject({
+      logical_conversation_id: 'root-web-session',
+      root_session_id: 'root-web-session',
+      relation_kind: 'continuation',
+      parent_session_id: 'root-web-session',
+    })
+    rmSync(runtimeDir, { recursive: true, force: true })
   })
 
   it('filters synthetic compaction and continuation wrapper history before building bridge prompts', async () => {

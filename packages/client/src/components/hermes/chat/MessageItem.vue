@@ -30,6 +30,8 @@ const toast = useMessage();
 const isSystem = computed(() => props.message.role === "system");
 const toolExpanded = ref(false);
 const previewUrl = ref<string | null>(null);
+const copiedBubble = ref(false);
+let copiedBubbleTimer: number | null = null;
 
 const chatStore = useChatStore();
 const settingsStore = useSettingsStore();
@@ -52,6 +54,12 @@ async function copyBubbleContent() {
   if (!text) return
   const ok = await copyToClipboard(text)
   if (ok) {
+    copiedBubble.value = true
+    if (copiedBubbleTimer !== null) window.clearTimeout(copiedBubbleTimer)
+    copiedBubbleTimer = window.setTimeout(() => {
+      copiedBubble.value = false
+      copiedBubbleTimer = null
+    }, 1400)
     toast.success(t('chat.copiedBubble'))
     return
   }
@@ -174,6 +182,7 @@ watchEffect(ensureTick);
 
 onBeforeUnmount(() => {
   if (tickTimer !== null) window.clearInterval(tickTimer);
+  if (copiedBubbleTimer !== null) window.clearTimeout(copiedBubbleTimer);
 });
 
 const thinkingDurationMs = computed<number | null>(() => {
@@ -822,18 +831,22 @@ onBeforeUnmount(() => {
                   <rect x="14" y="4" width="4" height="16"/>
                 </svg>
               </button>
+          <span class="message-time">{{ timeStr }}</span>
               <button
                 v-if="copyableContent"
                 class="copy-bubble-btn"
+                :class="{ copied: copiedBubble }"
                 @click="copyBubbleContent"
                 :title="t('chat.copyBubble')"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg v-if="copiedBubble" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                 </svg>
           </button>
-          <span class="message-time">{{ timeStr }}</span>
         </div>
         <div class="message-meta-status">
           <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>
@@ -1353,17 +1366,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   justify-content: flex-start;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s ease;
-
-  .message:hover & {
-    opacity: 1;
-  }
-
-  // 移动端一直显示按钮
-  @media (max-width: 768px) {
-    opacity: 1;
-  }
 }
 
 .copy-bubble-btn,
@@ -1393,6 +1397,16 @@ onBeforeUnmount(() => {
       color: #cccccc;
       background: rgba(255, 255, 255, 0.1);
     }
+  }
+}
+
+.copy-bubble-btn.copied {
+  color: #18a058;
+  background: rgba(24, 160, 88, 0.12);
+
+  .dark & {
+    color: #63e2a7;
+    background: rgba(99, 226, 167, 0.14);
   }
 }
 

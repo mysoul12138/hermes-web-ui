@@ -123,6 +123,7 @@ export default {
     messageQueue: 'Cola de mensajes',
     removeQueuedMessage: 'Quitar mensaje de la cola',
     stop: 'Detener',
+    stopping: 'Deteniendo...',
     send: 'Enviar',
     steerMessage: 'Orientar',
     messageSteered: '/steer inyectado',

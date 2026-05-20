@@ -1,5 +1,6 @@
 import { getActiveProfileDir, getProfileDir } from '../../services/hermes/hermes-profile'
 import type { LocalUsageStats } from './usage-store'
+import { logger } from '../../services/logger'
 
 const SQLITE_AVAILABLE = (() => {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -10,6 +11,7 @@ const LINEAGE_TOLERANCE_SECONDS = 3
 const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const COMPRESSION_END_REASONS = new Set(['compression', 'compressed'])
 const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
+const BRIDGE_CURRENT_USER_MARKER = 'current user message:'
 const SYNTHETIC_USER_PREFIXES = [
   '[system:',
   '[context compaction',
@@ -386,6 +388,47 @@ function isBridgeContextPrompt(value: unknown): boolean {
   return normalizeText(value).startsWith(BRIDGE_CONTEXT_PROMPT_PREFIX)
 }
 
+function bridgeContextHistoryText(value: unknown): string {
+  const text = String(value || '').trim()
+  if (!isBridgeContextPrompt(text)) return ''
+  const normalized = text.toLowerCase()
+  const markerIndex = normalized.lastIndexOf(BRIDGE_CURRENT_USER_MARKER)
+  const history = markerIndex >= 0 ? text.slice(0, markerIndex) : text
+  return normalizeText(history)
+}
+
+function bridgeContextReferencesParent(parent: HermesSessionInternalRow, child: HermesSessionInternalRow): boolean {
+  const history = bridgeContextHistoryText(child.preview || child.title)
+  if (!history) return false
+  const anchors = [
+    parent.preview,
+  ]
+    .map(anchor => normalizeText(anchor))
+    .filter(anchor => anchor.length >= 12)
+  return anchors.some(anchor => history.includes(anchor) || anchor.includes(history))
+}
+
+function bridgeContextReferencesCompressionChain(
+  parent: HermesSessionInternalRow,
+  child: HermesSessionInternalRow,
+  idx: SessionIndex,
+): boolean {
+  if (bridgeContextReferencesParent(parent, child)) return true
+  const latestChild = getLatestContinuationChild(parent, idx)
+  if (!latestChild || latestChild.id === parent.id) return false
+  return bridgeContextReferencesParent(latestChild, child)
+}
+
+function isBridgeContinuationWrapperOnlySessionDetail(
+  session: HermesSessionInternalRow,
+  messages: HermesMessageRow[],
+): boolean {
+  if (session.source !== 'tui') return false
+  if (messages.length !== 1) return false
+  const [message] = messages
+  return message.role === 'user' && isBridgeContextPrompt(message.content)
+}
+
 function isCompressionContinuation(parent: HermesSessionInternalRow | undefined, child: HermesSessionInternalRow | undefined): boolean {
   if (!parent || !child || !isCompressionEnded(parent) || parent.ended_at == null) return false
   return child.source !== 'tool' && Number(child.started_at || 0) >= Number(parent.ended_at || 0)
@@ -400,7 +443,7 @@ function isLikelyOrphanContinuation(parent: HermesSessionInternalRow, child: Her
   if (delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) return false
 
   if (parent.source === 'tui') {
-    return isBridgeContextPrompt(child.preview || child.title)
+    return isBridgeContextPrompt(child.preview || child.title) && bridgeContextReferencesParent(parent, child)
   }
 
   const parentPreview = normalizeText(parent.preview)
@@ -419,7 +462,9 @@ function shouldSuppressBridgePromptTopLevelRoot(session: HermesSessionInternalRo
     if (candidate.id === session.id) continue
     if (candidate.source !== session.source || candidate.source === 'tool') continue
     if (!isCompressionEnded(candidate) || candidate.ended_at == null) continue
-    if (isLikelyOrphanContinuation(candidate, session)) return true
+    const delta = Number(session.started_at || 0) - Number(candidate.ended_at || 0)
+    if (delta < 0 || delta > DUPLICATE_CONTINUATION_WINDOW_SECONDS) continue
+    if (bridgeContextReferencesCompressionChain(candidate, session, idx)) return true
   }
   return false
 }
@@ -891,6 +936,13 @@ export async function getSessionDetailFromDb(sessionId: string): Promise<HermesS
       ORDER BY timestamp, id
     `).all(...ids) as Record<string, unknown>[]
     const messages = messageRows.map(mapMessageRow)
+    if (chain.length === 1 && isBridgeContinuationWrapperOnlySessionDetail(requested, messages)) {
+      logger.info({
+        sessionId,
+        preview: requested.preview,
+      }, '[sessions-db] suppress-wrapper-only-session-detail')
+      return null
+    }
     return aggregateSessionDetail(chain, messages, sessionId)
   } finally {
     db.close()

@@ -137,6 +137,7 @@ export default {
     messageQueue: 'Message queue',
     removeQueuedMessage: 'Remove queued message',
     stop: 'Stop',
+    stopping: 'Stopping...',
     start: 'Start',
     stopGateway: 'Stop Gateway',
     send: 'Send',

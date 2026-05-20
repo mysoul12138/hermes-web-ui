@@ -450,10 +450,15 @@ function isImage(type: string): boolean {
           v-if="chatStore.isRunActive"
           size="small"
           type="error"
+          class="stop-run-button"
+          :class="{ 'is-stopping': chatStore.isAborting }"
           :disabled="chatStore.isAborting"
           @click="chatStore.stopStreaming()"
         >
-          {{ t('chat.stop') }}
+          <span class="stop-run-content">
+            <span v-if="chatStore.isAborting" class="stop-run-spinner" aria-hidden="true"></span>
+            {{ chatStore.isAborting ? t('chat.stopping') : t('chat.stop') }}
+          </span>
         </NButton>
         <NButton
           size="small"
@@ -756,6 +761,43 @@ function isImage(type: string): boolean {
   justify-self: end;
   min-height: 32px;
   white-space: nowrap;
+
+  .stop-run-button.is-stopping {
+    opacity: 1;
+    box-shadow: 0 0 0 3px rgba(208, 48, 80, 0.16);
+    animation: stop-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+.stop-run-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stop-run-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: stop-spin 0.8s linear infinite;
+}
+
+@keyframes stop-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes stop-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 3px rgba(208, 48, 80, 0.16);
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px rgba(208, 48, 80, 0.24);
+  }
 }
 
 // Drag-over state
