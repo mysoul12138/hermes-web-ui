@@ -29,6 +29,7 @@ describe('config helpers user providers', () => {
         providerKey: 'custom:ai.warp2pans.online',
         slug: 'ai.warp2pans.online',
         base_url: 'https://ai.warp2pans.online/v1',
+        api_key: 'secret',
         model: 'gpt-5.5',
         models: ['gpt-5.5', 'gpt-5.4'],
         context_length: 1000000,

@@ -1,7 +1,7 @@
 import { readFile } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { getActiveEnvPath, getActiveAuthPath } from '../../services/hermes/hermes-profile'
-import { readConfigYaml, updateConfigYaml, fetchProviderModels, buildModelGroups, PROVIDER_ENV_MAP } from '../../services/config-helpers'
+import { readConfigYaml, updateConfigYaml, fetchProviderModels, buildModelGroups, listUserProviders, PROVIDER_ENV_MAP } from '../../services/config-helpers'
 import { buildProviderModelMap, PROVIDER_PRESETS } from '../../shared/providers'
 import { getCopilotModelsDetailed, resolveCopilotOAuthToken, type CopilotModelMeta } from '../../services/hermes/copilot-models'
 import { readAppConfig, writeAppConfig, type ModelVisibilityRule } from '../../services/app-config'
@@ -265,6 +265,30 @@ export async function getAvailable(ctx: any) {
       if (modelsList.length > 0) {
         const apiKey = envMapping.api_key_env ? envGetValue(envMapping.api_key_env) : ''
         addGroup(providerKey, label, baseUrl, modelsList, apiKey, true, modelMeta)
+      }
+    }
+
+    const userProviders = listUserProviders(config)
+    const userProviderFetches = await Promise.allSettled(
+      userProviders.map(async cp => {
+        if (!cp.base_url) return null
+        const baseUrl = cp.base_url.replace(/\/+$/, '')
+        const bareKey = cp.slug
+        const builtinPreset = PROVIDER_PRESETS.find(p => p.value === bareKey)
+        let models = builtinPreset?.models?.length ? [...builtinPreset.models] : (cp.models.length > 0 ? [...cp.models] : [cp.model])
+        if (!builtinPreset && cp.api_key) {
+          try { const fetched = await fetchProviderModels(baseUrl, cp.api_key); if (fetched.length > 0) models = [...new Set([...models, ...fetched])] } catch { }
+        }
+        const label = builtinPreset?.label || cp.slug
+        const presetBaseUrl = builtinPreset?.base_url || ''
+        return { providerKey: cp.providerKey, label, base_url: presetBaseUrl || baseUrl, models, api_key: cp.api_key || '', builtin: !!builtinPreset }
+      }),
+    )
+
+    for (const result of userProviderFetches) {
+      if (result.status === 'fulfilled' && result.value) {
+        const { providerKey, label, base_url, models, api_key: cpApiKey, builtin: cpBuiltin } = result.value as any
+        addGroup(providerKey, label, base_url, models, cpApiKey, cpBuiltin)
       }
     }
 

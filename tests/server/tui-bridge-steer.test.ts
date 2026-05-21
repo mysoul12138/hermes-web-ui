@@ -30,6 +30,7 @@ class FakeGatewayClient extends EventEmitter {
   supportsSessionStatus = false
   sessionStatusOutput: string | null = null
   sessionRunning = true
+  configSetError: Error | null = null
   private createdSessions = 0
   private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
 
@@ -46,7 +47,10 @@ class FakeGatewayClient extends EventEmitter {
     }
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
     if (method === 'prompt.submit') return { ok: true } as T
-    if (method === 'config.set') return { key: params.key, value: String(params.value || ''), warning: '' } as T
+    if (method === 'config.set') {
+      if (this.configSetError) throw this.configSetError
+      return { key: params.key, value: String(params.value || ''), warning: '' } as T
+    }
     if (method === 'session.list') return { sessions: this.persistentSessions } as T
     if (method === 'session.create') {
       this.createdSessions += 1
@@ -387,6 +391,36 @@ describe('TuiBridgeService steer compatibility', () => {
     expect(client.requests[1].params).toMatchObject({
       session_id: 'tui-session',
       text: 'hello',
+    })
+    expect(result).toMatchObject({
+      bridge: true,
+      session_id: 'persistent-session',
+      bridge_session_id: 'tui-session',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+  })
+
+  it('continues a bridge run when custom provider model listing verification is unavailable', async () => {
+    const client = new FakeGatewayClient()
+    client.configSetError = new Error("Note: could not reach this custom endpoint's model listing at https://ai.warp2pans.online/v1/models. Hermes will still save gpt-5.4, but the endpoint should expose /models for verification.\n If this server expects /v1, try base URL: https://ai.warp2pans.online")
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await (bridge.startRun as any)('hello after model switch', 'web-session', [], {
+      model: 'gpt-5.4',
+      provider: 'custom:ai.warp2pans.online',
+    })
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'config.set',
+      'prompt.submit',
+    ])
+    expect(client.requests[1].params).toMatchObject({
+      session_id: 'tui-session',
+      text: 'hello after model switch',
     })
     expect(result).toMatchObject({
       bridge: true,

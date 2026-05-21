@@ -224,6 +224,13 @@ function writeBridgeContinuationLinkIfValid(
   writeBridgeContinuationLink(child, parent)
 }
 
+function isNonFatalModelListingWarning(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /could not reach this custom endpoint['’]s model listing/i.test(message)
+    && /Hermes will still save/i.test(message)
+    && /\/v1\/models|\/models/i.test(message)
+}
+
 function resolveHermesHome(): string {
   return process.env.HERMES_HOME?.trim() || resolve(homedir(), '.hermes')
 }
@@ -709,11 +716,21 @@ export class TuiBridgeService {
     if (!model) return
     const provider = options.provider?.trim()
     const value = provider ? `${model} --provider ${provider}` : model
-    await this.client.request('config.set', {
-      session_id: bridgeSessionId,
-      key: 'model',
-      value,
-    })
+    try {
+      await this.client.request('config.set', {
+        session_id: bridgeSessionId,
+        key: 'model',
+        value,
+      })
+    } catch (error) {
+      if (!isNonFatalModelListingWarning(error)) throw error
+      logger.warn({
+        bridgeSessionId,
+        model,
+        provider: provider || null,
+        error: error instanceof Error ? error.message : String(error),
+      }, '[tui-bridge] ignoring non-fatal model listing warning during model switch')
+    }
   }
 
   async respondApproval(webSessionId: string, choice: string) {

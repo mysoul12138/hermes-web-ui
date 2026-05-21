@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { getActiveAuthPath } from '../../services/hermes/hermes-profile'
 import * as hermesCli from '../../services/hermes/hermes-cli'
-import { updateConfigYaml, saveEnvValue, PROVIDER_ENV_MAP } from '../../services/config-helpers'
+import { buildUserProviderConfigEntry, updateConfigYaml, saveEnvValue, PROVIDER_ENV_MAP } from '../../services/config-helpers'
 import { PROVIDER_PRESETS } from '../../shared/providers'
 import { logger } from '../../services/logger'
 
@@ -37,6 +37,28 @@ function buildProviderEntry(name: string, base_url: string, api_key: string, mod
   return entry
 }
 
+function providerSlugFromPoolKey(poolKey: string): string {
+  return poolKey.replace(/^custom:/, '').trim().toLowerCase().replace(/ /g, '-')
+}
+
+function removeLegacyCustomProvider(config: any, poolKey: string): any | null {
+  if (!Array.isArray(config.custom_providers)) return null
+  const idx = (config.custom_providers as any[]).findIndex((e: any) => {
+    return `custom:${String(e?.name || '').trim().toLowerCase().replace(/ /g, '-')}` === poolKey
+  })
+  if (idx === -1) return null
+  const [removed] = (config.custom_providers as any[]).splice(idx, 1)
+  if ((config.custom_providers as any[]).length === 0) delete config.custom_providers
+  return removed || null
+}
+
+function ensureProvidersDict(config: any): Record<string, any> {
+  if (!config.providers || typeof config.providers !== 'object' || Array.isArray(config.providers)) {
+    config.providers = {}
+  }
+  return config.providers as Record<string, any>
+}
+
 export async function create(ctx: any) {
   const { name, base_url, api_key, model, context_length, providerKey } = ctx.request.body as {
     name: string; base_url: string; api_key: string; model: string; context_length?: number; providerKey?: string | null
@@ -53,27 +75,10 @@ export async function create(ctx: any) {
     await updateConfigYaml(async (config) => {
       if (typeof config.model !== 'object' || config.model === null) { config.model = {} }
       if (!isBuiltin) {
-        if (!Array.isArray(config.custom_providers)) { config.custom_providers = [] }
-        const existing = (config.custom_providers as any[]).find(
-          (e: any) => `custom:${e.name}` === poolKey
-        )
-        if (existing) {
-          existing.base_url = base_url
-          existing.api_key = api_key
-          existing.model = model
-          const preset = PROVIDER_PRESETS.find(p => p.value === poolKey.replace('custom:', ''))
-          if (preset?.api_mode) existing.api_mode = preset.api_mode
-          if (context_length && context_length > 0) {
-            if (!existing.models) existing.models = {}
-            existing.models[model] = existing.models[model] || {}
-            existing.models[model].context_length = context_length
-          }
-        } else {
-          const entry = buildProviderEntry(name.trim().toLowerCase().replace(/ /g, '-'), base_url, api_key, model, context_length)
-          const preset = PROVIDER_PRESETS.find(p => p.value === poolKey.replace('custom:', ''))
-          if (preset?.api_mode) entry.api_mode = preset.api_mode
-          config.custom_providers.push(entry)
-        }
+        const slug = providerSlugFromPoolKey(poolKey)
+        const providers = ensureProvidersDict(config)
+        providers[slug] = buildUserProviderConfigEntry(slug, base_url, api_key, model, context_length || 0)
+        removeLegacyCustomProvider(config, poolKey)
         config.model.default = model
         config.model.provider = poolKey
       } else {
@@ -129,15 +134,30 @@ export async function update(ctx: any) {
     const isCustom = poolKey.startsWith('custom:')
     if (isCustom) {
       const found = await updateConfigYaml((config) => {
-        if (!Array.isArray(config.custom_providers)) return { data: config, result: false, write: false }
-        const entry = (config.custom_providers as any[]).find((e: any) => {
-          return `custom:${e.name.trim().toLowerCase().replace(/ /g, '-')}` === poolKey
-        })
-        if (!entry) return { data: config, result: false, write: false }
-        if (name !== undefined) entry.name = name
-        if (base_url !== undefined) entry.base_url = base_url
-        if (api_key !== undefined) entry.api_key = api_key
-        if (model !== undefined) entry.model = model
+        const slug = providerSlugFromPoolKey(poolKey)
+        const providers = ensureProvidersDict(config)
+        const legacy = Array.isArray(config.custom_providers)
+          ? (config.custom_providers as any[]).find((e: any) => `custom:${String(e?.name || '').trim().toLowerCase().replace(/ /g, '-')}` === poolKey)
+          : null
+        const existing = providers[slug] || (legacy ? buildUserProviderConfigEntry(
+          slug,
+          legacy.base_url || '',
+          legacy.api_key || '',
+          legacy.model || '',
+          Number(legacy.models?.[legacy.model]?.context_length || 0),
+        ) : null)
+        if (!existing) return { data: config, result: false, write: false }
+        const nextSlug = name !== undefined ? providerSlugFromPoolKey(`custom:${name}`) : slug
+        if (nextSlug !== slug) delete providers[slug]
+        const nextBaseUrl = base_url !== undefined ? base_url : existing.api || ''
+        const nextApiKey = api_key !== undefined ? api_key : existing.api_key || ''
+        const nextModel = model !== undefined ? model : existing.default_model || ''
+        const nextContextLength = Number(existing.context_length || 0)
+        providers[nextSlug] = buildUserProviderConfigEntry(nextSlug, nextBaseUrl, nextApiKey, nextModel, nextContextLength)
+        removeLegacyCustomProvider(config, poolKey)
+        if (config.model?.provider === poolKey && nextSlug !== slug) {
+          config.model.provider = `custom:${nextSlug}`
+        }
         return { data: config, result: true }
       })
       if (!found) {
@@ -182,13 +202,17 @@ export async function remove(ctx: any) {
     const isCustom = poolKey.startsWith('custom:')
     const removed = await updateConfigYaml(async (config) => {
       if (isCustom) {
-        const idx = Array.isArray(config.custom_providers)
-          ? (config.custom_providers as any[]).findIndex((e: any) => {
-            return `custom:${e.name.trim().toLowerCase().replace(/ /g, '-')}` === poolKey
-          })
-          : -1
-        if (idx === -1) return { data: config, result: false, write: false }
-        ;(config.custom_providers as any[]).splice(idx, 1)
+        const slug = providerSlugFromPoolKey(poolKey)
+        const providers = config.providers && typeof config.providers === 'object' && !Array.isArray(config.providers)
+          ? config.providers as Record<string, any>
+          : null
+        const hadProvider = !!providers?.[slug]
+        if (providers) {
+          delete providers[slug]
+          if (Object.keys(providers).length === 0) delete config.providers
+        }
+        const removedLegacy = removeLegacyCustomProvider(config, poolKey)
+        if (!hadProvider && !removedLegacy) return { data: config, result: false, write: false }
       } else {
         const envMapping = PROVIDER_ENV_MAP[poolKey]
         if (envMapping?.api_key_env) {
@@ -197,8 +221,19 @@ export async function remove(ctx: any) {
         }
       }
       if (config.model?.provider === poolKey) {
+        const providerEntries = config.providers && typeof config.providers === 'object' && !Array.isArray(config.providers)
+          ? Object.entries(config.providers) as [string, any][]
+          : []
         const remaining = Array.isArray(config.custom_providers) ? config.custom_providers as any[] : []
-        if (remaining.length > 0) {
+        if (providerEntries.length > 0) {
+          const [fallbackSlug, fallbackProvider] = providerEntries[0]
+          const fallbackKey = `custom:${fallbackSlug}`
+          if (typeof config.model !== 'object' || config.model === null) { config.model = {} }
+          config.model.default = fallbackProvider.default_model
+          config.model.provider = fallbackKey
+          delete config.model.base_url
+          delete config.model.api_key
+        } else if (remaining.length > 0) {
           const fallbackCp = remaining[0]
           const fallbackKey = `custom:${fallbackCp.name.trim().toLowerCase().replace(/ /g, '-')}`
           if (typeof config.model !== 'object' || config.model === null) { config.model = {} }

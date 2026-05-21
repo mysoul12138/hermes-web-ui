@@ -269,6 +269,7 @@ export interface UserProviderEntry {
   providerKey: string
   slug: string
   base_url: string
+  api_key: string
   model: string
   models: string[]
   context_length: number
@@ -284,6 +285,7 @@ export function listUserProviders(config: any): UserProviderEntry[] {
       providerKey: `custom:${slug}`,
       slug,
       base_url: p.api || '',
+      api_key: p.api_key || '',
       model: p.default_model || '',
       models: Array.isArray(p.models) ? p.models : (p.default_model ? [p.default_model] : []),
       context_length: p.context_length || 0,

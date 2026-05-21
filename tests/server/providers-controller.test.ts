@@ -46,6 +46,16 @@ describe('Hermes providers controller credential pool sync', () => {
         default: 'gpt-5.5',
         provider: 'custom:ai.warp2pans.online',
       },
+      providers: {
+        'ai.warp2pans.online': {
+          name: 'ai.warp2pans.online',
+          api: 'https://ai.warp2pans.online/v1',
+          api_key: 'old-key',
+          default_model: 'gpt-5.5',
+          models: ['gpt-5.5'],
+          context_length: 1000000,
+        },
+      },
       custom_providers: [
         {
           name: 'ai.warp2pans.online',
@@ -77,6 +87,9 @@ describe('Hermes providers controller credential pool sync', () => {
     await update(ctx)
 
     expect(ctx.body).toEqual({ success: true })
+    const config = YAML.load(await readFile(join(hermesHome, 'config.yaml'), 'utf-8')) as any
+    expect(config.providers['ai.warp2pans.online'].api_key).toBe('new-key')
+    expect(config.custom_providers).toBeUndefined()
     const auth = JSON.parse(await readFile(join(hermesHome, 'auth.json'), 'utf-8'))
     expect(auth.credential_pool['custom:ai.warp2pans.online']).toEqual([
       expect.objectContaining({
@@ -93,6 +106,15 @@ describe('Hermes providers controller credential pool sync', () => {
   it('removes custom provider credential pool when provider is deleted', async () => {
     await writeFile(join(hermesHome, 'config.yaml'), YAML.dump({
       model: { default: 'gpt-5.5', provider: 'custom:ai.warp2pans.online' },
+      providers: {
+        'ai.warp2pans.online': {
+          name: 'ai.warp2pans.online',
+          api: 'https://ai.warp2pans.online/v1',
+          api_key: 'key',
+          default_model: 'gpt-5.5',
+          models: ['gpt-5.5'],
+        },
+      },
       custom_providers: [
         {
           name: 'ai.warp2pans.online',
@@ -113,6 +135,9 @@ describe('Hermes providers controller credential pool sync', () => {
     await remove(ctx)
 
     expect(ctx.body).toEqual({ success: true })
+    const config = YAML.load(await readFile(join(hermesHome, 'config.yaml'), 'utf-8')) as any
+    expect(config.providers).toBeUndefined()
+    expect(config.custom_providers).toBeUndefined()
     const auth = JSON.parse(await readFile(join(hermesHome, 'auth.json'), 'utf-8'))
     expect(auth.credential_pool['custom:ai.warp2pans.online']).toBeUndefined()
   })
