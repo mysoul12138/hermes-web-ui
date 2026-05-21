@@ -1,7 +1,7 @@
 import * as hermesCli from '../../services/hermes/hermes-cli'
 import { listConversationSummaries, getConversationDetail } from '../../services/hermes/conversations'
 import { listConversationSummariesFromDb, getConversationDetailFromDb } from '../../db/hermes/conversations-db'
-import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries, getUsageStatsFromDb } from '../../db/hermes/sessions-db'
+import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries, getUsageStatsFromDb, type HermesSessionDetailRow } from '../../db/hermes/sessions-db'
 import { listSessionLineage, resolveCanonicalSessionId } from '../../db/hermes/session-lineage'
 import {
   listSessions as localListSessions,
@@ -129,6 +129,40 @@ function hasPendingDeletedSessionDetail(session: { id: string; messages?: Array<
     const messageSessionId = message.session_id || session.id
     return pendingIds.has(messageSessionId)
   })
+}
+
+function shouldUseConversationDetailForSession(session: HermesSessionDetailRow, detail: ConversationDetail): boolean {
+  const rawMessageCount = Array.isArray(session.messages) ? session.messages.length : 0
+  const rawThreadCount = Number(session.thread_session_count || 1)
+  const conversationThreadCount = Number(detail.thread_session_count || 1)
+  const conversationMessageCount = Array.isArray(detail.messages) ? detail.messages.length : 0
+  return conversationThreadCount > rawThreadCount || conversationMessageCount > rawMessageCount
+}
+
+function mergeConversationDetailIntoSession(
+  session: HermesSessionDetailRow,
+  detail: ConversationDetail,
+): HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'] } {
+  return {
+    ...session,
+    messages: detail.messages.map(message => ({
+      id: message.id,
+      session_id: message.session_id,
+      role: message.role,
+      content: message.content,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: message.timestamp,
+      token_count: null,
+      finish_reason: null,
+      reasoning: null,
+    })),
+    message_count: detail.messages.length,
+    thread_session_count: detail.thread_session_count,
+    branch_session_count: detail.branch_session_count,
+    branches: detail.branches,
+  }
 }
 
 function getGroupChatStorage() {
@@ -469,6 +503,37 @@ export async function get(ctx: any) {
         ctx.status = 404
         ctx.body = { error: 'Session not found' }
         return
+      }
+      if (isBridgeContinuationWrapperOnlyDetail(session)) {
+        logger.info({
+          route: 'get',
+          sessionId: requestedSessionId,
+          canonicalSessionId,
+          source: session.source,
+        }, '[sessions-controller] get db-wrapper-only-suppressed')
+        ctx.body = { session: createBridgeSessionFallback(requestedSessionId) }
+        return
+      }
+      if (session.source === 'tui') {
+        try {
+          const conversationDetail = await getConversationDetailFromDb(canonicalSessionId, { source: 'tui', humanOnly: true })
+          if (conversationDetail && !hasPendingDeletedConversation(conversationDetail) && shouldUseConversationDetailForSession(session, conversationDetail)) {
+            const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
+            logger.info({
+              sessionId: requestedSessionId,
+              canonicalSessionId,
+              source: session.source,
+              rawMessageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+              messageCount: mergedSession.messages.length,
+              rawThreadSessionCount: session.thread_session_count,
+              threadSessionCount: conversationDetail.thread_session_count,
+            }, '[sessions-controller] get conversation-db-hit')
+            ctx.body = { session: mergedSession }
+            return
+          }
+        } catch (err) {
+          logger.warn(err, 'Hermes Conversation DB: session detail aggregation failed, falling back to raw session detail')
+        }
       }
       logger.info({
         sessionId: requestedSessionId,

@@ -291,4 +291,46 @@ describe('session DB detail', () => {
       'parentless-cont:assistant:second continuation',
     ])
   })
+
+  it('suppresses a parentless wrapper-only bridge prompt even if it looks like a compressed root continuation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      source: 'tui',
+      started_at: 100,
+      ended_at: 110,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+    })
+    insertSession(db, {
+      id: 'wrapper-only',
+      source: 'tui',
+      started_at: 120,
+      ended_at: 130,
+      end_reason: 'tui_shutdown',
+      message_count: 1,
+      tool_call_count: 0,
+    })
+
+    insertMessage(db, { id: 1, session_id: 'root', role: 'user', content: '分析项目', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'root', role: 'assistant', content: '这是项目说明。', timestamp: 102 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'wrapper-only',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 这是项目说明。\n\nCurrent user message:\n继续',
+      timestamp: 120,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const detail = await mod.getSessionDetailFromDb('wrapper-only')
+
+    expect(detail).toBeNull()
+  })
 })

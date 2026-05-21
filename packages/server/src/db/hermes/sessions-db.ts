@@ -936,7 +936,8 @@ export async function getSessionDetailFromDb(sessionId: string): Promise<HermesS
       ORDER BY timestamp, id
     `).all(...ids) as Record<string, unknown>[]
     const messages = messageRows.map(mapMessageRow)
-    if (chain.length === 1 && isBridgeContinuationWrapperOnlySessionDetail(requested, messages)) {
+    const requestedMessages = messages.filter(message => message.session_id === requested.id)
+    if (isBridgeContinuationWrapperOnlySessionDetail(requested, requestedMessages)) {
       logger.info({
         sessionId,
         preview: requested.preview,
@@ -969,6 +970,14 @@ export async function getSessionDetailFromDbWithProfile(sessionId: string, profi
       ORDER BY timestamp, id
     `).all(...ids) as Record<string, unknown>[]
     const messages = messageRows.map(mapMessageRow)
+    const requestedMessages = messages.filter(message => message.session_id === requested.id)
+    if (isBridgeContinuationWrapperOnlySessionDetail(requested, requestedMessages)) {
+      logger.info({
+        sessionId,
+        preview: requested.preview,
+      }, '[sessions-db] suppress-wrapper-only-session-detail')
+      return null
+    }
     return aggregateSessionDetail(chain, messages, sessionId)
   } finally {
     db.close()

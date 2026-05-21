@@ -7,8 +7,21 @@ beforeEach(() => {
 
 // Mock hermes-cli — should NOT be called when live cache has data
 const getSessionMock = vi.fn()
+const tuiBridgeState = vi.hoisted(() => ({
+  enabled: false,
+  hasSession: false,
+}))
+
 vi.mock('../../packages/server/src/services/hermes/hermes-cli', () => ({
   getSession: getSessionMock,
+}))
+
+vi.mock('../../packages/server/src/services/hermes/tui-bridge', () => ({
+  tuiBridge: {
+    isEnabled: () => tuiBridgeState.enabled,
+    hasSession: () => tuiBridgeState.hasSession,
+    respondApproval: vi.fn(),
+  },
 }))
 
 // Mock hermes (sendInstruction) — not used in pending tests
@@ -19,6 +32,8 @@ vi.mock('../../packages/server/src/services/hermes/hermes', () => ({
 describe('approval service — live cache priority', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    tuiBridgeState.enabled = false
+    tuiBridgeState.hasSession = false
   })
 
   it('returns live approval from SSE cache before session messages are flushed', async () => {
@@ -71,6 +86,21 @@ describe('approval service — live cache priority', () => {
       pattern_keys: undefined,
     })
     expect(result.pending_count).toBe(1)
+  })
+
+  it('does not export full session history for bridge sessions when live cache has no pending approval', async () => {
+    tuiBridgeState.enabled = true
+    tuiBridgeState.hasSession = true
+
+    const { getPendingApproval } = await import('../../packages/server/src/services/hermes/approval')
+
+    const result = await getPendingApproval('bridge-session')
+
+    expect(getSessionMock).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      pending: null,
+      pending_count: 0,
+    })
   })
 
   it('returns null when live cache is cleared by run.completed', async () => {

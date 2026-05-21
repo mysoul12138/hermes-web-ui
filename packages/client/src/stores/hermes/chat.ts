@@ -305,6 +305,7 @@ const BRANCH_SESSION_META_KEY_PREFIX = 'hermes_branch_session_meta_v1_'
 const POLL_INTERVAL_MS = 2000
 const COMPRESSION_NOTICE_TTL_MS = 15_000
 const STREAM_FLUSH_INTERVAL_MS = 120
+const LIVE_BRANCH_REFRESH_INTERVAL_MS = 8000
 
 const POLL_STABLE_EXITS = 3 // 3 × 2s = 6s of no change → assume run finished
 
@@ -433,6 +434,7 @@ export const useChatStore = defineStore('chat', () => {
   const clarifyPollers = new Map<string, ReturnType<typeof setInterval>>()
   const compressionNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const dismissedApprovalSignatures = new Map<string, { signature: string, expiresAt: number }>()
+  const branchRefreshInFlight = new Set<string>()
 
   const activeSession = ref<Session | null>(null)
   const messages = computed<Message[]>(() => activeSession.value?.messages || [])
@@ -1307,6 +1309,16 @@ export const useChatStore = defineStore('chat', () => {
     const wasActiveWebSession = activeSessionId.value === webSessionId
     markBridgeLocalSession(webSessionId, persistent)
     const webSession = sessions.value.find(session => session.id === webSessionId)
+    if (webSession?.source === 'tui' && isPersistentTuiSessionId(webSessionId)) {
+      const rootId = rootSessionIdFor(webSessionId)
+      appendRepresentedSessionId(rootId, webSessionId)
+      appendRepresentedSessionId(rootId, persistent)
+      webSession.representedSessionIds = Array.from(new Set([...(webSession.representedSessionIds || [webSession.id]), persistent]))
+      const inFlight = readInFlight(webSessionId)
+      if (inFlight && !readInFlight(persistent)) markInFlight(persistent, inFlight.runId)
+      persistSessionsList()
+      return
+    }
     let persistentSession = sessions.value.find(session => session.id === persistent)
     if (!persistentSession && webSession) {
       persistentSession = {
@@ -2074,7 +2086,6 @@ export const useChatStore = defineStore('chat', () => {
     startApprovalPolling(sid)
     void pollClarifyOnce(sid)
     startClarifyPolling(sid)
-    startPolling(sid)
 
     const cleanup = () => {
       streamStates.value.delete(sid)
@@ -2153,7 +2164,7 @@ export const useChatStore = defineStore('chat', () => {
       void refreshSessionBranches(rootSessionIdFor(sid))
       branchRefreshTimer = setInterval(() => {
         void refreshSessionBranches(rootSessionIdFor(sid))
-      }, 3000)
+      }, LIVE_BRANCH_REFRESH_INTERVAL_MS)
     }
 
     const eventState = { runProducedAssistantText: false, runHadToolActivity: false }
@@ -2751,6 +2762,8 @@ export const useChatStore = defineStore('chat', () => {
   async function refreshSessionBranches(sid: string) {
     const fetchId = sessionFetchId(sid)
     if (!fetchId) return
+    if (branchRefreshInFlight.has(fetchId)) return
+    branchRefreshInFlight.add(fetchId)
     try {
       const detail = await fetchConversationDetail(fetchId, { humanOnly: true })
       const branchCount = countBranchTree(detail.branches || [])
@@ -2778,6 +2791,8 @@ export const useChatStore = defineStore('chat', () => {
       if (activeSession.value?.rootSessionId === sid) persistActiveMessages()
     } catch {
       // Branch detail is best-effort; normal chat streaming must not depend on it.
+    } finally {
+      branchRefreshInFlight.delete(fetchId)
     }
   }
 

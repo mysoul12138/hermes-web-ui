@@ -98,6 +98,13 @@ export interface ConversationDetail {
   thread_session_count: number
   branch_session_count?: number
   branches?: ConversationBranch[]
+  continuation_edges?: ConversationContinuationEdge[]
+}
+
+export interface ConversationContinuationEdge {
+  child_session_id: string
+  parent_session_id: string
+  kind: 'explicit_bridge_link' | 'native_parent' | 'fallback_inference'
 }
 
 export interface ConversationListOptions {

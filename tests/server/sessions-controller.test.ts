@@ -230,6 +230,166 @@ describe('session conversations controller', () => {
     })
   })
 
+  it('does not replace a DB wrapper-only TUI detail with aggregated root conversation content', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue({
+      id: 'wrapper-only-db',
+      source: 'tui',
+      model: 'deepseek-v4-flash',
+      title: 'Wrapper only',
+      started_at: 1,
+      ended_at: 2,
+      last_active: 2,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      preview: 'Previous conversation context: assistant: old work Current user message: 你好',
+      messages: [
+        {
+          id: 1,
+          session_id: 'wrapper-only-db',
+          role: 'user',
+          content: 'Previous conversation context:\nassistant: old work\n\nCurrent user message:\n你好',
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 1,
+          token_count: null,
+          finish_reason: null,
+          reasoning: null,
+        },
+      ],
+      thread_session_count: 1,
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: 'root',
+      messages: [
+        { id: 1, session_id: 'root', role: 'user', content: 'root prompt', timestamp: 1 },
+        { id: 2, session_id: 'root', role: 'assistant', content: 'root answer', timestamp: 2 },
+      ],
+      visible_count: 2,
+      thread_session_count: 2,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'wrapper-only-db' }, body: null }
+    await mod.get(ctx)
+
+    expect(getConversationDetailFromDbMock).not.toHaveBeenCalled()
+    expect(ctx.body.session).toMatchObject({
+      id: 'wrapper-only-db',
+      source: 'webui-bridge',
+      messages: [],
+      message_count: 0,
+    })
+  })
+
+  it('returns aggregated conversation messages for TUI session detail requests', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue({
+      id: 'root',
+      source: 'tui',
+      model: 'deepseek-v4-flash',
+      title: 'Root',
+      started_at: 1,
+      ended_at: null,
+      last_active: 2,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      preview: 'root prompt',
+      messages: [
+        {
+          id: 1,
+          session_id: 'root',
+          role: 'user',
+          content: 'root prompt',
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 1,
+          token_count: null,
+          finish_reason: null,
+          reasoning: null,
+        },
+      ],
+      thread_session_count: 1,
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: 'root',
+      messages: [
+        { id: 1, session_id: 'root', role: 'user', content: 'root prompt', timestamp: 1 },
+        { id: 2, session_id: 'continuation', role: 'assistant', content: 'continued answer', timestamp: 2 },
+      ],
+      visible_count: 2,
+      thread_session_count: 2,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'root' }, body: null }
+    await mod.get(ctx)
+
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('root', { source: 'tui', humanOnly: true })
+    expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['root prompt', 'continued answer'])
+    expect(ctx.body.session.message_count).toBe(2)
+    expect(ctx.body.session.thread_session_count).toBe(2)
+  })
+
+  it('keeps non-TUI session detail on the raw DB path', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue({
+      id: 'api-session',
+      source: 'api_server',
+      model: 'gpt-5.4',
+      title: 'API',
+      started_at: 1,
+      ended_at: null,
+      last_active: 1,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      preview: 'api',
+      messages: [],
+      thread_session_count: 1,
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'api-session' }, body: null }
+    await mod.get(ctx)
+
+    expect(getConversationDetailFromDbMock).not.toHaveBeenCalled()
+    expect(ctx.body.session.id).toBe('api-session')
+    expect(ctx.body.session.source).toBe('api_server')
+  })
+
   it('supplements local session-store search results with tui sessions from state.db', async () => {
     useLocalSessionStoreState.value = true
     getActiveProfileNameMock.mockReturnValue('default')

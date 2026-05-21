@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockUpdateUsage = vi.hoisted(() => vi.fn())
 const mockIsSessionCompressionEnded = vi.hoisted(() => vi.fn())
+const mockWriteBridgeContinuationLink = vi.hoisted(() => vi.fn())
 
 vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
   updateUsage: mockUpdateUsage,
@@ -10,6 +11,10 @@ vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
 
 vi.mock('../../packages/server/src/db/hermes/sessions-db', () => ({
   isSessionCompressionEnded: mockIsSessionCompressionEnded,
+}))
+
+vi.mock('../../packages/server/src/services/hermes/bridge-continuation-links', () => ({
+  writeBridgeContinuationLink: mockWriteBridgeContinuationLink,
 }))
 
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
@@ -23,6 +28,7 @@ class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
   supportsSessionSteer = false
   supportsSessionStatus = false
+  sessionStatusOutput: string | null = null
   sessionRunning = true
   private createdSessions = 0
   private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
@@ -34,6 +40,7 @@ class FakeGatewayClient extends EventEmitter {
       throw new Error('unknown method: session.steer')
     }
     if (method === 'session.status') {
+      if (this.sessionStatusOutput != null) return { output: this.sessionStatusOutput } as T
       if (this.supportsSessionStatus) return { running: this.sessionRunning } as T
       throw new Error('unknown method: session.status')
     }
@@ -59,6 +66,7 @@ describe('TuiBridgeService steer compatibility', () => {
   beforeEach(() => {
     mockUpdateUsage.mockClear()
     mockIsSessionCompressionEnded.mockReset()
+    mockWriteBridgeContinuationLink.mockClear()
     mockIsSessionCompressionEnded.mockResolvedValue(false)
     delete process.env.HERMES_TUI_ROOT
     delete process.env.HERMES_PYTHON_SRC_ROOT
@@ -614,6 +622,41 @@ describe('TuiBridgeService steer compatibility', () => {
     vi.useRealTimers()
   })
 
+  it('parses text session.status output when cancelling a bridge run', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    client.sessionStatusOutput = [
+      'Hermes TUI Status',
+      '',
+      'Session ID: tui-session',
+      'Agent Running: No',
+    ].join('\n')
+    const bridge = new TuiBridgeService(client as any)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).activeRunsByBridgeSession.set('tui-session', 'bridge_run_cancel_text_status')
+    ;(bridge as any).runs.set('bridge_run_cancel_text_status', {
+      runId: 'bridge_run_cancel_text_status',
+      webSessionId: 'web-session',
+      bridgeSessionId: 'tui-session',
+      events: [],
+      waiters: [],
+      closed: false,
+      lastActivityAt: Date.now(),
+    })
+
+    const result = await bridge.cancelRun('bridge_run_cancel_text_status')
+
+    expect(result).toMatchObject({
+      ok: true,
+      cancelled: true,
+      bridge: true,
+    })
+    expect((bridge as any).runs.get('bridge_run_cancel_text_status').closed).toBe(true)
+    expect((bridge as any).activeRunsByBridgeSession.has('tui-session')).toBe(false)
+    vi.useRealTimers()
+  })
+
   it('adds server-tokenizer usage when bridge completion has no provider usage', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
@@ -689,6 +732,29 @@ describe('TuiBridgeService steer compatibility', () => {
     ;(bridge as any).closeRun(result.run_id)
   })
 
+  it('fails a bridge run when the TUI session stops without a terminal event', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await bridge.startRun('current question', 'web-session', [])
+    client.sessionRunning = false
+    await vi.advanceTimersByTimeAsync(16000)
+
+    const events = (bridge as any).runs.get(result.run_id).events
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'run.failed',
+        error: expect.stringContaining('Bridge session stopped before reporting completion'),
+      }),
+    ]))
+    expect((bridge as any).runs.get(result.run_id).closed).toBe(true)
+    vi.useRealTimers()
+  })
+
   it('emits a session.resolved event when the persistent session id is discovered after startRun returns', async () => {
     vi.useFakeTimers()
     const client = new FakeGatewayClient()
@@ -709,6 +775,35 @@ describe('TuiBridgeService steer compatibility', () => {
       }),
     ]))
     ;(bridge as any).closeRun(result.run_id)
+    vi.useRealTimers()
+  })
+
+  it('writes lineage and continuation links when a delayed persistent session id resolves under a lineage root', async () => {
+    vi.useFakeTimers()
+    closeDb()
+    const runtimeDir = join(tmpdir(), `hermes-webui-late-link-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    process.env.HERMES_HOME = runtimeDir
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+    vi.spyOn(bridge as any, 'waitForNewPersistentSessionId').mockResolvedValueOnce(undefined)
+
+    const result = await bridge.startRun('current question', 'root-web-session', [], {
+      lineageRootSessionId: 'root-web-session',
+    })
+    await vi.advanceTimersByTimeAsync(600)
+
+    const persistent = getSessionLineage('persistent-session-1')
+    expect(persistent).toMatchObject({
+      logical_conversation_id: 'root-web-session',
+      root_session_id: 'root-web-session',
+      parent_session_id: 'root-web-session',
+      relation_kind: 'continuation',
+    })
+    expect(mockWriteBridgeContinuationLink).toHaveBeenCalledWith('persistent-session-1', 'root-web-session')
+
+    ;(bridge as any).closeRun(result.run_id)
+    rmSync(runtimeDir, { recursive: true, force: true })
     vi.useRealTimers()
   })
 
@@ -754,6 +849,25 @@ describe('TuiBridgeService steer compatibility', () => {
       relation_kind: 'continuation',
       parent_session_id: 'root-web-session',
     })
+    expect(mockWriteBridgeContinuationLink).toHaveBeenCalledWith('persistent-session-2', 'root-web-session')
+    rmSync(runtimeDir, { recursive: true, force: true })
+  })
+
+  it('writes explicit bridge continuation links when a new bridge session has a lineage parent but no context handoff', async () => {
+    closeDb()
+    const runtimeDir = join(tmpdir(), `hermes-webui-link-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    process.env.HERMES_HOME = runtimeDir
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await bridge.startRun('follow-up request', 'continued-web-session', [], {
+      lineageParentSessionId: 'root-web-session',
+      lineageRootSessionId: 'root-web-session',
+    })
+    ;(bridge as any).closeRun(result.run_id)
+
+    expect(mockWriteBridgeContinuationLink).toHaveBeenCalledWith('persistent-session-1', 'root-web-session')
     rmSync(runtimeDir, { recursive: true, force: true })
   })
 

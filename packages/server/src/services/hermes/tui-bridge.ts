@@ -145,6 +145,8 @@ interface TuiSessionListItem {
 interface PendingPersistentResolution {
   before: Set<string>
   deadlineAt: number
+  lineageParentSessionId?: string
+  lineageRootSessionId?: string
 }
 
 interface BridgeRunOptions {
@@ -206,6 +208,20 @@ function explicitRootSeedForSession(webSessionId: string): { logicalConversation
     logicalConversationId: logicalConversationIdForSession(webSessionId),
     rootSessionId: webSessionId,
   }
+}
+
+function writeBridgeContinuationLinkIfValid(
+  childSessionId: string | undefined | null,
+  parentSessionId: string | undefined | null,
+  writtenLinks?: Set<string>,
+) {
+  const child = childSessionId?.trim()
+  const parent = parentSessionId?.trim()
+  if (!child || !parent || child === parent) return
+  const key = `${child}\n${parent}`
+  if (writtenLinks?.has(key)) return
+  writtenLinks?.add(key)
+  writeBridgeContinuationLink(child, parent)
 }
 
 function resolveHermesHome(): string {
@@ -504,7 +520,8 @@ export class TuiBridgeService {
   }
 
   hasSession(webSessionId: string): boolean {
-    return this.bridgeSessionsByWebSession.has(webSessionId)
+    const resolvedWebSessionId = this.resolveWebSessionId(webSessionId)
+    return this.bridgeSessionsByWebSession.has(resolvedWebSessionId)
   }
 
   getPersistentSessionId(webSessionId: string): string | null {
@@ -543,6 +560,7 @@ export class TuiBridgeService {
     this.runs.set(runId, state)
     setRunSession(runId, webSessionId)
     this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
+    const writtenContinuationLinks = new Set<string>()
     const previousPersistentSessionId = bridgeSession.created
       ? (options.lineageParentSessionId?.trim() || previousKnownPersistentSessionId || undefined)
       : undefined
@@ -645,7 +663,7 @@ export class TuiBridgeService {
       await this.client.request('prompt.submit', { session_id: bridgeSessionId, text: this.buildPrompt(input, conversationHistory) })
     }
     if (usesContextHandoff && persistentSessionId && previousPersistentSessionId && persistentSessionId !== previousPersistentSessionId) {
-      writeBridgeContinuationLink(persistentSessionId, previousPersistentSessionId)
+      writeBridgeContinuationLinkIfValid(persistentSessionId, previousPersistentSessionId, writtenContinuationLinks)
       const continuationLineage = hintedLineage || continuationSeedForSession(
         webSessionId,
         options.lineageParentSessionId,
@@ -913,8 +931,11 @@ export class TuiBridgeService {
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
+      if (persistentSessionId !== createdLineage.rootSessionId) {
+        writeBridgeContinuationLinkIfValid(persistentSessionId, createdLineage.rootSessionId)
+      }
     } else {
-      this.schedulePersistentSessionResolution(webSessionId, before)
+      this.schedulePersistentSessionResolution(webSessionId, before, options)
     }
     logBridgeControl('session:create', {
       webSessionId,
@@ -969,6 +990,9 @@ export class TuiBridgeService {
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
+      if (resumedParentSessionId) {
+        writeBridgeContinuationLinkIfValid(persistentSessionId, resumedParentSessionId)
+      }
       logBridgeControl('session:resume', {
         webSessionId,
         bridgeSessionId,
@@ -1005,11 +1029,13 @@ export class TuiBridgeService {
     }
   }
 
-  private schedulePersistentSessionResolution(webSessionId: string, before: Set<string>) {
+  private schedulePersistentSessionResolution(webSessionId: string, before: Set<string>, options: BridgeRunOptions = {}) {
     if (this.persistentSessionsByWebSession.has(webSessionId)) return
     this.pendingPersistentResolutions.set(webSessionId, {
       before: new Set(before),
       deadlineAt: Date.now() + STARTUP_TIMEOUT_MS,
+      lineageParentSessionId: options.lineageParentSessionId?.trim() || undefined,
+      lineageRootSessionId: options.lineageRootSessionId?.trim() || undefined,
     })
     void this.resolvePendingPersistentSession(webSessionId)
   }
@@ -1025,10 +1051,38 @@ export class TuiBridgeService {
       const found = await this.findNewPersistentSessionIdOnce(pending.before).catch(() => undefined)
       if (found?.id) {
         this.rememberPersistentSessionId(webSessionId, found.id)
+        const resolvedOptions: BridgeRunOptions = {
+          lineageParentSessionId: pending.lineageParentSessionId,
+          lineageRootSessionId: pending.lineageRootSessionId,
+        }
+        const hintedLineage = hintSeedForSession(webSessionId, resolvedOptions)
+        const resolvedLineage = hintedLineage || (pending.lineageParentSessionId
+          ? continuationSeedForSession(webSessionId, pending.lineageParentSessionId, found.id)
+          : explicitRootSeedForSession(webSessionId))
+        const parentSessionId = found.id === resolvedLineage.rootSessionId ? null : resolvedLineage.rootSessionId
+        upsertSessionLineage({
+          session_id: found.id,
+          logical_conversation_id: resolvedLineage.logicalConversationId,
+          source: 'tui',
+          authority: 'explicit',
+          relation_kind: parentSessionId ? 'continuation' : 'root',
+          parent_session_id: parentSessionId,
+          root_session_id: resolvedLineage.rootSessionId,
+          web_session_id: webSessionId,
+          bridge_session_id: this.bridgeSessionsByWebSession.get(webSessionId) || null,
+          persistent_session_id: found.id,
+        })
+        if (parentSessionId) {
+          writeBridgeContinuationLinkIfValid(found.id, parentSessionId)
+        }
         this.publishPersistentSessionResolution(webSessionId, found.id)
         logBridgeControl('session:resolved', {
           webSessionId,
           persistentSessionId: found.id,
+          lineageParentSessionId: pending.lineageParentSessionId || null,
+          lineageRootSessionId: pending.lineageRootSessionId || null,
+          resolvedLineage,
+          parentSessionId,
         })
         return
       }
@@ -1254,18 +1308,43 @@ export class TuiBridgeService {
 
   private async readBridgeSessionRunning(bridgeSessionId: string): Promise<boolean | null> {
     try {
-      const result = await this.client.request<{ running?: boolean, status?: string }>('session.status', {
+      const result = await this.client.request<{ running?: boolean, status?: string, output?: string }>('session.status', {
         session_id: bridgeSessionId,
       })
       if (typeof result?.running === 'boolean') return result.running
       if (typeof result?.status === 'string') {
         return !/^(idle|done|complete|completed|stopped|failed|error)$/i.test(result.status.trim())
       }
+      if (typeof result?.output === 'string') {
+        const runningMatch = result.output.match(/\bAgent Running:\s*(Yes|No)\b/i)
+        if (runningMatch) return /^yes$/i.test(runningMatch[1])
+      }
     } catch (error) {
       if (isUnknownBridgeMethod(error, 'session.status')) return null
       return null
     }
     return null
+  }
+
+  private runHasTerminalEvent(state: RunState): boolean {
+    return state.events.some(event => event.event === 'run.completed' || event.event === 'run.failed')
+  }
+
+  private failStoppedRunWithoutTerminalEvent(state: RunState) {
+    if (state.closed || this.runHasTerminalEvent(state)) return
+    if (state.pendingApproval || state.pendingClarify || state.completeTimer) return
+    this.push(state.runId, {
+      event: 'run.failed',
+      run_id: state.runId,
+      timestamp: Date.now() / 1000,
+      error: 'Bridge session stopped before reporting completion. The underlying Hermes agent likely failed before emitting a final response; check hermes-agent logs for the provider/model error.',
+    })
+    this.closeRun(state.runId)
+    logBridgeControl('run:stopped-without-terminal-event', {
+      runId: state.runId,
+      webSessionId: state.webSessionId,
+      bridgeSessionId: state.bridgeSessionId,
+    })
   }
 
   private async waitForBridgeSessionStop(bridgeSessionId: string, timeoutMs = CANCEL_STATUS_TIMEOUT_MS): Promise<boolean> {
@@ -1342,9 +1421,14 @@ export class TuiBridgeService {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
     this.clearIdleTimer(state)
-    state.idleTimer = setTimeout(() => {
+    state.idleTimer = setTimeout(async () => {
       const current = this.runs.get(runId)
       if (!current || current.closed) return
+      const running = await this.readBridgeSessionRunning(current.bridgeSessionId)
+      if (running === false) {
+        this.failStoppedRunWithoutTerminalEvent(current)
+        return
+      }
       this.push(runId, {
         event: 'bridge.heartbeat',
         run_id: runId,

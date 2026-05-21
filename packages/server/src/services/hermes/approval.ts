@@ -99,6 +99,12 @@ export async function getPendingApproval(sessionId: string): Promise<PendingAppr
       pending_count: live.pending_count || 1,
     }
   }
+  if (tuiBridge.isEnabled() && tuiBridge.hasSession(sessionId)) {
+    return {
+      pending: null,
+      pending_count: 0,
+    }
+  }
 
   // Fallback: read persisted session messages (available after the run completes)
   const session = await hermesCli.getSession(sessionId)

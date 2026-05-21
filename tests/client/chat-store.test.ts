@@ -457,9 +457,9 @@ describe('Chat Store', () => {
     ])
   })
 
-  it('collapses the temporary bridge session into the persistent TUI session when resolved', async () => {
-    const webSessionId = 'mpebd2z90948mp'
-    const persistentSessionId = '20260521_010637_f388c9'
+  it('keeps an existing TUI conversation root when a persistent session resolves', async () => {
+    const webSessionId = '20260520_093333_3c3fc9'
+    const persistentSessionId = '20260521_092252_fb9174'
 
     mockChatApi.startRun.mockResolvedValueOnce({
       run_id: 'bridge-run-resolved-session',
@@ -489,14 +489,15 @@ describe('Chat Store', () => {
       session_id: persistentSessionId,
     })
 
-    expect(store.activeSessionId).toBe(persistentSessionId)
-    expect(store.sessions.map(session => session.id)).toEqual([persistentSessionId])
+    expect(store.activeSessionId).toBe(webSessionId)
+    expect(store.sessions.map(session => session.id)).toEqual([webSessionId])
+    expect(store.sessions[0].representedSessionIds).toEqual([webSessionId, persistentSessionId])
     expect(store.messages.map(message => message.content)).toContain('same content')
 
     mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
-      ...makeSummary(persistentSessionId, 'Resolved session'),
+      ...makeSummary(webSessionId, 'Resolved session'),
       source: 'tui',
-      represented_session_ids: [persistentSessionId, webSessionId],
+      represented_session_ids: [webSessionId, persistentSessionId],
     }])
     mockSessionsApi.fetchHermesSessions.mockResolvedValue([
       { ...makeSummary(persistentSessionId, 'Resolved session'), source: 'tui' },
@@ -504,8 +505,8 @@ describe('Chat Store', () => {
 
     await store.loadSessions()
 
-    expect(store.sessions.map(session => session.id)).toEqual([persistentSessionId])
-    expect(store.activeSessionId).toBe(persistentSessionId)
+    expect(store.sessions.map(session => session.id)).toEqual([webSessionId])
+    expect(store.activeSessionId).toBe(webSessionId)
   })
 
   it('carries steer history from a temporary bridge session to the resolved persistent TUI session', async () => {
@@ -1202,7 +1203,7 @@ describe('Chat Store', () => {
     expect(window.localStorage.getItem(sessionMessagesKey(historyId))).toBeNull()
   })
 
-  it('backfills live tool details from session polling without replacing streamed text', async () => {
+  it('does not poll full session detail while an SSE stream is active', async () => {
     vi.useFakeTimers()
 
     const store = useChatStore()
@@ -1211,6 +1212,7 @@ describe('Chat Store', () => {
 
     const sid = store.activeSessionId
     expect(sid).toBeTruthy()
+    mockSessionsApi.fetchSession.mockClear()
 
     const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
     expect(typeof onEvent).toBe('function')
@@ -1223,59 +1225,6 @@ describe('Chat Store', () => {
     })
     onEvent({ event: 'message.delta', delta: 'local streamed answer' })
 
-    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(sid!, [
-      {
-        id: 1,
-        session_id: sid,
-        role: 'user',
-        content: 'inspect working tree',
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: 1710000000,
-        token_count: null,
-        finish_reason: null,
-        reasoning: null,
-      },
-      {
-        id: 2,
-        session_id: sid,
-        role: 'assistant',
-        content: '',
-        tool_call_id: null,
-        tool_calls: [
-          {
-            id: 'item_1',
-            call_id: 'call_1',
-            function: {
-              name: 'terminal',
-              arguments: JSON.stringify({
-                command: "python3 - <<'PY'\nimport subprocess\nstatus = subprocess.check_output(['git','status','--short'])\nprint(status.decode())\nPY",
-              }),
-            },
-          },
-        ],
-        tool_name: null,
-        timestamp: 1710000001,
-        token_count: null,
-        finish_reason: 'tool_calls',
-        reasoning: null,
-      },
-      {
-        id: 3,
-        session_id: sid,
-        role: 'tool',
-        content: JSON.stringify({ output: ' M packages/client/src/stores/hermes/chat.ts\n', exit_code: 0, error: null }),
-        tool_call_id: 'call_1',
-        tool_calls: null,
-        tool_name: null,
-        timestamp: 1710000002,
-        token_count: null,
-        finish_reason: null,
-        reasoning: null,
-      },
-    ]))
-
     await vi.advanceTimersByTimeAsync(2100)
     await flushPromises()
 
@@ -1283,10 +1232,9 @@ describe('Chat Store', () => {
     expect(toolMessage).toMatchObject({
       toolName: 'terminal',
       toolCallId: 'call_1',
-      toolStatus: 'done',
+      toolStatus: 'running',
     })
-    expect(toolMessage?.toolArgs).toContain("git','status','--short")
-    expect(toolMessage?.toolResult).toContain('packages/client/src/stores/hermes/chat.ts')
+    expect(mockSessionsApi.fetchSession).not.toHaveBeenCalled()
     expect(store.messages.find(message => message.role === 'assistant')?.content).toBe('local streamed answer')
   })
 
