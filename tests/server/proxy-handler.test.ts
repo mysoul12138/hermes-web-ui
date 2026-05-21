@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Mock config
 vi.mock('../../packages/server/src/config', () => ({
-  config: { upstream: 'http://127.0.0.1:8642' },
+  config: { upstream: 'http://127.0.0.1:8642', appHome: '/tmp/hermes-web-ui-test' },
 }))
 
 vi.mock('../../packages/server/src/services/gateway-bootstrap', () => ({

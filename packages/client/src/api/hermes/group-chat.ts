@@ -39,6 +39,12 @@ export interface ChatMessage {
     senderName: string
     content: string
     timestamp: number
+    role?: 'user' | 'assistant' | 'system' | 'tool' | string
+    reasoning?: string | null
+    reasoning_content?: string | null
+    tool_calls?: unknown[] | null
+    isStreaming?: boolean
+    attachments?: unknown[]
 }
 
 export interface MemberInfo {

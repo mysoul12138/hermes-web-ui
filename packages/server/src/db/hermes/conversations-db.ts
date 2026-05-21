@@ -1479,7 +1479,10 @@ function aggregateSummary(
   const unifiedChain = normalizedMainline.length
     ? normalizedMainline
     : [...fallbackBridgeContextHistory, ...fallbackChain]
-  const summaryChain = unifiedChain.filter((session, index) => !(index > 0 && isBridgePromptOnlyContinuationStub(session)))
+  const summaryChain = unifiedChain.filter((session, index) => {
+    if (index > 0 && isBridgePromptOnlyContinuationStub(session)) return false
+    return true
+  })
   if (!summaryChain.length || ![...summaryChain, ...fallbackCompressionHistory].some(session => session.has_visible_messages || Number(session.tool_call_count || 0) > 0)) return null
   const root = summaryChain[0]
   const visibleHead = requestedRoot || root

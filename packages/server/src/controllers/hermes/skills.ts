@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'fs/promises'
-import { join, resolve } from 'path'
+import { join, resolve, relative, sep } from 'path'
 import { createHash } from 'crypto'
 import {
   readConfigYaml, updateConfigYaml,
@@ -107,6 +107,11 @@ async function findSkillDirByName(rootDir: string, skillName: string): Promise<s
   }
 
   return null
+}
+
+function isPathWithin(candidatePath: string, basePath: string): boolean {
+  const relativePath = relative(resolve(basePath), resolve(candidatePath))
+  return relativePath === '' || (!relativePath.startsWith('..') && !relativePath.startsWith(sep) && !relativePath.includes(`..${sep}`))
 }
 
 /**
