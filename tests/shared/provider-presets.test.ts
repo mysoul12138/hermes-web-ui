@@ -10,6 +10,7 @@ import {
 } from '../../packages/client/src/shared/providers'
 
 const OPENAI_CODEX_PROVIDER = 'openai-codex'
+const NOUS_PROVIDER = 'nous'
 const GPT_5_5_MODEL = 'gpt-5.5'
 
 function modelsForProvider(providerPresets: Array<{ value: string; models: string[] }>, provider: string): string[] {
@@ -27,5 +28,19 @@ describe('provider presets', () => {
   it('exposes GPT-5.5 through provider model maps', () => {
     expect(buildClientProviderModelMap()[OPENAI_CODEX_PROVIDER]).toContain(GPT_5_5_MODEL)
     expect(buildServerProviderModelMap()[OPENAI_CODEX_PROVIDER]).toContain(GPT_5_5_MODEL)
+  })
+
+  it('keeps Nous recommended models available through the server model map', () => {
+    const models = modelsForProvider(SERVER_PROVIDER_PRESETS, NOUS_PROVIDER)
+    const mappedModels = buildServerProviderModelMap()[NOUS_PROVIDER]
+
+    for (const model of [
+      'qwen/qwen3.6-plus',
+      'qwen/qwen3.6-35b-a3b',
+      'deepseek/deepseek-v4-flash',
+    ]) {
+      expect(models).toContain(model)
+      expect(mappedModels).toContain(model)
+    }
   })
 })
