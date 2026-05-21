@@ -1016,6 +1016,7 @@ new_0_5_14_4: 'Fix SQLite connection not released on shutdown causing database l
     selectProfile: 'プロファイルを選択',
     agentAdded: 'エージェントが追加されました',
     agentAlreadyInRoom: 'このエージェントは既にルームにいます',
+    agentAddFailedCount: '{count} 件のエージェントを追加できませんでした: {details}',
     noAgents: 'このルームにエージェントはいません',
     members: 'メンバー',
     roomCreated: 'ルームが作成されました',

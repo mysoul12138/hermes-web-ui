@@ -1020,6 +1020,7 @@ new_0_5_14_4: 'Fix SQLite connection not released on shutdown causing database l
     selectProfile: 'Wahlen Sie ein Profil',
     agentAdded: 'Agent hinzugefugt',
     agentAlreadyInRoom: 'Agent ist bereits in diesem Raum',
+    agentAddFailedCount: '{count} Agent(en) wurden nicht hinzugefugt: {details}',
     noAgents: 'Keine Agenten in diesem Raum',
     members: 'Mitglieder',
     roomCreated: 'Raum erstellt',
