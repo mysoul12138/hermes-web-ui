@@ -6,7 +6,8 @@ import { buildUserProviderConfigEntry, updateConfigYaml, saveEnvValue, PROVIDER_
 import { PROVIDER_PRESETS } from '../../shared/providers'
 import { logger } from '../../services/logger'
 
-const OPTIONAL_API_KEY_PROVIDERS = new Set(['cliproxyapi'])
+const OPTIONAL_API_KEY_PROVIDERS = new Set(['cliproxyapi', 'xai-oauth'])
+const DIRECT_CONFIG_PROVIDERS = new Set(['xai-oauth'])
 
 async function clearStoredAuthProvider(poolKey: string) {
   try {
@@ -84,6 +85,10 @@ export async function create(ctx: any) {
       } else {
         if (PROVIDER_ENV_MAP[poolKey].api_key_env) {
           await saveEnvValue(PROVIDER_ENV_MAP[poolKey].api_key_env, api_key)
+          if (PROVIDER_ENV_MAP[poolKey].base_url_env) { await saveEnvValue(PROVIDER_ENV_MAP[poolKey].base_url_env, base_url) }
+          config.model.default = model
+          config.model.provider = poolKey
+        } else if (DIRECT_CONFIG_PROVIDERS.has(poolKey)) {
           if (PROVIDER_ENV_MAP[poolKey].base_url_env) { await saveEnvValue(PROVIDER_ENV_MAP[poolKey].base_url_env, base_url) }
           config.model.default = model
           config.model.provider = poolKey
