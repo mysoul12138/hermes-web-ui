@@ -23,6 +23,7 @@ import { join } from 'path'
 import { TuiBridgeService, resolveBridgeRoot } from '../../packages/server/src/services/hermes/tui-bridge'
 import { closeDb } from '../../packages/server/src/db'
 import { getSessionLineage } from '../../packages/server/src/db/hermes/session-lineage'
+import { getLivePendingApproval } from '../../packages/server/src/services/hermes/run-state'
 
 class FakeGatewayClient extends EventEmitter {
   requests: Array<{ method: string, params: Record<string, any> }> = []
@@ -31,6 +32,7 @@ class FakeGatewayClient extends EventEmitter {
   sessionStatusOutput: string | null = null
   sessionRunning = true
   configSetError: Error | null = null
+  busyPromptSessions = new Set<string>()
   private createdSessions = 0
   private persistentSessions: Array<{ id: string, source: string, started_at: number }> = []
 
@@ -46,7 +48,12 @@ class FakeGatewayClient extends EventEmitter {
       throw new Error('unknown method: session.status')
     }
     if (method === 'command.dispatch') return { type: 'exec', output: 'Steer queued' } as T
-    if (method === 'prompt.submit') return { ok: true } as T
+    if (method === 'prompt.submit') {
+      if (this.busyPromptSessions.has(String(params.session_id || ''))) {
+        throw new Error('session busy')
+      }
+      return { ok: true } as T
+    }
     if (method === 'config.set') {
       if (this.configSetError) throw this.configSetError
       return { key: params.key, value: String(params.value || ''), warning: '' } as T
@@ -813,6 +820,142 @@ describe('TuiBridgeService steer compatibility', () => {
     ]))
     ;(bridge as any).closeRun(result.run_id)
     vi.useRealTimers()
+  })
+
+  it('keeps simultaneous bridge runs isolated across web and TUI sessions', async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new FakeGatewayClient()
+      client.supportsSessionStatus = true
+      client.sessionRunning = false
+      const bridge = new TuiBridgeService(client as any)
+      vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+      const [first, second] = await Promise.all([
+        bridge.startRun('first question', 'web-session-a', []),
+        bridge.startRun('second question', 'web-session-b', []),
+      ])
+
+      expect(first.bridge_session_id).not.toBe(second.bridge_session_id)
+
+      client.emit('event', {
+        session_id: first.bridge_session_id,
+        type: 'message.delta',
+        payload: { content: 'alpha delta' },
+      })
+      client.emit('event', {
+        session_id: second.bridge_session_id,
+        type: 'message.delta',
+        payload: { content: 'beta delta' },
+      })
+      client.emit('event', {
+        session_id: first.bridge_session_id,
+        type: 'approval.request',
+        payload: {
+          approval_id: 'approval-alpha',
+          description: 'Approve alpha',
+          command: 'printf alpha',
+          pending_count: 1,
+        },
+      })
+      client.emit('event', {
+        session_id: second.bridge_session_id,
+        type: 'approval.request',
+        payload: {
+          approval_id: 'approval-beta',
+          description: 'Approve beta',
+          command: 'printf beta',
+          pending_count: 2,
+        },
+      })
+
+      expect(getLivePendingApproval('web-session-a')).toMatchObject({
+        approval_id: 'approval-alpha',
+        command: 'printf alpha',
+        pending_count: 1,
+      })
+      expect(getLivePendingApproval('web-session-b')).toMatchObject({
+        approval_id: 'approval-beta',
+        command: 'printf beta',
+        pending_count: 2,
+      })
+
+      client.emit('event', {
+        session_id: first.bridge_session_id,
+        type: 'message.complete',
+        payload: { content: 'alpha complete' },
+      })
+      client.emit('event', {
+        session_id: second.bridge_session_id,
+        type: 'message.complete',
+        payload: { content: 'beta complete' },
+      })
+
+      await vi.advanceTimersByTimeAsync(1600)
+
+      const firstEvents = (bridge as any).runs.get(first.run_id).events
+      const secondEvents = (bridge as any).runs.get(second.run_id).events
+      expect(firstEvents.filter((event: any) => event.event === 'message.delta').map((event: any) => event.delta)).toEqual(['alpha delta'])
+      expect(secondEvents.filter((event: any) => event.event === 'message.delta').map((event: any) => event.delta)).toEqual(['beta delta'])
+      expect(firstEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: 'approval', approval_id: 'approval-alpha', command: 'printf alpha' }),
+        expect.objectContaining({ event: 'run.completed', output: 'alpha complete' }),
+      ]))
+      expect(secondEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: 'approval', approval_id: 'approval-beta', command: 'printf beta' }),
+        expect.objectContaining({ event: 'run.completed', output: 'beta complete' }),
+      ]))
+      expect(firstEvents).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ approval_id: 'approval-beta' }),
+        expect.objectContaining({ output: 'beta complete' }),
+      ]))
+      expect(secondEvents).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ approval_id: 'approval-alpha' }),
+        expect.objectContaining({ output: 'alpha complete' }),
+      ]))
+      expect(getLivePendingApproval('web-session-a')).toBeNull()
+      expect(getLivePendingApproval('web-session-b')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('recreates the TUI bridge session for a same-web-session start when the current one is busy', async () => {
+    const client = new FakeGatewayClient()
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const first = await bridge.startRun('first request', 'web-session-rebuild', [])
+    client.busyPromptSessions.add(first.bridge_session_id)
+
+    const second = await bridge.startRun('second request', 'web-session-rebuild', [])
+
+    expect(second).toMatchObject({
+      status: 'queued',
+      bridge: true,
+    })
+    expect(second.bridge_session_id).not.toBe(first.bridge_session_id)
+    expect(second.session_id).not.toBe(first.session_id)
+    expect((bridge as any).bridgeSessionsByWebSession.get('web-session-rebuild')).toBe(second.bridge_session_id)
+    expect((bridge as any).activeRunsByBridgeSession.has(first.bridge_session_id)).toBe(false)
+    expect((bridge as any).activeRunsByBridgeSession.get(second.bridge_session_id)).toBe(second.run_id)
+    expect(client.requests.filter(request => request.method === 'prompt.submit')).toEqual([
+      {
+        method: 'prompt.submit',
+        params: { session_id: first.bridge_session_id, text: 'first request' },
+      },
+      {
+        method: 'prompt.submit',
+        params: { session_id: first.bridge_session_id, text: 'second request' },
+      },
+      {
+        method: 'prompt.submit',
+        params: { session_id: second.bridge_session_id, text: 'second request' },
+      },
+    ])
+
+    ;(bridge as any).closeRun(first.run_id)
+    ;(bridge as any).closeRun(second.run_id)
   })
 
   it('writes lineage and continuation links when a delayed persistent session id resolves under a lineage root', async () => {
