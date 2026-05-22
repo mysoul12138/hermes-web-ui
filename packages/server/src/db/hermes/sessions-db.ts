@@ -74,6 +74,7 @@ export interface HermesMessageRow {
 export interface HermesSessionDetailRow extends HermesSessionRow {
   messages: HermesMessageRow[]
   thread_session_count: number
+  represented_session_ids?: string[]
 }
 
 interface HermesSessionInternalRow extends HermesSessionRow {

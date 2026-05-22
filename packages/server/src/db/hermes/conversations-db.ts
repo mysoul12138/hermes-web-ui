@@ -337,19 +337,23 @@ function hasConversationContent(session: ConversationSessionRow | undefined): bo
   return !!session && (session.has_visible_messages || Number(session.tool_call_count || 0) > 0 || !!session.title)
 }
 
+function hasConversationFacts(session: ConversationSessionRow | undefined): boolean {
+  return !!session && (session.has_visible_messages || Number(session.tool_call_count || 0) > 0)
+}
+
 function isEmptyCompressionPivot(session: ConversationSessionRow | undefined): boolean {
   return !!session
     && session.source === 'tui'
     && session.parent_session_id == null
     && isCompressionEndReason(session.end_reason)
-    && !hasConversationContent(session)
+    && !hasConversationFacts(session)
 }
 
 function isEmptyCompressionSession(session: ConversationSessionRow | undefined): boolean {
   return !!session
     && session.source === 'tui'
     && isCompressionEndReason(session.end_reason)
-    && !hasConversationContent(session)
+    && !hasConversationFacts(session)
 }
 
 function isOutputEmptyCompressionSession(session: ConversationSessionRow | undefined): boolean {
@@ -718,6 +722,7 @@ function emptyCompressionPivotNativeContinuationPath(
   if (pivot.id === parent.id || pivot.source !== parent.source || pivot.source !== 'tui') return null
   if (pivot.parent_session_id !== parent.id) return null
   if (!isEmptyCompressionSession(pivot)) return null
+  if (pivot.title) return null
   if (!hasConversationContent(parent)) return null
   if (!isLikelyOrphanContinuation(parent, pivot)) return null
 
@@ -779,6 +784,18 @@ function isTrustedEmptyCompressionPivotLink(
   if (!path?.some(session => session.id === child.id)) return false
   if (parent.id === anchor.id) return path[0]?.id === child.id
   return path.some((session, index) => index > 0 && path[index - 1]?.id === parent.id && session.id === child.id)
+}
+
+function isTrustedOutputEmptyCompressionChildLink(
+  parent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): boolean {
+  if (parent.parent_session_id != null) return false
+  if (child.parent_session_id !== parent.id) return false
+  const path = emptyCompressionPivotVisibleChildChain(parent, byId, childrenByParent)
+  return !!path?.some((session, index) => index > 0 && path[index - 1]?.id === parent.id && session.id === child.id)
 }
 
 function hasBridgeContextPromptDescendantReferencing(
@@ -1326,6 +1343,7 @@ function hasTrustedNativeParent(
   if (session.source !== parent.source) return false
   if (session.source !== 'tui' && session.source !== 'webui-bridge') return true
   if (isOutputEmptyCompressionSession(parent) || isOutputEmptyCompressionSession(session)) {
+    if (isTrustedOutputEmptyCompressionChildLink(parent, session, byId, childrenByParent)) return true
     return isTrustedEmptyCompressionPivotLink(parent, session, byId, childrenByParent)
   }
   if (parent.ended_at == null && hasBridgeContextPromptDescendantReferencing(session, byId, childrenByParent)) return true
@@ -1418,6 +1436,7 @@ function rootConversationIdForSession(
     if (
       childrenByParent
       && isOutputEmptyCompressionSession(parent)
+      && !isTrustedOutputEmptyCompressionChildLink(parent, current, byId, childrenByParent)
       && !isTrustedEmptyCompressionPivotLink(parent, current, byId, childrenByParent)
     ) {
       memo.set(sessionId, current.id)
@@ -1451,6 +1470,7 @@ function hasInvalidEmptyCompressionPivotAncestor(
     if (!parent) return false
     if (
       isOutputEmptyCompressionSession(parent)
+      && !isTrustedOutputEmptyCompressionChildLink(parent, current, byId, childrenByParent)
       && !isTrustedEmptyCompressionPivotLink(parent, current, byId, childrenByParent)
     ) return true
     if (
@@ -1485,6 +1505,35 @@ function mainlineSessionsForRoot(
       if (left.started_at !== right.started_at) return left.started_at - right.started_at
       return left.id.localeCompare(right.id)
     })
+}
+
+function emptyCompressionPivotVisibleChildChain(
+  pivot: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): ConversationSessionRow[] | null {
+  if (!isOutputEmptyCompressionSession(pivot)) return null
+  const path: ConversationSessionRow[] = [pivot]
+  const seen = new Set<string>([pivot.id])
+  let current = pivot
+
+  while (true) {
+    const children = (childrenByParent.get(current.id) || [])
+      .map(childId => byId.get(childId))
+      .filter((child): child is ConversationSessionRow => !!child)
+      .filter(child => child.source === current.source && child.source !== 'tool')
+    if (children.length !== 1) return null
+
+    const child = children[0]
+    if (seen.has(child.id)) return null
+    if (Number(child.started_at || 0) < Number(current.started_at || 0)) return null
+    path.push(child)
+    if (!isOutputEmptyCompressionSession(child)) {
+      return hasConversationFacts(child) ? path : null
+    }
+    seen.add(child.id)
+    current = child
+  }
 }
 
 function buildMainlineByRoot(
@@ -1704,6 +1753,10 @@ function isVisibleConversationStart(
   inferredChildren: Map<string, string[]>,
 ): boolean {
   if (!session || session.source === 'tool') return false
+  if (emptyCompressionPivotVisibleChildChain(session, byId, childrenByParent)) {
+    logConversationDecision('keep-empty-compression-pivot-summary-root', session, { reason: 'unique visible child chain represents active conversation' })
+    return true
+  }
   if (session.source === 'tui' && !session.has_visible_messages && Number(session.tool_call_count || 0) <= 0 && !session.title) {
     logConversationDecision('hide-empty-tui-stub', session, { reason: 'no visible messages or tool activity' })
     return false
@@ -2566,6 +2619,7 @@ function explicitDetailForGraph(
     thread_session_count: graph.mainline.length,
     branch_session_count: countBranches(branches),
     branches,
+    represented_session_ids: representedSessionIds(graph.mainline),
     continuation_edges: graph.continuationEdges,
   }
 }
@@ -2909,9 +2963,14 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     const session = byId.get(sessionId)
     if (!session || session.source === 'tool' || isSubagentSession(session)) return null
     if (isBridgePromptOnlyContinuationStub(session)) return null
-    const rootId = rootConversationIdForSession(sessionId, byId, parentEvidence, childrenByParent, rootMemo)
-    if (!rootId) return null
-    chain = mainlineSessionsForRoot(rootId, sessions, byId, childrenByParent, parentEvidence, inferredChildren)
+    const pivotChildChain = emptyCompressionPivotVisibleChildChain(session, byId, childrenByParent)
+    if (pivotChildChain) {
+      chain = pivotChildChain
+    } else {
+      const rootId = rootConversationIdForSession(sessionId, byId, parentEvidence, childrenByParent, rootMemo)
+      if (!rootId) return null
+      chain = mainlineSessionsForRoot(rootId, sessions, byId, childrenByParent, parentEvidence, inferredChildren)
+    }
   }
 
   if (!chain.length) return null
@@ -2933,6 +2992,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
         messages: [],
         visible_count: 0,
         thread_session_count: chain.length,
+        represented_session_ids: representedSessionIds(chain),
       }
       if (humanOnly) {
         detail.branch_session_count = countBranches(branches)
@@ -2947,6 +3007,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       messages,
       visible_count: messages.length,
       thread_session_count: chain.length,
+      represented_session_ids: representedSessionIds(chain),
     }
     if (humanOnly) {
       detail.branch_session_count = countBranches(branches)

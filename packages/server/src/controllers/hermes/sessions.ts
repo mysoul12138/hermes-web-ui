@@ -154,8 +154,19 @@ function mergeConversationDetailIntoSession(
     message_count: detail.messages.length,
     thread_session_count: detail.thread_session_count,
     branch_session_count: detail.branch_session_count,
+    represented_session_ids: detail.represented_session_ids,
     branches: detail.branches,
   }
+}
+
+async function mergeTuiConversationDetailIfAvailable(
+  session: HermesSessionDetailRow,
+  detailSessionId: string,
+): Promise<(HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'] }) | null> {
+  if (session.source !== 'tui') return null
+  const conversationDetail = await getConversationDetailFromDb(detailSessionId, { source: 'tui', humanOnly: true })
+  if (!conversationDetail || hasPendingDeletedConversation(conversationDetail)) return null
+  return mergeConversationDetailIntoSession(session, conversationDetail)
 }
 
 function getGroupChatStorage() {
@@ -507,26 +518,23 @@ export async function get(ctx: any) {
         ctx.body = { session: createBridgeSessionFallback(requestedSessionId) }
         return
       }
-      if (session.source === 'tui') {
-        try {
-          const conversationDetail = await getConversationDetailFromDb(canonicalSessionId, { source: 'tui', humanOnly: true })
-          if (conversationDetail && !hasPendingDeletedConversation(conversationDetail)) {
-            const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
-            logger.info({
-              sessionId: requestedSessionId,
-              canonicalSessionId,
-              source: session.source,
-              rawMessageCount: Array.isArray(session.messages) ? session.messages.length : 0,
-              messageCount: mergedSession.messages.length,
-              rawThreadSessionCount: session.thread_session_count,
-              threadSessionCount: conversationDetail.thread_session_count,
-            }, '[sessions-controller] get conversation-db-hit')
-            ctx.body = { session: mergedSession }
-            return
-          }
-        } catch (err) {
-          logger.warn(err, 'Hermes Conversation DB: session detail aggregation failed, falling back to raw session detail')
+      try {
+        const mergedSession = await mergeTuiConversationDetailIfAvailable(session, canonicalSessionId)
+        if (mergedSession) {
+          logger.info({
+            sessionId: requestedSessionId,
+            canonicalSessionId,
+            source: session.source,
+            rawMessageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+            messageCount: mergedSession.messages.length,
+            rawThreadSessionCount: session.thread_session_count,
+            threadSessionCount: mergedSession.thread_session_count,
+          }, '[sessions-controller] get conversation-db-hit')
+          ctx.body = { session: mergedSession }
+          return
         }
+      } catch (err) {
+        logger.warn(err, 'Hermes Conversation DB: session detail aggregation failed, falling back to raw session detail')
       }
       logger.info({
         sessionId: requestedSessionId,
@@ -551,6 +559,25 @@ export async function get(ctx: any) {
     try {
       const mappedSession = await getSessionDetailFromDb(persistentSessionId)
       if (mappedSession && !hasPendingDeletedSessionDetail(mappedSession)) {
+        try {
+          const mergedMappedSession = await mergeTuiConversationDetailIfAvailable(mappedSession, persistentSessionId)
+          if (mergedMappedSession) {
+            logger.info({
+              route: 'get',
+              sessionId: requestedSessionId,
+              canonicalSessionId,
+              persistentSessionId,
+              rawMessageCount: Array.isArray(mappedSession.messages) ? mappedSession.messages.length : 0,
+              messageCount: mergedMappedSession.messages.length,
+              rawThreadSessionCount: mappedSession.thread_session_count,
+              threadSessionCount: mergedMappedSession.thread_session_count,
+            }, '[sessions-controller] get mapped-conversation-db-hit')
+            ctx.body = { session: mergedMappedSession }
+            return
+          }
+        } catch (err) {
+          logger.warn(err, 'Hermes Conversation DB: mapped bridge detail aggregation failed, falling back to raw mapped detail')
+        }
         logger.info({
           route: 'get',
           sessionId: requestedSessionId,
