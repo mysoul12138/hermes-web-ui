@@ -93,6 +93,7 @@ export interface ConversationBranch {
 
 export interface ConversationDetail {
   session_id: string
+  title?: string | null
   messages: ConversationMessage[]
   visible_count: number
   thread_session_count: number

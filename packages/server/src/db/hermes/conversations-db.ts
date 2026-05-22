@@ -324,6 +324,14 @@ function isEmptyCompressionSession(session: ConversationSessionRow | undefined):
     && !hasConversationContent(session)
 }
 
+function isOutputEmptyCompressionSession(session: ConversationSessionRow | undefined): boolean {
+  return !!session
+    && session.source === 'tui'
+    && isCompressionEndReason(session.end_reason)
+    && !session.has_visible_messages
+    && Number(session.tool_call_count || 0) <= 0
+}
+
 function isBridgeContextPrompt(value: unknown): boolean {
   return normalizeText(value).startsWith(BRIDGE_CONTEXT_PROMPT_PREFIX)
 }
@@ -616,13 +624,8 @@ function isLikelyEmptyCompressionPivotContinuation(
   byId: Map<string, ConversationSessionRow>,
   childrenByParent: Map<string | null, string[]>,
 ): boolean {
-  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
-  if (child.parent_session_id !== parent.id) return false
   if (!isEmptyCompressionSession(child)) return false
-  if (!hasConversationContent(parent)) return false
-  if (Number(child.started_at || 0) < Number(parent.started_at || 0)) return false
-
-  return !!emptyCompressionPivotBridgeEvidence(parent, child, byId, childrenByParent)
+  return isTrustedEmptyCompressionPivotLink(parent, child, byId, childrenByParent)
 }
 
 function emptyCompressionPivotBridgeEvidence(
@@ -631,11 +634,28 @@ function emptyCompressionPivotBridgeEvidence(
   byId: Map<string, ConversationSessionRow>,
   childrenByParent: Map<string | null, string[]>,
 ): ConversationSessionRow | null {
+  return emptyCompressionPivotBridgeEvidencePath(parent, pivot, byId, childrenByParent)?.at(-1) || null
+}
+
+function emptyCompressionPivotBridgeEvidencePath(
+  parent: ConversationSessionRow,
+  pivot: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): ConversationSessionRow[] | null {
+  if (pivot.id === parent.id || pivot.source !== parent.source || pivot.source !== 'tui') return null
+  if (pivot.parent_session_id !== parent.id) return null
+  if (!isEmptyCompressionSession(pivot)) return null
+  if (!hasConversationContent(parent)) return null
+  if (Number(pivot.started_at || 0) < Number(parent.started_at || 0)) return null
+
+  const path: ConversationSessionRow[] = []
   const seen = new Set<string>()
   let current: ConversationSessionRow | null = pivot
 
   while (current && !seen.has(current.id)) {
     seen.add(current.id)
+    path.push(current)
     const source = current.source
     const childIds: string[] = childrenByParent.get(current.id) || []
     const children: ConversationSessionRow[] = childIds
@@ -655,10 +675,136 @@ function emptyCompressionPivotBridgeEvidence(
 
     if (!hasConversationContent(next)) return null
     if (!isBridgeContextPrompt(next.raw_preview || next.preview || next.title)) return null
-    return contextReferencesParent(parent, next) ? next : null
+    return contextReferencesParent(parent, next) ? [...path, next] : null
   }
 
   return null
+}
+
+function isTrustedEmptyCompressionPivotLink(
+  parent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): boolean {
+  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
+  if (child.parent_session_id !== parent.id) return false
+  if (Number(child.started_at || 0) < Number(parent.started_at || 0)) return false
+  if (!isEmptyCompressionSession(parent) && !isEmptyCompressionSession(child)) return false
+
+  const emptyAncestors: ConversationSessionRow[] = []
+  let anchor: ConversationSessionRow | undefined = parent
+  const seen = new Set<string>()
+  while (anchor && isEmptyCompressionSession(anchor) && !seen.has(anchor.id)) {
+    seen.add(anchor.id)
+    emptyAncestors.unshift(anchor)
+    anchor = anchor.parent_session_id ? byId.get(anchor.parent_session_id) : undefined
+  }
+  if (!anchor || isEmptyCompressionSession(anchor) || anchor.source !== child.source) return false
+
+  const firstPivot = emptyAncestors[0] || child
+  const path = emptyCompressionPivotBridgeEvidencePath(anchor, firstPivot, byId, childrenByParent)
+  if (!path?.some(session => session.id === child.id)) return false
+  if (parent.id === anchor.id) return path[0]?.id === child.id
+  return path.some((session, index) => index > 0 && path[index - 1]?.id === parent.id && session.id === child.id)
+}
+
+function hasBridgeContextPromptDescendantReferencing(
+  session: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  seen = new Set<string>(),
+): boolean {
+  if (seen.has(session.id)) return false
+  seen.add(session.id)
+  const childIds = childrenByParent.get(session.id) || []
+  for (const childId of childIds) {
+    const child = byId.get(childId)
+    if (!child || child.source !== session.source || child.source === 'tool') continue
+    if (
+      hasConversationContent(child)
+      && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)
+      && contextReferencesParent(session, child)
+    ) return true
+    if (isEmptyCompressionSession(child) && hasBridgeContextPromptDescendantReferencing(session, byId, childrenByParent, seen)) return true
+  }
+  return false
+}
+
+function hasBridgeContextPromptDescendantReferencingAny(
+  session: ConversationSessionRow,
+  anchors: ConversationSessionRow[],
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  seen = new Set<string>(),
+): boolean {
+  if (seen.has(session.id)) return false
+  seen.add(session.id)
+  const childIds = childrenByParent.get(session.id) || []
+  for (const childId of childIds) {
+    const child = byId.get(childId)
+    if (!child || child.source !== session.source || child.source === 'tool') continue
+    if (
+      hasConversationContent(child)
+      && isBridgeContextPrompt(child.raw_preview || child.preview || child.title)
+      && anchors.some(anchor => contextReferencesParent(anchor, child))
+    ) return true
+    if (hasBridgeContextPromptDescendantReferencingAny(child, anchors, byId, childrenByParent, seen)) return true
+  }
+  return false
+}
+
+function nativeAncestorAnchors(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {
+  const anchors: ConversationSessionRow[] = []
+  const seen = new Set<string>()
+  let current: ConversationSessionRow | undefined = parent
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    anchors.push(current)
+    if (!current.parent_session_id) break
+    const next = byId.get(current.parent_session_id)
+    if (!next || next.source !== current.source || next.source === 'tool') break
+    current = next
+  }
+  return anchors
+}
+
+function isTrustedLongGapNativeContinuation(
+  parent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): boolean {
+  if (child.id === parent.id) return false
+  if (child.parent_session_id !== parent.id) return false
+  if (child.source !== parent.source) return false
+  if (child.source !== 'tui' && child.source !== 'webui-bridge') return false
+  if (nativeAncestorAnchors(parent, byId).some(anchor => isOutputEmptyCompressionSession(anchor))) return false
+  if (!hasConversationContent(parent)) return false
+  if (!child.has_visible_messages && Number(child.tool_call_count || 0) <= 0) return false
+  if (!isCompressionEndReason(parent.end_reason) && parent.end_reason !== 'tui_shutdown') return false
+  if (Number(child.started_at || 0) < Number(parent.started_at || 0)) return false
+  if (isBranchRoot(child, byId)) return false
+  if (isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return false
+
+  const anchors = nativeAncestorAnchors(parent, byId)
+  const hasDescendantAnchorEvidence = hasBridgeContextPromptDescendantReferencingAny(child, anchors, byId, childrenByParent)
+  if (hasDescendantAnchorEvidence) return true
+
+  const ambiguousLongGapSiblings = (childrenByParent.get(parent.id) || [])
+    .map(childId => byId.get(childId))
+    .filter((sibling): sibling is ConversationSessionRow => !!sibling)
+    .filter(sibling => sibling.id !== child.id)
+    .filter(sibling => sibling.source === child.source && sibling.source !== 'tool')
+    .filter(sibling => sibling.has_visible_messages || Number(sibling.tool_call_count || 0) > 0)
+    .filter(sibling => Number(sibling.started_at || 0) >= Number(parent.started_at || 0))
+    .filter(sibling => !isBridgeContextPrompt(sibling.raw_preview || sibling.preview || sibling.title))
+    .filter(sibling => !isLikelyOrphanContinuation(parent, sibling))
+    .filter(sibling => !isExplicitHandoffContinuationChild(sibling, byId))
+    .filter(sibling => !isBridgeContextBranchContinuationChild(sibling, byId))
+    .filter(sibling => !hasBridgeContextPromptDescendantReferencingAny(sibling, anchors, byId, childrenByParent))
+
+  return ambiguousLongGapSiblings.length === 0
 }
 
 function nextContinuationChild(parent: ConversationSessionRow, byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>, allowTool = false): ConversationSessionRow | null {
@@ -892,6 +1038,10 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[]): Map<string,
     const explicitParentId = explicitLinks[session.id]
     if (explicitParentId) {
       const explicitParent = byId.get(explicitParentId)
+      if (!explicitParent || explicitParent.id === session.id) {
+        logConversationDecision('skip-invalid-explicit-bridge-link', session, { explicitParentId })
+        continue
+      }
       if (explicitParent && explicitParent.id !== session.id) {
         if (
           isBridgePromptOnlyContinuationStub(session)
@@ -990,6 +1140,7 @@ function isAgentLikeBranchSession(
   if ((session.source !== 'tui' && session.source !== 'webui-bridge') || !session.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
   if (!parent || parent.source === 'tool') return false
+  if (session.source === 'tui' && (inferredChildren?.get(session.id) || []).length > 0 && parent.ended_at == null) return true
   if (isBridgeContextPrompt(session.raw_preview || session.preview || session.title)) return false
   if (isCompressionLineageChild(session, byId)) return false
   if (isExplicitHandoffContinuationChild(session, byId)) return false
@@ -1003,22 +1154,66 @@ function isAgentLikeBranchSession(
   return childStarted + LINEAGE_TOLERANCE_SECONDS < Number(parent.ended_at || 0)
 }
 
-function effectiveParentEvidence(session: ConversationSessionRow | undefined, parentEvidence: Map<string, ParentEvidence>): ParentEvidence | null {
+function hasTrustedNativeParent(
+  session: ConversationSessionRow,
+  parent: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): boolean {
+  if (session.source !== parent.source) return false
+  if (session.source !== 'tui' && session.source !== 'webui-bridge') return true
+  if (isOutputEmptyCompressionSession(parent) || isOutputEmptyCompressionSession(session)) {
+    return isTrustedEmptyCompressionPivotLink(parent, session, byId, childrenByParent)
+  }
+  if (parent.ended_at == null && hasBridgeContextPromptDescendantReferencing(session, byId, childrenByParent)) return true
+  if (hasBridgeContextPromptDescendantReferencingAny(session, nativeAncestorAnchors(parent, byId), byId, childrenByParent)) return true
+  if (isTrustedLongGapNativeContinuation(parent, session, byId, childrenByParent)) return true
+  if (isCompressionLineageChild(parent, byId)) return false
+  if (isCompressionLineageChild(session, byId)) return true
+  if (isExplicitHandoffContinuationChild(session, byId)) return true
+  if (isLikelyExplicitContinuation(parent, session)) return true
+  if (isBridgeContextBranchContinuationChild(session, byId)) return true
+  return false
+}
+
+function effectiveParentEvidence(
+  session: ConversationSessionRow | undefined,
+  parentEvidence: Map<string, ParentEvidence>,
+  byId?: Map<string, ConversationSessionRow>,
+  childrenByParent?: Map<string | null, string[]>,
+): ParentEvidence | null {
   if (!session) return null
   const explicitOrFallback = parentEvidence.get(session.id)
   if (explicitOrFallback) return explicitOrFallback
-  if (session.parent_session_id) return { parentId: session.parent_session_id, kind: 'native_parent' }
+  if (!session.parent_session_id) return null
+  const parent = byId?.get(session.parent_session_id)
+  if (parent && byId && childrenByParent && !hasTrustedNativeParent(session, parent, byId, childrenByParent)) {
+    logConversationDecision('skip-untrusted-native-parent', session, {
+      parentId: parent.id,
+      parentEndReason: parent.end_reason,
+      parentMessageCount: parent.message_count,
+      parentToolCallCount: parent.tool_call_count,
+    })
+    return null
+  }
+  if (parent || !byId) return { parentId: session.parent_session_id, kind: 'native_parent' }
   return null
 }
 
-function effectiveParentId(session: ConversationSessionRow | undefined, parentEvidence: Map<string, ParentEvidence>): string | null {
-  return effectiveParentEvidence(session, parentEvidence)?.parentId ?? null
+function effectiveParentId(
+  session: ConversationSessionRow | undefined,
+  parentEvidence: Map<string, ParentEvidence>,
+  byId?: Map<string, ConversationSessionRow>,
+  childrenByParent?: Map<string | null, string[]>,
+): string | null {
+  return effectiveParentEvidence(session, parentEvidence, byId, childrenByParent)?.parentId ?? null
 }
 
 function rootConversationIdForSession(
   sessionId: string,
   byId: Map<string, ConversationSessionRow>,
   parentEvidence: Map<string, ParentEvidence>,
+  childrenByParent?: Map<string | null, string[]>,
   memo = new Map<string, string | null>(),
 ): string | null {
   if (memo.has(sessionId)) return memo.get(sessionId) ?? null
@@ -1032,7 +1227,7 @@ function rootConversationIdForSession(
   let current: ConversationSessionRow | undefined = session
   while (current && !seen.has(current.id)) {
     seen.add(current.id)
-    const parentId = effectiveParentId(current, parentEvidence)
+    const parentId = effectiveParentId(current, parentEvidence, byId, childrenByParent)
     if (!parentId) {
       if (shouldTraceContinuationSession(sessionId)) {
         logger.info({
@@ -1054,6 +1249,14 @@ function rootConversationIdForSession(
           seen: Array.from(seen),
         }, '[conversations-db] root-conversation missing-parent')
       }
+      memo.set(sessionId, current.id)
+      return current.id
+    }
+    if (
+      childrenByParent
+      && isOutputEmptyCompressionSession(parent)
+      && !isTrustedEmptyCompressionPivotLink(parent, current, byId, childrenByParent)
+    ) {
       memo.set(sessionId, current.id)
       return current.id
     }
@@ -1084,6 +1287,10 @@ function hasInvalidEmptyCompressionPivotAncestor(
     const parent = byId.get(current.parent_session_id)
     if (!parent) return false
     if (
+      isOutputEmptyCompressionSession(parent)
+      && !isTrustedEmptyCompressionPivotLink(parent, current, byId, childrenByParent)
+    ) return true
+    if (
       isEmptyCompressionSession(current)
       && !isCompressionEndReason(parent.end_reason)
       && !isLikelyEmptyCompressionPivotContinuation(parent, current, byId, childrenByParent)
@@ -1106,8 +1313,11 @@ function mainlineSessionsForRoot(
   return sessions
     .filter(session => session.source !== 'tool')
     .filter(session => !isAgentLikeBranchSession(session, byId, inferredChildren))
-    .filter(session => !hasInvalidEmptyCompressionPivotAncestor(session, byId, childrenByParent))
-    .filter(session => rootConversationIdForSession(session.id, byId, parentEvidence, memo) === rootId)
+    .filter(session => {
+      const resolvedRootId = rootConversationIdForSession(session.id, byId, parentEvidence, childrenByParent, memo)
+      if (resolvedRootId !== rootId) return false
+      return resolvedRootId === session.id || !hasInvalidEmptyCompressionPivotAncestor(session, byId, childrenByParent)
+    })
     .sort((left, right) => {
       if (left.started_at !== right.started_at) return left.started_at - right.started_at
       return left.id.localeCompare(right.id)
@@ -1127,9 +1337,9 @@ function buildMainlineByRoot(
   for (const session of sessions) {
     if (session.source === 'tool') continue
     if (isAgentLikeBranchSession(session, byId, inferredChildren)) continue
-    if (hasInvalidEmptyCompressionPivotAncestor(session, byId, childrenByParent)) continue
-    const rootId = rootConversationIdForSession(session.id, byId, parentEvidence, rootMemo)
+    const rootId = rootConversationIdForSession(session.id, byId, parentEvidence, childrenByParent, rootMemo)
     if (!rootId) continue
+    if (rootId !== session.id && hasInvalidEmptyCompressionPivotAncestor(session, byId, childrenByParent)) continue
     const group = grouped.get(rootId) || []
     group.push(session)
     grouped.set(rootId, group)
@@ -1254,6 +1464,7 @@ function hasBridgeContextContinuationDescendant(
 function isCompressionLineageChild(session: ConversationSessionRow | undefined, byId: Map<string, ConversationSessionRow>): boolean {
   if (!session?.parent_session_id) return false
   const parent = byId.get(session.parent_session_id)
+  if (isOutputEmptyCompressionSession(parent)) return false
   return !!parent && isCompressionEndReason(parent.end_reason) && isLikelyOrphanContinuation(parent, session)
 }
 
@@ -1342,7 +1553,16 @@ function isVisibleConversationStart(
     logConversationDecision('hide-bridge-context-continuation-child', session, { reason: 'fold into root conversation' })
     return false
   }
-  const visible = (session.parent_session_id == null || isBranchRoot(session, byId))
+  if (session.source === 'tui' && (inferredChildren.get(session.id) || []).length > 0 && session.parent_session_id) {
+    logConversationDecision('hide-bridge-context-placeholder-root', session, { reason: 'placeholder is represented by inferred bridge continuation' })
+    return false
+  }
+  if (isAgentLikeBranchSession(session, byId, inferredChildren)) {
+    logConversationDecision('hide-agent-like-branch-placeholder', session, { reason: 'branch placeholder is represented under its root' })
+    return false
+  }
+  const hasEffectiveParent = !!effectiveParentEvidence(session, parentEvidence, byId, childrenByParent)
+  const visible = (!hasEffectiveParent || isBranchRoot(session, byId))
     && !isCompressionContinuationChild(session, byId, childrenByParent)
     && !isCompressionLineageChild(session, byId)
   if (shouldTraceContinuationSession(session.id)) {
@@ -1350,6 +1570,7 @@ function isVisibleConversationStart(
       sessionId: session.id,
       visible,
       parentSessionId: session.parent_session_id,
+      hasEffectiveParent,
       isBranchRoot: isBranchRoot(session, byId),
       hasDirectBridgeParent: !!directBridgeContextParent(session, byId, parentEvidence),
       isCompressionContinuationChild: isCompressionContinuationChild(session, byId, childrenByParent),
@@ -1384,11 +1605,13 @@ function representedSessionIds(chain: ConversationSessionRow[]): string[] {
 function continuationEdgesForChain(
   chain: ConversationSessionRow[],
   parentEvidence: Map<string, ParentEvidence>,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
 ): ConversationContinuationEdge[] {
   const chainIds = new Set(chain.map(session => session.id))
   const edges: ConversationContinuationEdge[] = []
   for (const session of chain) {
-    const evidence = effectiveParentEvidence(session, parentEvidence)
+    const evidence = effectiveParentEvidence(session, parentEvidence, byId, childrenByParent)
     if (!evidence || !chainIds.has(evidence.parentId)) continue
     edges.push({
       child_session_id: session.id,
@@ -1535,6 +1758,14 @@ function aggregateSummary(
   }
 }
 
+function conversationTitleForChain(chain: ConversationSessionRow[]): string | null {
+  if (!chain.length) return null
+  const root = chain[0]
+  const last = chain[chain.length - 1]
+  const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
+  return root.title || last.title || firstPreview || null
+}
+
 function normalizeVisibleMessage(message: { id: number | string, session_id: string, role: string, content: unknown, timestamp: number }, fallbackTimestamp: number): ConversationMessage | null {
   const role = safeText(message.role)
   const rawContent = textFromContent(message.content).trim()
@@ -1559,11 +1790,6 @@ function normalizeVisibleMessage(message: { id: number | string, session_id: str
 function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, sessions: ConversationSessionRow[]): ConversationMessage[] {
   const sessionById = new Map(sessions.map(session => [session.id, session]))
   const sessionIndex = new Map(sessions.map((session, index) => [session.id, index]))
-  const compactionSessionIndexes = rows
-    .filter(row => isSyntheticUserText(row.content))
-    .map(row => sessionIndex.get(String(row.session_id || '')))
-    .filter((index): index is number => index != null)
-  const firstCompactionSessionIndex = compactionSessionIndexes.length ? Math.min(...compactionSessionIndexes) : null
   const normalized = rows
     .map(row => {
       const session = sessionById.get(String(row.session_id || ''))
@@ -1582,35 +1808,15 @@ function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, 
     })
   if (normalized.length < 2) return normalized
 
-  const filteredReplay = filterCompressionReplayPrefixMessages(normalized, sessions, sessionById, sessionIndex)
-  const firstUser = filteredReplay.find(message => message.role === 'user')
-  if (!firstUser) return filteredReplay
-  if (firstCompactionSessionIndex == null) return filteredReplay
-
-  const firstVisibleUserBySession = new Map<string, string>()
-  let duplicateRemoved = false
-  return filteredReplay.filter((message, index) => {
-    if (index === 0) return true
-    if (message.role !== 'user') return true
-    const currentSessionId = message.session_id
-    if (currentSessionId === firstUser.session_id) return true
-    if (duplicateRemoved) return true
-    const currentSessionIndex = sessionIndex.get(currentSessionId)
-    if (currentSessionIndex == null || currentSessionIndex < firstCompactionSessionIndex) return true
-
-    const existingFirst = firstVisibleUserBySession.get(currentSessionId)
-    if (!existingFirst) {
-      firstVisibleUserBySession.set(currentSessionId, normalizeText(message.content))
-      if (normalizeText(message.content) !== normalizeText(firstUser.content)) return true
-      duplicateRemoved = true
-      return false
-    }
-    return true
-  })
+  return filterCompressionReplayPrefixMessages(normalized, sessions, sessionById, sessionIndex)
 }
 
 function visibleMessageReplayKey(message: ConversationMessage): string {
   return `${message.role}\u0000${normalizeText(message.content)}`
+}
+
+function isReplayPrefixMessage(message: ConversationMessage): boolean {
+  return message.role === 'assistant'
 }
 
 function isCompressionReplaySession(
@@ -1644,12 +1850,9 @@ function filterCompressionReplayPrefixMessages(
   for (const session of sessions) {
     const sessionMessages = bySession.get(session.id) || []
     if (isCompressionReplaySession(session, sessions, sessionById, sessionIndex)) {
-      let prefixEnd = 0
-      while (prefixEnd < sessionMessages.length && prior.has(visibleMessageReplayKey(sessionMessages[prefixEnd]))) {
-        prefixEnd += 1
-      }
-      const dropPrefix = prefixEnd >= 1
-      filtered.push(...(dropPrefix ? sessionMessages.slice(prefixEnd) : sessionMessages))
+      filtered.push(...sessionMessages.filter(message => (
+        !isReplayPrefixMessage(message) || !prior.has(visibleMessageReplayKey(message))
+      )))
     } else {
       filtered.push(...sessionMessages)
     }
@@ -1902,7 +2105,8 @@ export async function listConversationSummariesFromDb(options: ConversationListO
       .filter(session => session.source !== 'tool')
       .filter(session => !isSubagentSession(session))
       .filter(session => !shouldSuppressBridgePromptTopLevelConversation(session, parentEvidence))
-      .map(session => rootConversationIdForSession(session.id, byId, parentEvidence, rootMemo))
+      .filter(session => isVisibleConversationStart(session, byId, childrenByParent, parentEvidence, inferredChildren))
+      .map(session => rootConversationIdForSession(session.id, byId, parentEvidence, childrenByParent, rootMemo))
       .filter((id): id is string => !!id)
     const uniqueRootIds = [...new Set(rootIds)]
     traceAggregationTiming('built-root-ids', startedAt, { uniqueRootCount: uniqueRootIds.length })
@@ -1951,7 +2155,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     const session = byId.get(sessionId)
     if (!session || session.source === 'tool' || isSubagentSession(session)) return null
     if (isBridgePromptOnlyContinuationStub(session)) return null
-    const rootId = rootConversationIdForSession(sessionId, byId, parentEvidence, rootMemo)
+    const rootId = rootConversationIdForSession(sessionId, byId, parentEvidence, childrenByParent, rootMemo)
     if (!rootId) return null
     chain = mainlineSessionsForRoot(rootId, sessions, byId, childrenByParent, parentEvidence, inferredChildren)
   }
@@ -1971,6 +2175,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       if (humanOnly && !branches.length && !chain.some(session => session.is_live_tui_process || Number(session.tool_call_count || 0) > 0)) return null
       const detail: ConversationDetail = {
         session_id: sessionId,
+        title: conversationTitleForChain(chain),
         messages: [],
         visible_count: 0,
         thread_session_count: chain.length,
@@ -1978,12 +2183,13 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       if (humanOnly) {
         detail.branch_session_count = countBranches(branches)
         detail.branches = branches
-        detail.continuation_edges = continuationEdgesForChain(chain, parentEvidence)
+        detail.continuation_edges = continuationEdgesForChain(chain, parentEvidence, byId, childrenByParent)
       }
       return detail
     }
     const detail: ConversationDetail = {
       session_id: sessionId,
+      title: conversationTitleForChain(chain),
       messages,
       visible_count: messages.length,
       thread_session_count: chain.length,
@@ -1991,7 +2197,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
     if (humanOnly) {
       detail.branch_session_count = countBranches(branches)
       detail.branches = branches
-      detail.continuation_edges = continuationEdgesForChain(chain, parentEvidence)
+      detail.continuation_edges = continuationEdgesForChain(chain, parentEvidence, byId, childrenByParent)
     }
     return detail
   } finally {

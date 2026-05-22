@@ -355,6 +355,108 @@ describe('session conversations controller', () => {
     expect(ctx.body.session.thread_session_count).toBe(2)
   })
 
+  it('uses the conversation root title when merging TUI session detail', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue({
+      id: 'child-continuation',
+      source: 'tui',
+      model: 'deepseek-v4-flash',
+      title: 'Child raw title',
+      started_at: 10,
+      ended_at: null,
+      last_active: 20,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      preview: 'child preview',
+      messages: [
+        { id: 10, session_id: 'child-continuation', role: 'assistant', content: 'child-only raw message', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 10, token_count: null, finish_reason: null, reasoning: null },
+      ],
+      thread_session_count: 1,
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: 'child-continuation',
+      title: 'Stable root title',
+      messages: [
+        { id: 1, session_id: 'root', role: 'user', content: 'root prompt', timestamp: 1 },
+        { id: 2, session_id: 'child-continuation', role: 'assistant', content: 'continued answer', timestamp: 2 },
+      ],
+      visible_count: 2,
+      thread_session_count: 2,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'child-continuation' }, body: null }
+    await mod.get(ctx)
+
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('child-continuation', { source: 'tui', humanOnly: true })
+    expect(ctx.body.session.title).toBe('Stable root title')
+    expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['root prompt', 'continued answer'])
+  })
+
+  it('prefers cleaner conversation detail for TUI sessions even when raw DB detail has more messages', async () => {
+    getSessionDetailFromDbMock.mockResolvedValue({
+      id: 'dirty-root',
+      source: 'tui',
+      model: 'deepseek-v4-flash',
+      title: 'Dirty root',
+      started_at: 1,
+      ended_at: null,
+      last_active: 10,
+      message_count: 4,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: null,
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: '',
+      preview: 'root prompt',
+      messages: [
+        { id: 1, session_id: 'dirty-root', role: 'user', content: 'root prompt', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 1, token_count: null, finish_reason: null, reasoning: null },
+        { id: 2, session_id: 'dirty-root', role: 'assistant', content: 'root answer', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 2, token_count: null, finish_reason: null, reasoning: null },
+        { id: 3, session_id: 'unrelated', role: 'user', content: 'unrelated prompt', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 3, token_count: null, finish_reason: null, reasoning: null },
+        { id: 4, session_id: 'unrelated', role: 'assistant', content: 'unrelated answer', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 4, token_count: null, finish_reason: null, reasoning: null },
+      ],
+      thread_session_count: 3,
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: 'dirty-root',
+      messages: [
+        { id: 1, session_id: 'dirty-root', role: 'user', content: 'root prompt', timestamp: 1 },
+        { id: 2, session_id: 'dirty-root', role: 'assistant', content: 'root answer', timestamp: 2 },
+      ],
+      visible_count: 2,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'dirty-root' }, body: null }
+    await mod.get(ctx)
+
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('dirty-root', { source: 'tui', humanOnly: true })
+    expect(ctx.body.session.messages.map((message: any) => message.session_id)).toEqual(['dirty-root', 'dirty-root'])
+    expect(ctx.body.session.messages.map((message: any) => message.content)).not.toContain('unrelated prompt')
+    expect(ctx.body.session.message_count).toBe(2)
+    expect(ctx.body.session.thread_session_count).toBe(1)
+  })
+
   it('keeps non-TUI session detail on the raw DB path', async () => {
     getSessionDetailFromDbMock.mockResolvedValue({
       id: 'api-session',

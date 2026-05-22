@@ -653,7 +653,9 @@ describe('conversation DB service', () => {
       '我把指南更新了   你现在把合并指南skill 更新一下',
       '我先定位现有的合并指南 skill 和你更新后的指南来源，然后按 skill 安全规范做最小更新。',
       '开始更新 skill。',
+      '我把指南更新了   你现在把合并指南skill 更新一下',
       '开始更新 skill：我会新增一个“从项目开发指南同步的合并约束”章节。',
+      '我把指南更新了   你现在把合并指南skill 更新一下',
       '我先读取你上传的新版 SKILL.md 和现有 skill。',
       '我看到上传的新版 SKILL.md 不是简单覆盖版。',
     ])
@@ -801,7 +803,13 @@ describe('conversation DB service', () => {
     insertMessage(db, { id: 11, session_id: 'cont-clean', role: 'assistant', content: '指南已覆盖今天的源码改动。', timestamp: 205 })
     insertMessage(db, { id: 12, session_id: 'cont-clean', role: 'user', content: '更新指南skill', timestamp: 206 })
     insertMessage(db, { id: 13, session_id: 'cont-clean', role: 'assistant', content: 'skill 已更新。', timestamp: 207 })
-    insertMessage(db, { id: 14, session_id: 'cont-clean', role: 'user', content: '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配', timestamp: 208 })
+    insertMessage(db, {
+      id: 14,
+      session_id: 'cont-clean',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: skill 已更新。\n\nCurrent user message:\n增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配',
+      timestamp: 208,
+    })
     insertMessage(db, { id: 15, session_id: 'cont-clean', role: 'assistant', content: 'new assistant answer', timestamp: 209 })
     db.close()
 
@@ -814,6 +822,9 @@ describe('conversation DB service', () => {
       '指南已覆盖今天的源码改动。',
       '更新指南skill',
       'skill 已更新。',
+      '添加一个skill 以后只要涉及写代码就要加载这个skill',
+      '先看看我这次 指南更新 是否包括了今天的源码改动',
+      '更新指南skill',
       '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配',
       'new assistant answer',
     ])
@@ -1023,6 +1034,7 @@ describe('conversation DB service', () => {
     const detail = await mod.getConversationDetailFromDb('root', { humanOnly: true })
     expect(detail?.messages.map((message: any) => `${message.session_id}:${message.content}`)).toEqual([
       'root:same visible conversation',
+      'duplicate-cont:same visible conversation',
       'duplicate-cont:new continuation answer',
     ])
     expect(detail?.branches ?? []).toEqual([])
@@ -1500,6 +1512,51 @@ describe('conversation DB service', () => {
     expect(detail?.session_id).toBe('tool-only-root')
   })
 
+  it('loads only non-empty user and assistant messages into visible conversation detail', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'visible-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Visible root',
+      started_at: 100,
+      ended_at: 110,
+      end_reason: null,
+      message_count: 5,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, { id: 1, session_id: 'visible-root', role: 'user', content: 'visible user', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'visible-root', role: 'assistant', content: 'visible assistant', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'visible-root', role: 'tool', content: '{"output":"hidden"}', tool_name: 'terminal', timestamp: 103 })
+    insertMessage(db, { id: 4, session_id: 'visible-root', role: 'assistant', content: '', timestamp: 104 })
+    insertMessage(db, { id: 5, session_id: 'visible-root', role: 'system', content: 'hidden system', timestamp: 105 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('visible-root', { humanOnly: true })
+
+    expect(detail?.title).toBe('Visible root')
+    expect(detail?.messages.map(message => `${message.role}:${message.content}`)).toEqual([
+      'user:visible user',
+      'assistant:visible assistant',
+    ])
+    expect(detail?.visible_count).toBe(2)
+  })
+
   it('returns an empty detail payload for non-human-only sessions with no visible messages', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
@@ -1534,6 +1591,7 @@ describe('conversation DB service', () => {
 
     expect(detail).toEqual({
       session_id: 'assistant-empty',
+      title: 'Empty detail',
       messages: [],
       visible_count: 0,
       thread_session_count: 1,
@@ -2684,5 +2742,387 @@ describe('conversation DB service', () => {
 
     const wrongParentDetail = await mod.getConversationDetailFromDb('wrong-parent', { humanOnly: true })
     expect(wrongParentDetail?.messages.map((message: any) => message.content)).toEqual(['wrong parent answer'])
+  })
+
+  it('does not fallback-infer a bridge prompt child when its explicit bridge link points to a missing web id', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'nearby-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Seraphine',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'prompt-child-with-bad-link',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 250,
+      ended_at: 300,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'nearby-root', role: 'assistant', content: 'Seraphine 是 LoL 桌面辅助工具。', timestamp: 110 })
+    insertMessage(db, {
+      id: 2,
+      session_id: 'prompt-child-with-bad-link',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: Seraphine 是 LoL 桌面辅助工具。\n\nCurrent user message:\n你好',
+      timestamp: 250,
+    })
+    insertMessage(db, { id: 3, session_id: 'prompt-child-with-bad-link', role: 'assistant', content: '你好。', timestamp: 251 })
+    db.close()
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('prompt-child-with-bad-link', 'mpf55a809fa3ij')
+    linksDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const rootDetail = await mod.getConversationDetailFromDb('nearby-root', { humanOnly: true })
+    const childDetail = await mod.getConversationDetailFromDb('prompt-child-with-bad-link', { humanOnly: true })
+
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      'Seraphine 是 LoL 桌面辅助工具。',
+    ])
+    expect(childDetail?.messages.map((message: any) => message.content)).toEqual([
+      '你好',
+      '你好。',
+    ])
+  })
+
+  it('does not trust native tui empty-pivot parent chains without descendant bridge evidence', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'test-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '中文问候与协助',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'empty-pivot',
+      parent_session_id: 'test-root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '中文问候与协助 #2',
+      started_at: 201,
+      ended_at: 260,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'unrelated-child',
+      parent_session_id: 'empty-pivot',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '中文问候与协助 #3',
+      started_at: 261,
+      ended_at: 320,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'test-root', role: 'user', content: '你好', timestamp: 110 })
+    insertMessage(db, { id: 2, session_id: 'test-root', role: 'assistant', content: '你好，我是小七。', timestamp: 120 })
+    insertMessage(db, { id: 3, session_id: 'unrelated-child', role: 'user', content: '看看 mysoul/session-aggregation-hardening 分支', timestamp: 270 })
+    insertMessage(db, { id: 4, session_id: 'unrelated-child', role: 'assistant', content: '开始检查分支。', timestamp: 271 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const rootDetail = await mod.getConversationDetailFromDb('test-root', { humanOnly: true })
+    const childDetail = await mod.getConversationDetailFromDb('unrelated-child', { humanOnly: true })
+
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      '你好',
+      '你好，我是小七。',
+    ])
+    expect(childDetail?.messages.map((message: any) => message.content)).toEqual([
+      '看看 mysoul/session-aggregation-hardening 分支',
+      '开始检查分支。',
+    ])
+  })
+
+  it('folds long-gap native tui continuations with a unique explicit parent edge into the root mainline', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'native-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '看看 mysoul/session-aggregation-hardening',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'near-cont',
+      parent_session_id: 'native-root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'xAI OAuth',
+      started_at: 201,
+      ended_at: 260,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'late-cont',
+      parent_session_id: 'native-root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '看看 mysoul/session-aggregation-hardening',
+      started_at: 12123,
+      ended_at: 12200,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'late-grandchild',
+      parent_session_id: 'late-cont',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: '构建验证',
+      started_at: 12200.008,
+      ended_at: 12300,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'native-root', role: 'user', content: '看看 mysoul/session-aggregation-hardening 分支', timestamp: 110 })
+    insertMessage(db, { id: 2, session_id: 'native-root', role: 'assistant', content: '开始检查分支。', timestamp: 120 })
+    insertMessage(db, { id: 3, session_id: 'near-cont', role: 'user', content: 'xAI OAuth 怎么接', timestamp: 202 })
+    insertMessage(db, { id: 4, session_id: 'near-cont', role: 'assistant', content: 'xAI OAuth 说明。', timestamp: 203 })
+    insertMessage(db, { id: 5, session_id: 'late-cont', role: 'user', content: '继续看这个分支', timestamp: 12124 })
+    insertMessage(db, { id: 6, session_id: 'late-cont', role: 'assistant', content: '继续检查并修复。', timestamp: 12125 })
+    insertMessage(db, {
+      id: 7,
+      session_id: 'late-grandchild',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 开始检查分支。\nassistant: 继续检查并修复。\n\nCurrent user message:\n继续验证',
+      timestamp: 12201,
+    })
+    insertMessage(db, { id: 8, session_id: 'late-grandchild', role: 'assistant', content: '构建通过。', timestamp: 12202 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['native-root'])
+    expect(summaries[0]?.represented_session_ids).toEqual(['native-root', 'near-cont', 'late-cont', 'late-grandchild'])
+
+    const rootDetail = await mod.getConversationDetailFromDb('native-root', { humanOnly: true })
+    const childDetail = await mod.getConversationDetailFromDb('late-cont', { humanOnly: true })
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      '看看 mysoul/session-aggregation-hardening 分支',
+      '开始检查分支。',
+      'xAI OAuth 怎么接',
+      'xAI OAuth 说明。',
+      '继续看这个分支',
+      '继续检查并修复。',
+      '继续验证',
+      '构建通过。',
+    ])
+    expect(childDetail?.messages.map((message: any) => message.content)).toEqual(rootDetail?.messages.map((message: any) => message.content))
+    expect(rootDetail?.continuation_edges).toEqual([
+      { child_session_id: 'near-cont', parent_session_id: 'native-root', kind: 'native_parent' },
+      { child_session_id: 'late-cont', parent_session_id: 'native-root', kind: 'native_parent' },
+      { child_session_id: 'late-grandchild', parent_session_id: 'late-cont', kind: 'native_parent' },
+    ])
+    expect(rootDetail?.branches ?? []).toEqual([])
+  })
+
+  it('does not fold ambiguous long-gap native tui siblings without stronger evidence', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'ambiguous-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'root',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    for (const [id, startedAt, text] of [
+      ['late-a', 2000, '第一个长间隔会话'],
+      ['late-b', 3000, '第二个长间隔会话'],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: 'ambiguous-root',
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: text,
+        started_at: startedAt,
+        ended_at: startedAt + 100,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 1,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+
+    insertMessage(db, { id: 1, session_id: 'ambiguous-root', role: 'user', content: 'root request', timestamp: 110 })
+    insertMessage(db, { id: 2, session_id: 'ambiguous-root', role: 'assistant', content: 'root answer', timestamp: 120 })
+    insertMessage(db, { id: 3, session_id: 'late-a', role: 'user', content: '第一个长间隔会话', timestamp: 2001 })
+    insertMessage(db, { id: 4, session_id: 'late-a', role: 'assistant', content: '第一个回复', timestamp: 2002 })
+    insertMessage(db, { id: 5, session_id: 'late-b', role: 'user', content: '第二个长间隔会话', timestamp: 3001 })
+    insertMessage(db, { id: 6, session_id: 'late-b', role: 'assistant', content: '第二个回复', timestamp: 3002 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['late-b', 'late-a', 'ambiguous-root'])
+
+    const rootDetail = await mod.getConversationDetailFromDb('ambiguous-root', { humanOnly: true })
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
+      'root answer',
+    ])
   })
 })

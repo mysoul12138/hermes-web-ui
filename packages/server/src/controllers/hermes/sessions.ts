@@ -131,20 +131,13 @@ function hasPendingDeletedSessionDetail(session: { id: string; messages?: Array<
   })
 }
 
-function shouldUseConversationDetailForSession(session: HermesSessionDetailRow, detail: ConversationDetail): boolean {
-  const rawMessageCount = Array.isArray(session.messages) ? session.messages.length : 0
-  const rawThreadCount = Number(session.thread_session_count || 1)
-  const conversationThreadCount = Number(detail.thread_session_count || 1)
-  const conversationMessageCount = Array.isArray(detail.messages) ? detail.messages.length : 0
-  return conversationThreadCount > rawThreadCount || conversationMessageCount > rawMessageCount
-}
-
 function mergeConversationDetailIntoSession(
   session: HermesSessionDetailRow,
   detail: ConversationDetail,
 ): HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'] } {
   return {
     ...session,
+    title: detail.title ?? session.title,
     messages: detail.messages.map(message => ({
       id: message.id,
       session_id: message.session_id,
@@ -517,7 +510,7 @@ export async function get(ctx: any) {
       if (session.source === 'tui') {
         try {
           const conversationDetail = await getConversationDetailFromDb(canonicalSessionId, { source: 'tui', humanOnly: true })
-          if (conversationDetail && !hasPendingDeletedConversation(conversationDetail) && shouldUseConversationDetailForSession(session, conversationDetail)) {
+          if (conversationDetail && !hasPendingDeletedConversation(conversationDetail)) {
             const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
             logger.info({
               sessionId: requestedSessionId,
