@@ -38,6 +38,18 @@ export interface SteerSessionResponse {
   bridge?: boolean
   run_id?: string
   text?: string
+  ui_event_id?: string
+}
+
+export interface SteerUiEventPayload {
+  conversation_id?: string
+  source_session_id?: string
+  anchor_session_id?: string
+  anchor_message_id?: string
+  anchor_after_message_id?: string
+  client_message_id?: string
+  client_previous_message_id?: string
+  client_timestamp?: number
 }
 
 export interface CancelRunResponse {
@@ -212,10 +224,10 @@ export async function cancelRun(runId: string): Promise<CancelRunResponse> {
   })
 }
 
-export async function steerSession(sessionId: string, text: string): Promise<SteerSessionResponse> {
+export async function steerSession(sessionId: string, text: string, uiEvent?: SteerUiEventPayload): Promise<SteerSessionResponse> {
   return request<SteerSessionResponse>(`/api/hermes/v1/sessions/${encodeURIComponent(sessionId)}/steer`, {
     method: 'POST',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(uiEvent ? { text, ui_event: uiEvent } : { text }),
   })
 }
 

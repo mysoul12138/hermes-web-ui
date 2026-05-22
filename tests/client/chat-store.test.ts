@@ -1642,7 +1642,10 @@ describe('Chat Store', () => {
     )
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages).toEqual(
       expect.arrayContaining([
@@ -1710,7 +1713,12 @@ describe('Chat Store', () => {
     await store.sendMessage('adjust direction')
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(childId, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(childId, 'adjust direction', expect.objectContaining({
+      conversation_id: rootId,
+      source_session_id: childId,
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages).toEqual(
       expect.arrayContaining([
@@ -1749,7 +1757,10 @@ describe('Chat Store', () => {
     await store.sendMessage('/steer adjust direction')
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages).toEqual(
       expect.arrayContaining([
@@ -1882,7 +1893,10 @@ describe('Chat Store', () => {
     await pending
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'new request after finished run')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'new request after finished run', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(mockChatApi.startRun).toHaveBeenCalledWith(expect.objectContaining({
       input: 'new request after finished run',
       session_id: sid,
@@ -1964,7 +1978,10 @@ describe('Chat Store', () => {
     await flushPromises()
 
     expect(mockConfigApi.fetchConfig).toHaveBeenCalled()
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 
@@ -1994,7 +2011,10 @@ describe('Chat Store', () => {
     await flushPromises()
 
     expect(mockConfigApi.fetchConfig).toHaveBeenCalled()
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
 
@@ -2035,7 +2055,10 @@ describe('Chat Store', () => {
     await store.sendMessage('adjust direction while recovering')
     await flushPromises()
 
-    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction while recovering')
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction while recovering', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
     expect(mockChatApi.startRun).not.toHaveBeenCalled()
     expect(store.messages.some(message => message.queued)).toBe(false)
   })
@@ -3274,6 +3297,140 @@ describe('Chat Store', () => {
       content: '收到停止',
       steered: true,
     })
+  })
+
+  it('hydrates server-persisted steer bubbles without local steer history', async () => {
+    const sid = 'steer-server-source-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Server Steer',
+      source: 'tui',
+      messages: [],
+      createdAt: 1710000010000,
+      updatedAt: 1710000013000,
+    }]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Server Steer', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Server Steer',
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010 },
+        { id: 'ui.steer.evt-1', role: 'user', content: '收到停止', timestamp: 1710000012, steered: true, ui_event_id: 'evt-1' },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000013 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual(['u1', 'ui.steer.evt-1', 'a1'])
+    expect(store.messages[1]).toMatchObject({
+      role: 'user',
+      content: '收到停止',
+      steered: true,
+      ui_event_id: 'evt-1',
+    })
+  })
+
+  it('drops matching local steer fallback once server-persisted steer bubble exists', async () => {
+    const sid = 'steer-server-dedup-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Server Steer Dedup',
+      source: 'tui',
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010000 },
+        { id: 'local-steer', role: 'user', content: '收到停止', timestamp: 1710000012000, steered: true },
+      ],
+      createdAt: 1710000010000,
+      updatedAt: 1710000013000,
+    }]))
+    window.localStorage.setItem(steerHistoryKey(sid), JSON.stringify([
+      { content: '收到停止', timestamp: 1710000012000, previousMessageId: 'u1' },
+    ]))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      makeSummary(sid, 'Server Steer Dedup', { source: 'tui' }),
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      id: sid,
+      source: 'tui',
+      title: 'Server Steer Dedup',
+      messages: [
+        { id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010 },
+        { id: 'ui.steer.evt-2', role: 'user', content: '收到停止', timestamp: 1710000012, steered: true, ui_event_id: 'evt-2' },
+        { id: 'a1', role: 'assistant', content: 'stopped', timestamp: 1710000013 },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.messages.map(message => message.id)).toEqual(['u1', 'ui.steer.evt-2', 'a1'])
+    expect(store.messages.filter(message => message.content === '收到停止')).toHaveLength(1)
+    expect(store.messages[1]).toMatchObject({
+      steered: true,
+      ui_event_id: 'evt-2',
+    })
+  })
+
+  it('converges optimistic steer bubble id to returned server ui_event_id', async () => {
+    const settings = useSettingsStore()
+    settings.display.busy_input_mode = 'steer'
+    settings.loaded = true
+    const sid = 'steer-ui-event-converge-session'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: sid,
+      title: 'Running bridge session',
+      source: 'tui',
+      messages: [{ id: 'u1', role: 'user', content: 'start task', timestamp: 1710000010000 }],
+      createdAt: 1710000010000,
+      updatedAt: 1710000010000,
+    }]))
+    window.localStorage.setItem(bridgeLocalSessionKey(sid), '1')
+    window.localStorage.setItem(inFlightKey(sid), JSON.stringify({ runId: 'bridge_run_resumed', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([])
+    mockChatApi.steerSession.mockResolvedValue({ ok: true, status: 'queued', bridge: true, run_id: 'run-1', ui_event_id: 'evt-3' })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    await store.sendMessage('adjust direction')
+    await flushPromises()
+
+    expect(mockChatApi.steerSession).toHaveBeenCalledWith(sid, 'adjust direction', expect.objectContaining({
+      client_message_id: expect.any(String),
+      client_timestamp: expect.any(Number),
+    }))
+    expect(store.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'ui.steer.evt-3',
+          role: 'user',
+          content: 'adjust direction',
+          steered: true,
+          ui_event_id: 'evt-3',
+        }),
+      ]),
+    )
+    const history = JSON.parse(window.localStorage.getItem(steerHistoryKey(sid)) || '[]')
+    expect(history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          content: 'adjust direction',
+          uiEventId: 'evt-3',
+          clientMessageId: expect.any(String),
+        }),
+      ]),
+    )
   })
 
   it('restores a local-only steer bubble from history anchors even when cache had drifted to the end', async () => {

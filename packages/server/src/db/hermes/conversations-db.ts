@@ -1,5 +1,13 @@
 import { getActiveProfileDir } from '../../services/hermes/hermes-profile'
 import { readBridgeContinuationLinks } from '../../services/hermes/bridge-continuation-links'
+import {
+  listActiveExplicitConversationSessionEdges,
+  listConversationUiEventsReadOnly,
+  listConversationThreadsReadOnly,
+  type ConversationSessionEdgeRow,
+  type ConversationThreadRow,
+  type ConversationUiEventRow,
+} from './conversation-lineage'
 import type {
   ConversationBranch,
   ConversationContinuationEdge,
@@ -101,6 +109,14 @@ interface ParentEvidence {
   kind: ParentEvidenceKind
 }
 
+interface ExplicitConversationGraph {
+  conversationId: string
+  rootSessionId: string
+  mainline: ConversationSessionRow[]
+  branchEdges: ConversationSessionEdgeRow[]
+  continuationEdges: ConversationContinuationEdge[]
+}
+
 function conversationDbPath(): string {
   return `${getActiveProfileDir()}/state.db`
 }
@@ -120,6 +136,18 @@ function normalizeNullableNumber(value: unknown): number | null {
 function normalizeNullableString(value: unknown): string | null {
   if (value == null || value === '') return null
   return String(value)
+}
+
+function parseToolCalls(value: unknown): any[] | null {
+  if (value == null || value === '') return null
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return null
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 function safeText(value: unknown): string {
@@ -1018,7 +1046,7 @@ function shouldSuppressBridgePromptTopLevelConversation(
   return !!parentEvidence.get(session.id)
 }
 
-function buildParentEvidenceMap(sessions: ConversationSessionRow[]): Map<string, ParentEvidence> {
+function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFallbackParentIds = new Set<string>()): Map<string, ParentEvidence> {
   const map = new Map<string, ParentEvidence>()
   const explicitLinks = readBridgeContinuationLinks()
   const byId = new Map(sessions.map(session => [session.id, session]))
@@ -1074,7 +1102,7 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[]): Map<string,
       windowCandidates.push(candidate)
     }
     const parent = findInferredBridgeContextParent(session, windowCandidates)
-    if (parent) map.set(session.id, { parentId: parent.id, kind: 'fallback_inference' })
+    if (parent && !protectedFallbackParentIds.has(parent.id)) map.set(session.id, { parentId: parent.id, kind: 'fallback_inference' })
   }
   return map
 }
@@ -1766,40 +1794,49 @@ function conversationTitleForChain(chain: ConversationSessionRow[]): string | nu
   return root.title || last.title || firstPreview || null
 }
 
-function normalizeVisibleMessage(message: { id: number | string, session_id: string, role: string, content: unknown, timestamp: number }, fallbackTimestamp: number): ConversationMessage | null {
-  const role = safeText(message.role)
-  const rawContent = textFromContent(message.content).trim()
-  const content = role === 'user'
+function normalizeDetailMessage(row: Record<string, unknown>, fallbackTimestamp: number): ConversationMessage | null {
+  const role = safeText(row.role)
+  if (role !== 'user' && role !== 'assistant' && role !== 'tool') return null
+  if (role === 'tool' && !normalizeNullableString(row.tool_call_id)) return null
+  const rawContent = row.content == null ? '' : String(row.content)
+  const displayContent = role === 'user'
     ? (bridgeContextDisplayText(rawContent) || rawContent)
     : rawContent
-  if (!content) return null
-  if (role !== 'user' && role !== 'assistant') return null
-  if (isSyntheticUserText(content)) return null
+  if (role !== 'tool' && !displayContent.trim()) {
+    const toolCalls = parseToolCalls(row.tool_calls)
+    if (role !== 'assistant' || !toolCalls?.length) return null
+  }
+  if ((role === 'user' || role === 'assistant') && isSyntheticUserText(displayContent)) return null
 
   return {
-    id: message.id,
-    session_id: message.session_id,
-    role,
-    content,
-    timestamp: Number.isFinite(Number(message.timestamp)) && Number(message.timestamp) > 0
-      ? Number(message.timestamp)
+    id: row.id as number | string,
+    session_id: String(row.session_id || ''),
+    role: role as ConversationMessage['role'],
+    content: displayContent,
+    tool_call_id: normalizeNullableString(row.tool_call_id),
+    tool_calls: parseToolCalls(row.tool_calls),
+    tool_name: normalizeNullableString(row.tool_name),
+    timestamp: Number.isFinite(Number(row.timestamp)) && Number(row.timestamp) > 0
+      ? Number(row.timestamp)
       : fallbackTimestamp,
+    token_count: normalizeNullableNumber(row.token_count),
+    finish_reason: normalizeNullableString(row.finish_reason),
+    reasoning: normalizeNullableString(row.reasoning) || normalizeNullableString(row.reasoning_content),
   }
 }
 
 function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, sessions: ConversationSessionRow[]): ConversationMessage[] {
   const sessionById = new Map(sessions.map(session => [session.id, session]))
   const sessionIndex = new Map(sessions.map((session, index) => [session.id, index]))
+  const syntheticHandoffSessionIds = new Set(
+    rows
+      .filter(row => isSyntheticUserText(row.content))
+      .map(row => String(row.session_id || '')),
+  )
   const normalized = rows
     .map(row => {
       const session = sessionById.get(String(row.session_id || ''))
-      return normalizeVisibleMessage({
-        id: row.id as number | string,
-        session_id: String(row.session_id || ''),
-        role: String(row.role || ''),
-        content: row.content,
-        timestamp: normalizeNumber(row.timestamp),
-      }, session?.last_active || session?.started_at || 0)
+      return normalizeDetailMessage(row, session?.last_active || session?.started_at || 0)
     })
     .filter((message): message is ConversationMessage => !!message)
     .sort((a, b) => {
@@ -1808,15 +1845,148 @@ function normalizeVisibleMessagesFromRows(rows: Array<Record<string, unknown>>, 
     })
   if (normalized.length < 2) return normalized
 
-  return filterCompressionReplayPrefixMessages(normalized, sessions, sessionById, sessionIndex)
+  return filterCompressionReplayPrefixMessages(
+    filterOrphanToolMessages(filterExplicitMainlineReplayPrefixMessages(
+      normalized,
+      sessions,
+      sessionById,
+      sessionIndex,
+      { filterUserPrefix: 'native-non-compression', syntheticHandoffSessionIds },
+    )),
+    sessions,
+    sessionById,
+    sessionIndex,
+  )
 }
 
 function visibleMessageReplayKey(message: ConversationMessage): string {
   return `${message.role}\u0000${normalizeText(message.content)}`
 }
 
+function messageToolCallIds(message: ConversationMessage): string[] {
+  const ids: string[] = []
+  if (message.tool_call_id) ids.push(message.tool_call_id)
+  for (const toolCall of message.tool_calls || []) {
+    for (const key of ['id', 'call_id'] as const) {
+      const value = toolCall?.[key]
+      if (typeof value === 'string' && value) ids.push(value)
+    }
+  }
+  return [...new Set(ids)]
+}
+
+function visibleMessagesReplayEquivalent(message: ConversationMessage, prior: ConversationMessage): boolean {
+  if (visibleMessageReplayKey(message) === visibleMessageReplayKey(prior)) return true
+  if (message.role !== 'tool' || prior.role !== 'tool') return false
+  const priorIds = new Set(messageToolCallIds(prior))
+  return messageToolCallIds(message).some(id => priorIds.has(id))
+}
+
 function isReplayPrefixMessage(message: ConversationMessage): boolean {
   return message.role === 'assistant'
+}
+
+function filterExplicitMainlineReplayPrefixMessages(
+  messages: ConversationMessage[],
+  sessions: ConversationSessionRow[],
+  sessionById: Map<string, ConversationSessionRow>,
+  sessionIndex: Map<string, number>,
+  options: { filterUserPrefix?: boolean | 'native-non-compression', syntheticHandoffSessionIds?: Set<string> } = {},
+): ConversationMessage[] {
+  const bySession = new Map<string, ConversationMessage[]>()
+  for (const message of messages) {
+    const grouped = bySession.get(message.session_id) || []
+    grouped.push(message)
+    bySession.set(message.session_id, grouped)
+  }
+
+  const priorMessages: ConversationMessage[] = []
+  const filtered: ConversationMessage[] = []
+  const filterUserPrefix = options.filterUserPrefix ?? true
+  for (const session of sessions) {
+    const sessionMessages = bySession.get(session.id) || []
+    const parent = session.parent_session_id ? sessionById.get(session.parent_session_id) : null
+    const canFilterCompressionHandoffPrefix = !!parent
+      && isCompressionEndReason(parent.end_reason)
+      && timingMatchesParent(parent, session)
+      && !!options.syntheticHandoffSessionIds?.has(session.id)
+    let replayIndex = 0
+    const canFilterUserPrefix = filterUserPrefix === true
+      || (
+        filterUserPrefix === 'native-non-compression'
+        && !!session.parent_session_id
+        && (
+          !isCompressionReplaySession(session, sessions, sessionById, sessionIndex)
+          || canFilterCompressionHandoffPrefix
+        )
+      )
+    if (canFilterUserPrefix) {
+      while (
+        replayIndex < sessionMessages.length
+        && replayIndex < priorMessages.length
+        && visibleMessagesReplayEquivalent(sessionMessages[replayIndex], priorMessages[replayIndex])
+      ) {
+        replayIndex += 1
+      }
+    }
+    const syntheticIndex = sessionMessages.findIndex(message => isSyntheticUserText(message.content))
+    const isCompressionHandoffReplay = canFilterCompressionHandoffPrefix
+      && replayIndex > 0
+      && (syntheticIndex < 0 || replayIndex <= syntheticIndex)
+    const prefixThreshold = isReplayPrefixEligibleSession(session, sessions, sessionById, sessionIndex) ? 1 : 2
+    const prefixLength = isCompressionReplaySession(session, sessions, sessionById, sessionIndex)
+      && filterUserPrefix === 'native-non-compression'
+      ? (isCompressionHandoffReplay ? replayIndex : 0)
+      : replayIndex >= prefixThreshold
+        && (syntheticIndex < 0 || replayIndex <= syntheticIndex)
+        ? replayIndex
+        : 0
+    const droppedToolCallIds = new Set<string>()
+    if (prefixLength > 0) {
+      for (const message of sessionMessages.slice(0, prefixLength)) {
+        for (const toolCall of message.tool_calls || []) {
+          for (const key of ['id', 'call_id'] as const) {
+            const value = toolCall?.[key]
+            if (typeof value === 'string' && value) droppedToolCallIds.add(value)
+          }
+        }
+        if (message.tool_call_id) droppedToolCallIds.add(message.tool_call_id)
+      }
+    }
+
+    const remainingMessages = sessionMessages.slice(prefixLength)
+    let stillInReplayPrefix = prefixLength > 0
+    for (const message of remainingMessages) {
+      if (
+        stillInReplayPrefix
+        && message.role === 'tool'
+        && !!message.tool_call_id
+        && droppedToolCallIds.has(message.tool_call_id)
+      ) {
+        continue
+      }
+      if (message.role !== 'tool') stillInReplayPrefix = false
+      filtered.push(message)
+    }
+    for (const message of sessionMessages) {
+      priorMessages.push(message)
+    }
+  }
+
+  return filtered
+}
+
+function filterOrphanToolMessages(messages: ConversationMessage[]): ConversationMessage[] {
+  const knownToolCallIds = new Set<string>()
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    for (const id of messageToolCallIds(message)) knownToolCallIds.add(id)
+  }
+  return messages.filter(message => (
+    message.role !== 'tool'
+    || !message.tool_call_id
+    || knownToolCallIds.has(message.tool_call_id)
+  ))
 }
 
 function isCompressionReplaySession(
@@ -1830,6 +2000,17 @@ function isCompressionReplaySession(
   const parent = session.parent_session_id ? sessionById.get(session.parent_session_id) : null
   if (isCompressionEndReason(parent?.end_reason ?? null)) return true
   return isCompressionEndReason(sessions[index - 1]?.end_reason ?? null)
+}
+
+function isReplayPrefixEligibleSession(
+  session: ConversationSessionRow,
+  sessions: ConversationSessionRow[],
+  sessionById: Map<string, ConversationSessionRow>,
+  sessionIndex: Map<string, number>,
+): boolean {
+  const parent = session.parent_session_id ? sessionById.get(session.parent_session_id) : null
+  return !isCompressionReplaySession(session, sessions, sessionById, sessionIndex)
+    || isCompressionEndReason(parent?.end_reason ?? null)
 }
 
 function filterCompressionReplayPrefixMessages(
@@ -1867,20 +2048,391 @@ function filterCompressionReplayPrefixMessages(
   })
 }
 
+function filterCompressionReplayPrefixMessagesPreservingOrder(
+  messages: ConversationMessage[],
+  sessions: ConversationSessionRow[],
+  sessionById: Map<string, ConversationSessionRow>,
+  sessionIndex: Map<string, number>,
+): ConversationMessage[] {
+  const bySession = new Map<string, ConversationMessage[]>()
+  for (const message of messages) {
+    const grouped = bySession.get(message.session_id) || []
+    grouped.push(message)
+    bySession.set(message.session_id, grouped)
+  }
+
+  const prior = new Set<string>()
+  const filtered: ConversationMessage[] = []
+  for (const session of sessions) {
+    const sessionMessages = bySession.get(session.id) || []
+    if (isCompressionReplaySession(session, sessions, sessionById, sessionIndex)) {
+      filtered.push(...sessionMessages.filter(message => (
+        !isReplayPrefixMessage(message) || !prior.has(visibleMessageReplayKey(message))
+      )))
+    } else {
+      filtered.push(...sessionMessages)
+    }
+    for (const message of sessionMessages) {
+      prior.add(visibleMessageReplayKey(message))
+    }
+  }
+
+  return filtered
+}
+
 function loadVisibleMessagesForSessions(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, sessions: ConversationSessionRow[]): ConversationMessage[] {
   if (!sessions.length) return []
   const ids = sessions.map(session => session.id)
   const placeholders = ids.map(() => '?').join(', ')
   const rows = db.prepare(`
-    SELECT id, session_id, role, content, timestamp
+    SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name,
+      timestamp, token_count, finish_reason, reasoning, reasoning_content
     FROM messages
     WHERE session_id IN (${placeholders})
-      AND role IN ('user', 'assistant')
-      AND content IS NOT NULL
-      AND content != ''
+      AND role IN ('user', 'assistant', 'tool')
+      AND (
+        role = 'tool'
+        OR (content IS NOT NULL AND content != '')
+        OR (role = 'assistant' AND tool_calls IS NOT NULL AND tool_calls != '')
+      )
     ORDER BY timestamp, id
   `).all(...ids)
   return normalizeVisibleMessagesFromRows(rows, sessions)
+}
+
+function loadVisibleMessagesForExplicitMainline(db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } }, sessions: ConversationSessionRow[]): ConversationMessage[] {
+  const messages: ConversationMessage[] = []
+  const sessionById = new Map(sessions.map(session => [session.id, session]))
+  const sessionIndex = new Map(sessions.map((session, index) => [session.id, index]))
+  for (const session of sessions) {
+    const rows = db.prepare(`
+      SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name,
+        timestamp, token_count, finish_reason, reasoning, reasoning_content
+      FROM messages
+      WHERE session_id = ?
+        AND role IN ('user', 'assistant', 'tool')
+        AND (
+          role = 'tool'
+          OR (content IS NOT NULL AND content != '')
+          OR (role = 'assistant' AND tool_calls IS NOT NULL AND tool_calls != '')
+        )
+      ORDER BY id
+    `).all(session.id)
+    for (const row of rows) {
+      const message = normalizeDetailMessage(row, session.last_active || session.started_at || 0)
+      if (message) messages.push(message)
+    }
+  }
+  return filterCompressionReplayPrefixMessagesPreservingOrder(
+    filterExplicitMainlineReplayPrefixMessages(messages, sessions, sessionById, sessionIndex),
+    sessions,
+    sessionById,
+    sessionIndex,
+  )
+}
+
+function isUiEventMessageId(id: unknown): boolean {
+  return typeof id === 'string' && id.startsWith('ui.')
+}
+
+function visibleMessageMatchesAnchor(message: ConversationMessage, sessionId: string | null, messageId: string | null): boolean {
+  if (!sessionId || !messageId) return false
+  return message.session_id === sessionId && String(message.id) === messageId
+}
+
+function segmentEndIndex(messages: ConversationMessage[], sessionId: string | null): number {
+  if (!sessionId) return messages.length
+  let lastIndex = -1
+  for (let i = 0; i < messages.length; i += 1) {
+    if (messages[i].session_id === sessionId) lastIndex = i
+  }
+  return lastIndex >= 0 ? lastIndex + 1 : messages.length
+}
+
+function insertSteerUiEvents(
+  messages: ConversationMessage[],
+  events: ConversationUiEventRow[],
+  conversationId: string,
+): ConversationMessage[] {
+  const steerEvents = events
+    .filter(event => event.event_type === 'steer' && event.content)
+    .sort((a, b) => {
+      if (a.created_at !== b.created_at) return a.created_at - b.created_at
+      return a.event_id.localeCompare(b.event_id)
+    })
+  if (!steerEvents.length) return messages
+
+  const result = [...messages]
+  const insertedEventIds = new Set<string>()
+  for (const event of steerEvents) {
+    if (insertedEventIds.has(event.event_id)) continue
+    if (result.some(message => String(message.id) === `ui.steer.${event.event_id}`)) continue
+
+    const anchorSessionId = event.anchor_session_id || event.source_session_id
+    let insertIndex = -1
+    if (event.anchor_after_message_id) {
+      const anchorIndex = result.findIndex(message => visibleMessageMatchesAnchor(message, anchorSessionId, event.anchor_after_message_id))
+      if (anchorIndex >= 0) insertIndex = anchorIndex + 1
+    }
+    if (insertIndex < 0 && event.anchor_message_id) {
+      const anchorIndex = result.findIndex(message => visibleMessageMatchesAnchor(message, anchorSessionId, event.anchor_message_id))
+      if (anchorIndex >= 0) insertIndex = anchorIndex + 1
+    }
+    if (insertIndex < 0) {
+      const sourceTail = segmentEndIndex(result, event.source_session_id)
+      insertIndex = sourceTail < result.length
+        ? sourceTail
+        : segmentEndIndex(result, event.anchor_session_id)
+    }
+
+    while (insertIndex < result.length && isUiEventMessageId(result[insertIndex]?.id)) {
+      insertIndex += 1
+    }
+    result.splice(insertIndex, 0, {
+      id: `ui.steer.${event.event_id}`,
+      session_id: event.source_session_id || conversationId,
+      role: 'user',
+      content: event.content || '',
+      timestamp: Number(event.created_at || 0) * 1000,
+      steered: true,
+      ui_event_id: event.event_id,
+    } as ConversationMessage)
+    insertedEventIds.add(event.event_id)
+  }
+  return result
+}
+
+function logExplicitGraphSkip(reason: string, detail: Record<string, unknown> = {}) {
+  if (!shouldTraceConversationAggregation()) return
+  logger.info({ reason, ...detail }, '[conversations-db] explicit lineage graph skipped')
+}
+
+function activeExplicitEdgesForConversation(edges: ConversationSessionEdgeRow[], conversationId: string): ConversationSessionEdgeRow[] {
+  return edges.filter(edge => (
+    edge.conversation_id === conversationId
+    && edge.confidence === 'explicit'
+    && edge.superseded_at == null
+  ))
+}
+
+function buildExplicitConversationGraph(
+  thread: ConversationThreadRow,
+  edges: ConversationSessionEdgeRow[],
+  byId: Map<string, ConversationSessionRow>,
+): ExplicitConversationGraph | null {
+  const conversationEdges = activeExplicitEdgesForConversation(edges, thread.conversation_id)
+  if (!conversationEdges.length) {
+    logExplicitGraphSkip('no-active-explicit-edges', { conversationId: thread.conversation_id })
+    return null
+  }
+
+  const root = byId.get(thread.root_session_id)
+  if (!root || root.source === 'tool') {
+    logExplicitGraphSkip('missing-root-session', { conversationId: thread.conversation_id, rootSessionId: thread.root_session_id })
+    return null
+  }
+
+  const rootEdges = conversationEdges.filter(edge => edge.edge_type === 'root')
+  if (rootEdges.length !== 1 || rootEdges[0].child_session_id !== thread.root_session_id || rootEdges[0].parent_session_id != null) {
+    logExplicitGraphSkip('invalid-root-edge', {
+      conversationId: thread.conversation_id,
+      rootSessionId: thread.root_session_id,
+      rootEdges: rootEdges.map(edge => ({ child: edge.child_session_id, parent: edge.parent_session_id })),
+    })
+    return null
+  }
+
+  const byChildParent = new Map<string, string>()
+  const nonRootParentByChild = new Map<string, string>()
+  const continuesByParent = new Map<string, ConversationSessionEdgeRow[]>()
+  const edgeSessionIds = new Set<string>([thread.root_session_id])
+
+  for (const edge of conversationEdges) {
+    const child = byId.get(edge.child_session_id)
+    if (!child || child.source === 'tool') {
+      logExplicitGraphSkip('missing-child-session', { conversationId: thread.conversation_id, childSessionId: edge.child_session_id })
+      return null
+    }
+    edgeSessionIds.add(child.id)
+
+    if (edge.edge_type === 'root') continue
+    const parentId = edge.parent_session_id
+    if (!parentId) {
+      logExplicitGraphSkip('missing-parent-id', { conversationId: thread.conversation_id, childSessionId: edge.child_session_id, edgeType: edge.edge_type })
+      return null
+    }
+    const parent = byId.get(parentId)
+    if (!parent || parent.source === 'tool') {
+      logExplicitGraphSkip('missing-parent-session', { conversationId: thread.conversation_id, childSessionId: edge.child_session_id, parentSessionId: parentId })
+      return null
+    }
+    const existingNonRootParent = nonRootParentByChild.get(child.id)
+    if (existingNonRootParent && existingNonRootParent !== parent.id) {
+      logExplicitGraphSkip('multiple-active-parents', { conversationId: thread.conversation_id, childSessionId: child.id, parents: [existingNonRootParent, parent.id] })
+      return null
+    }
+    nonRootParentByChild.set(child.id, parent.id)
+    edgeSessionIds.add(parent.id)
+    if (edge.edge_type === 'continues' && parent.source !== child.source) {
+      logExplicitGraphSkip('source-mismatch', {
+        conversationId: thread.conversation_id,
+        parentSessionId: parent.id,
+        parentSource: parent.source,
+        childSessionId: child.id,
+        childSource: child.source,
+      })
+      return null
+    }
+
+    if (edge.edge_type === 'continues') {
+      const existingParent = byChildParent.get(child.id)
+      if (existingParent && existingParent !== parent.id) {
+        logExplicitGraphSkip('multiple-active-parents', { conversationId: thread.conversation_id, childSessionId: child.id, parents: [existingParent, parent.id] })
+        return null
+      }
+      byChildParent.set(child.id, parent.id)
+      const siblings = continuesByParent.get(parent.id) || []
+      siblings.push(edge)
+      continuesByParent.set(parent.id, siblings)
+      if (siblings.length > 1) {
+        logExplicitGraphSkip('multiple-active-continues-children', {
+          conversationId: thread.conversation_id,
+          parentSessionId: parent.id,
+          children: siblings.map(sibling => sibling.child_session_id),
+        })
+        return null
+      }
+    }
+  }
+
+  const mainline: ConversationSessionRow[] = []
+  const continuationEdges: ConversationContinuationEdge[] = []
+  const seen = new Set<string>()
+  let current: ConversationSessionRow | undefined = root
+  while (current) {
+    if (seen.has(current.id)) {
+      logExplicitGraphSkip('cycle', { conversationId: thread.conversation_id, sessionId: current.id })
+      return null
+    }
+    seen.add(current.id)
+    mainline.push(current)
+    const nextEdge = continuesByParent.get(current.id)?.[0]
+    if (!nextEdge) break
+    const child = byId.get(nextEdge.child_session_id)
+    if (!child) {
+      logExplicitGraphSkip('missing-next-session', { conversationId: thread.conversation_id, childSessionId: nextEdge.child_session_id })
+      return null
+    }
+    continuationEdges.push({
+      child_session_id: child.id,
+      parent_session_id: current.id,
+      kind: 'explicit_bridge_link',
+    })
+    current = child
+  }
+
+  const mainlineIds = new Set(mainline.map(session => session.id))
+  for (const [childId] of byChildParent) {
+    if (!mainlineIds.has(childId)) {
+      logExplicitGraphSkip('continues-edge-outside-mainline', { conversationId: thread.conversation_id, childSessionId: childId })
+      return null
+    }
+  }
+
+  return {
+    conversationId: thread.conversation_id,
+    rootSessionId: thread.root_session_id,
+    mainline,
+    branchEdges: conversationEdges.filter(edge => (
+      (edge.edge_type === 'branches' || edge.edge_type === 'subagent')
+      && !mainlineIds.has(edge.child_session_id)
+    )),
+    continuationEdges,
+  }
+}
+
+function buildExplicitConversationGraphs(
+  threads: ConversationThreadRow[],
+  edges: ConversationSessionEdgeRow[],
+  byId: Map<string, ConversationSessionRow>,
+): ExplicitConversationGraph[] {
+  return threads
+    .map(thread => buildExplicitConversationGraph(thread, edges, byId))
+    .filter((graph): graph is ExplicitConversationGraph => !!graph)
+}
+
+function explicitGraphForSession(
+  sessionId: string,
+  graphs: ExplicitConversationGraph[],
+): ExplicitConversationGraph | null {
+  return graphs.find(graph => (
+    graph.mainline.some(session => session.id === sessionId)
+    || graph.branchEdges.some(edge => edge.child_session_id === sessionId)
+  )) || null
+}
+
+function buildExplicitChildrenByParent(graph: ExplicitConversationGraph): Map<string | null, string[]> {
+  const children = new Map<string | null, string[]>()
+  for (const edge of graph.continuationEdges) {
+    const siblings = children.get(edge.parent_session_id) || []
+    siblings.push(edge.child_session_id)
+    children.set(edge.parent_session_id, siblings)
+  }
+  for (const edge of graph.branchEdges) {
+    const parentId = edge.parent_session_id ?? graph.rootSessionId
+    const siblings = children.get(parentId) || []
+    if (!siblings.includes(edge.child_session_id)) siblings.push(edge.child_session_id)
+    children.set(parentId, siblings)
+  }
+  return children
+}
+
+function explicitSummaryForGraph(
+  graph: ExplicitConversationGraph,
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+  byId: Map<string, ConversationSessionRow>,
+): ConversationSummary | null {
+  if (!graph.mainline.length) return null
+  const messages = loadVisibleMessagesForExplicitMainline(db, graph.mainline)
+  if (!messages.length && !graph.branchEdges.length && !graph.mainline.some(session => session.is_live_tui_process || Number(session.tool_call_count || 0) > 0)) return null
+  const childrenByParent = buildExplicitChildrenByParent(graph)
+  const branches = graph.branchEdges
+    .map(edge => byId.get(edge.child_session_id))
+    .filter((root): root is ConversationSessionRow => !!root)
+    .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent))
+    .filter((branch): branch is ConversationBranch => !!branch)
+  return aggregateSummary(graph.rootSessionId, byId, childrenByParent, countBranches(branches), new Map(), graph.mainline)
+}
+
+function explicitDetailForGraph(
+  requestedSessionId: string,
+  graph: ExplicitConversationGraph,
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+  byId: Map<string, ConversationSessionRow>,
+): ConversationDetail | null {
+  const rawMessages = loadVisibleMessagesForExplicitMainline(db, graph.mainline)
+  const messages = insertSteerUiEvents(
+    rawMessages,
+    listConversationUiEventsReadOnly(db as any, graph.conversationId),
+    graph.conversationId,
+  )
+  const childrenByParent = buildExplicitChildrenByParent(graph)
+  const branches = graph.branchEdges
+    .map(edge => byId.get(edge.child_session_id))
+    .filter((root): root is ConversationSessionRow => !!root)
+    .map(root => buildSubagentBranchTree(db, root, byId, childrenByParent))
+    .filter((branch): branch is ConversationBranch => !!branch)
+  if (!messages.length && !branches.length && !graph.mainline.some(session => session.is_live_tui_process || Number(session.tool_call_count || 0) > 0)) return null
+  return {
+    session_id: requestedSessionId,
+    title: conversationTitleForChain(graph.mainline),
+    messages,
+    visible_count: messages.length,
+    thread_session_count: graph.mainline.length,
+    branch_session_count: countBranches(branches),
+    branches,
+    continuation_edges: graph.continuationEdges,
+  }
 }
 
 function collectBranchRoots(chain: ConversationSessionRow[], byId: Map<string, ConversationSessionRow>, childrenByParent: Map<string | null, string[]>): ConversationSessionRow[] {
@@ -2069,14 +2621,57 @@ async function loadConversationSessions(source?: string, includeTool = false): P
   }
 }
 
+async function loadRawConversationSessions(source?: string, includeTool = false): Promise<ConversationSessionRow[]> {
+  const liveTuiSessionKeys = await listLiveTuiSessionKeys()
+  const db = await openConversationDb()
+  try {
+    const { sql, params } = buildConversationSessionSql(source, includeTool)
+    const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
+    const nowSeconds = Date.now() / 1000
+    const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
+    if (source && source !== 'tui') return sessions
+
+    const knownIds = new Set(sessions.map(session => session.id))
+    for (const sessionKey of liveTuiSessionKeys) {
+      if (!knownIds.has(sessionKey)) sessions.push(createLiveTuiPlaceholderSession(sessionKey, nowSeconds))
+    }
+    return sessions
+  } finally {
+    db.close()
+  }
+}
+
 export async function listConversationSummariesFromDb(options: ConversationListOptions = {}): Promise<ConversationSummary[]> {
   const startedAt = Date.now()
   const humanOnly = options.humanOnly !== false
   const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_CONVERSATION_LIMIT
+  const explicitSessions = humanOnly ? await loadRawConversationSessions(options.source) : []
+  const explicitById = new Map(explicitSessions.map(session => [session.id, session]))
+  let explicitSummaries: ConversationSummary[] = []
+  let explicitSessionIds = new Set<string>()
+  if (humanOnly) {
+    const db = await openConversationDb()
+    try {
+      const graphs = buildExplicitConversationGraphs(
+        listConversationThreadsReadOnly(db),
+        listActiveExplicitConversationSessionEdges(db),
+        explicitById,
+      )
+      explicitSessionIds = new Set(graphs.flatMap(graph => [
+        ...graph.mainline.map(session => session.id),
+        ...graph.branchEdges.map(edge => edge.child_session_id),
+      ]))
+      explicitSummaries = graphs
+        .map(graph => explicitSummaryForGraph(graph, db, explicitById))
+        .filter((summary): summary is ConversationSummary => !!summary)
+    } finally {
+      db.close()
+    }
+  }
   const sessions = await loadConversationSessions(options.source)
   traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
   const byId = new Map(sessions.map(session => [session.id, session]))
-  const parentEvidence = buildParentEvidenceMap(sessions)
+  const parentEvidence = buildParentEvidenceMap(sessions, explicitSessionIds)
   traceAggregationTiming('built-parent-evidence', startedAt, {
     parentEvidenceCount: parentEvidence.size,
     explicitBridgeLinkCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'explicit_bridge_link').length,
@@ -2103,6 +2698,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
   try {
     const rootIds = sessions
       .filter(session => session.source !== 'tool')
+      .filter(session => !explicitSessionIds.has(session.id))
       .filter(session => !isSubagentSession(session))
       .filter(session => !shouldSuppressBridgePromptTopLevelConversation(session, parentEvidence))
       .filter(session => isVisibleConversationStart(session, byId, childrenByParent, parentEvidence, inferredChildren))
@@ -2113,6 +2709,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
     const summaries = uniqueRootIds
       .map(rootId => {
         const mainline = mainlineByRoot.get(rootId) || []
+        if (mainline.some(session => explicitSessionIds.has(session.id))) return null
         if (!mainline.length) return null
         const mainlineIds = new Set(mainline.map(session => session.id))
         const subagentRoots = collectSubagentBranchRoots(mainlineIds, byId, childrenByParent, inferredChildren)
@@ -2124,7 +2721,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
       .filter((summary): summary is ConversationSummary => !!summary)
     traceAggregationTiming('built-summaries', startedAt, { summaryCount: summaries.length })
 
-    return sortByRecency(summaries).slice(0, limit)
+    return sortByRecency([...explicitSummaries, ...summaries]).slice(0, limit)
   } finally {
     db.close()
   }
@@ -2132,9 +2729,31 @@ export async function listConversationSummariesFromDb(options: ConversationListO
 
 export async function getConversationDetailFromDb(sessionId: string, options: ConversationListOptions = {}): Promise<ConversationDetail | null> {
   const humanOnly = options.humanOnly !== false
+  let protectedExplicitSessionIds = new Set<string>()
+  if (humanOnly) {
+    const explicitSessions = await loadRawConversationSessions(options.source, true)
+    const explicitById = new Map(explicitSessions.map(session => [session.id, session]))
+    const db = await openConversationDb()
+    try {
+      const graphs = buildExplicitConversationGraphs(
+          listConversationThreadsReadOnly(db),
+          listActiveExplicitConversationSessionEdges(db),
+          explicitById,
+      )
+      const graph = explicitGraphForSession(sessionId, graphs)
+      if (graph) return explicitDetailForGraph(sessionId, graph, db, explicitById)
+      protectedExplicitSessionIds = new Set(graphs.flatMap(explicitGraph => [
+        ...explicitGraph.mainline.map(session => session.id),
+        ...explicitGraph.branchEdges.map(edge => edge.child_session_id),
+      ]))
+    } finally {
+      db.close()
+    }
+  }
+
   const sessions = await loadConversationSessions(options.source, true)
   const byId = new Map(sessions.map(session => [session.id, session]))
-  const parentEvidence = buildParentEvidenceMap(sessions)
+  const parentEvidence = buildParentEvidenceMap(sessions, protectedExplicitSessionIds)
   const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
   const directChildrenByParent = new Map<string | null, string[]>()
   for (const session of sessions) {

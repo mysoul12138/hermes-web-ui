@@ -17,6 +17,7 @@ import {
 import { shouldHideFromPromptHistory } from './injected-message-rules'
 import { writeBridgeContinuationLink } from './bridge-continuation-links'
 import { getActiveConfigPath } from './hermes-profile'
+import { recordBridgeConversationLineage } from '../../db/hermes/conversation-lineage'
 import { isSessionCompressionEnded } from '../../db/hermes/sessions-db'
 import { resolveLineageSeed, upsertSessionLineage } from '../../db/hermes/session-lineage'
 import { updateUsage } from '../../db/hermes/usage-store'
@@ -222,6 +223,29 @@ function writeBridgeContinuationLinkIfValid(
   if (writtenLinks?.has(key)) return
   writtenLinks?.add(key)
   writeBridgeContinuationLink(child, parent)
+}
+
+function isPersistentHermesSessionId(sessionId: string | null | undefined): sessionId is string {
+  return /^\d{8}_\d{6}_[0-9a-f]{6}$/i.test((sessionId || '').trim())
+}
+
+function recordExplicitBridgeConversationLineage(params: {
+  persistentSessionId?: string | null
+  parentSessionId?: string | null
+  lineage: { logicalConversationId: string, rootSessionId: string }
+}) {
+  const childSessionId = params.persistentSessionId?.trim()
+  if (!isPersistentHermesSessionId(childSessionId)) return
+  const hintedParent = params.parentSessionId?.trim()
+  const parentSessionId = isPersistentHermesSessionId(hintedParent)
+    ? hintedParent
+    : null
+  recordBridgeConversationLineage({
+    conversation_id: params.lineage.logicalConversationId,
+    root_session_id: params.lineage.rootSessionId,
+    child_session_id: childSessionId,
+    parent_session_id: parentSessionId && parentSessionId !== childSessionId ? parentSessionId : null,
+  })
 }
 
 function isNonFatalModelListingWarning(error: unknown): boolean {
@@ -698,6 +722,11 @@ export class TuiBridgeService {
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
+      recordExplicitBridgeConversationLineage({
+        persistentSessionId,
+        parentSessionId: previousPersistentSessionId,
+        lineage: continuationLineage,
+      })
     }
     return {
       run_id: runId,
@@ -948,6 +977,11 @@ export class TuiBridgeService {
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
+      recordExplicitBridgeConversationLineage({
+        persistentSessionId,
+        parentSessionId: options.lineageParentSessionId,
+        lineage: createdLineage,
+      })
       if (persistentSessionId !== createdLineage.rootSessionId) {
         writeBridgeContinuationLinkIfValid(persistentSessionId, createdLineage.rootSessionId)
       }
@@ -1006,6 +1040,11 @@ export class TuiBridgeService {
         web_session_id: webSessionId,
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
+      })
+      recordExplicitBridgeConversationLineage({
+        persistentSessionId,
+        parentSessionId: resumedParentSessionId,
+        lineage: resumedLineage,
       })
       if (resumedParentSessionId) {
         writeBridgeContinuationLinkIfValid(persistentSessionId, resumedParentSessionId)
@@ -1088,6 +1127,11 @@ export class TuiBridgeService {
           web_session_id: webSessionId,
           bridge_session_id: this.bridgeSessionsByWebSession.get(webSessionId) || null,
           persistent_session_id: found.id,
+        })
+        recordExplicitBridgeConversationLineage({
+          persistentSessionId: found.id,
+          parentSessionId,
+          lineage: resolvedLineage,
         })
         if (parentSessionId) {
           writeBridgeContinuationLinkIfValid(found.id, parentSessionId)

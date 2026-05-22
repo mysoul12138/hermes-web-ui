@@ -210,6 +210,76 @@ export const SESSION_LINEAGE_SCHEMA: Record<string, string> = {
 }
 
 // ============================================================================
+// Lightweight Conversation Lineage
+// ============================================================================
+
+export const CONVERSATION_THREADS_TABLE = 'conversation_threads'
+
+export const CONVERSATION_THREADS_SCHEMA: Record<string, string> = {
+  conversation_id: 'TEXT PRIMARY KEY',
+  root_session_id: 'TEXT NOT NULL',
+  title: 'TEXT',
+  status: "TEXT NOT NULL DEFAULT 'active'",
+  created_at: 'INTEGER NOT NULL',
+  updated_at: 'INTEGER NOT NULL',
+  schema_version: 'INTEGER NOT NULL DEFAULT 1',
+}
+
+export const CONVERSATION_SESSION_EDGES_TABLE = 'conversation_session_edges'
+
+export const CONVERSATION_SESSION_EDGES_SCHEMA: Record<string, string> = {
+  edge_id: 'TEXT PRIMARY KEY',
+  conversation_id: 'TEXT NOT NULL',
+  parent_session_id: 'TEXT',
+  child_session_id: 'TEXT NOT NULL',
+  edge_type: 'TEXT NOT NULL',
+  confidence: 'TEXT NOT NULL',
+  created_by: 'TEXT NOT NULL',
+  created_at: 'INTEGER NOT NULL',
+  superseded_at: 'INTEGER',
+}
+
+export const CONVERSATION_UI_EVENTS_TABLE = 'conversation_ui_events'
+
+export const CONVERSATION_UI_EVENTS_SCHEMA: Record<string, string> = {
+  event_id: 'TEXT PRIMARY KEY',
+  conversation_id: 'TEXT NOT NULL',
+  event_type: 'TEXT NOT NULL',
+  source_session_id: 'TEXT',
+  anchor_session_id: 'TEXT',
+  anchor_message_id: 'TEXT',
+  anchor_after_message_id: 'TEXT',
+  content: 'TEXT',
+  metadata_json: 'TEXT',
+  created_at: 'INTEGER NOT NULL',
+  superseded_at: 'INTEGER',
+}
+
+export const CONVERSATION_DISPLAY_RULES_TABLE = 'conversation_display_rules'
+
+export const CONVERSATION_DISPLAY_RULES_SCHEMA: Record<string, string> = {
+  rule_id: 'TEXT PRIMARY KEY',
+  conversation_id: 'TEXT',
+  rule_type: 'TEXT NOT NULL',
+  pattern: 'TEXT',
+  enabled: 'INTEGER NOT NULL DEFAULT 1',
+  created_at: 'INTEGER NOT NULL',
+}
+
+export const CONVERSATION_LINEAGE_INDEXES: Record<string, string> = {
+  idx_conversation_session_edges_conversation:
+    'CREATE INDEX IF NOT EXISTS idx_conversation_session_edges_conversation ON conversation_session_edges(conversation_id, created_at, edge_id)',
+  idx_conversation_session_edges_unique_child_edge:
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_session_edges_unique_child_edge ON conversation_session_edges(conversation_id, child_session_id, edge_type)',
+  idx_conversation_ui_events_conversation:
+    'CREATE INDEX IF NOT EXISTS idx_conversation_ui_events_conversation ON conversation_ui_events(conversation_id, created_at, event_id)',
+  idx_conversation_ui_events_anchor:
+    'CREATE INDEX IF NOT EXISTS idx_conversation_ui_events_anchor ON conversation_ui_events(conversation_id, anchor_session_id, anchor_message_id, anchor_after_message_id)',
+  idx_conversation_display_rules_conversation:
+    'CREATE INDEX IF NOT EXISTS idx_conversation_display_rules_conversation ON conversation_display_rules(conversation_id, rule_type, enabled)',
+}
+
+// ============================================================================
 // Schema Sync Utilities
 // ============================================================================
 
@@ -348,6 +418,15 @@ export function initAllHermesTables(): void {
     syncTable(GC_PENDING_SESSION_DELETES_TABLE, GC_PENDING_SESSION_DELETES_SCHEMA)
     syncTable(GC_SESSION_PROFILES_TABLE, GC_SESSION_PROFILES_SCHEMA)
     syncTable(SESSION_LINEAGE_TABLE, SESSION_LINEAGE_SCHEMA)
+
+    // Lightweight conversation lineage
+    syncTable(CONVERSATION_THREADS_TABLE, CONVERSATION_THREADS_SCHEMA)
+    syncTable(CONVERSATION_SESSION_EDGES_TABLE, CONVERSATION_SESSION_EDGES_SCHEMA)
+    syncTable(CONVERSATION_UI_EVENTS_TABLE, CONVERSATION_UI_EVENTS_SCHEMA)
+    syncTable(CONVERSATION_DISPLAY_RULES_TABLE, CONVERSATION_DISPLAY_RULES_SCHEMA)
+    for (const indexSQL of Object.values(CONVERSATION_LINEAGE_INDEXES)) {
+      db.exec(indexSQL)
+    }
 
     // Group chat - single-column primary key tables (PRIMARY KEY in column definition)
     syncTable(GC_ROOM_AGENTS_TABLE, GC_ROOM_AGENTS_SCHEMA, {

@@ -30,9 +30,15 @@ export interface ConversationSummary {
 export interface ConversationMessage {
   id: number | string
   session_id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
+  tool_call_id?: string | null
+  tool_calls?: any[] | null
+  tool_name?: string | null
   timestamp: number
+  token_count?: number | null
+  finish_reason?: string | null
+  reasoning?: string | null
 }
 
 export interface ConversationBranch {

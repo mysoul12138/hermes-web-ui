@@ -35,6 +35,8 @@ export interface SteerHistoryEntry {
   timestamp: number
   previousMessageId?: string
   nextMessageId?: string
+  uiEventId?: string
+  clientMessageId?: string
 }
 
 // ─── localStorage utilities ───────────────────────────────────────────
@@ -298,7 +300,7 @@ export function appendSteerHistory(
   sid: string,
   content: string,
   timestamp: number,
-  anchors?: { previousMessageId?: string, nextMessageId?: string },
+  anchors?: { previousMessageId?: string, nextMessageId?: string, uiEventId?: string, clientMessageId?: string },
 ) {
   const normalized = content.trim()
   if (!normalized) return
@@ -308,6 +310,8 @@ export function appendSteerHistory(
     timestamp,
     previousMessageId: anchors?.previousMessageId,
     nextMessageId: anchors?.nextMessageId,
+    uiEventId: anchors?.uiEventId,
+    clientMessageId: anchors?.clientMessageId,
   }]
     .slice(-50)
   writeSteerHistory(profileName, sid, next)

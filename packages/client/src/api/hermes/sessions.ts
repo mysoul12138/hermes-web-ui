@@ -35,7 +35,7 @@ export interface SessionSearchResult extends SessionSummary {
 }
 
 export interface HermesMessage {
-  id: number
+  id: number | string
   session_id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
@@ -46,6 +46,8 @@ export interface HermesMessage {
   token_count: number | null
   finish_reason: string | null
   reasoning: string | null
+  steered?: boolean
+  ui_event_id?: string
 }
 
 export async function fetchSessions(source?: string, limit?: number): Promise<SessionSummary[]> {

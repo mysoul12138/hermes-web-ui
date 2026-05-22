@@ -4,6 +4,7 @@ import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { updateUsage } from '../../db/hermes/usage-store'
 import { logger } from '../../services/logger'
 import { tuiBridge } from '../../services/hermes/tui-bridge'
+import { appendSteerUiEvent } from '../../db/hermes/conversation-lineage'
 import {
   clearLivePendingApprovalForRun,
   getSessionForRun,
@@ -109,6 +110,45 @@ const SESSION_STEER_PATH = /^\/v1\/sessions\/([^/]+)\/steer$/
 function isUnsupportedBridgeSteerError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /unknown method:\s*session\.steer|unknown method:\s*command\.dispatch|unknown method:\s*slash\.exec|does not support \/steer|true mid-run steer is not available|agent does not support steer|not a quick\/plugin\/skill command/i.test(message)
+}
+
+function textValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return value
+}
+
+function parseSteerUiEventPayload(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function recordSteerUiEventIfPresent(result: Record<string, unknown>, text: string, rawUiEvent: unknown): string | undefined {
+  if (result.ok !== true || result.status !== 'queued') return undefined
+  const uiEvent = parseSteerUiEventPayload(rawUiEvent)
+  if (!uiEvent) return undefined
+  const conversationId = textValue(uiEvent.conversation_id)
+  if (!conversationId) return undefined
+  const metadata = {
+    client_message_id: textValue(uiEvent.client_message_id),
+    client_previous_message_id: textValue(uiEvent.client_previous_message_id),
+    client_timestamp: numberValue(uiEvent.client_timestamp),
+  }
+  const row = appendSteerUiEvent({
+    conversation_id: conversationId,
+    source_session_id: textValue(uiEvent.source_session_id),
+    anchor_session_id: textValue(uiEvent.anchor_session_id),
+    anchor_message_id: textValue(uiEvent.anchor_message_id),
+    anchor_after_message_id: textValue(uiEvent.anchor_after_message_id),
+    content: text,
+    client_message_id: metadata.client_message_id,
+    metadata_json: JSON.stringify(metadata),
+    created_at: metadata.client_timestamp ? Math.floor(metadata.client_timestamp / 1000) : undefined,
+  })
+  return row?.event_id
 }
 
 /**
@@ -274,9 +314,10 @@ export async function proxy(ctx: Context) {
           textPreview: text.slice(0, 120),
         }, '[proxy-handler] bridge steer request')
         const result = await tuiBridge.steer(bridgeSteerMatch[1], text)
+        const uiEventId = recordSteerUiEventIfPresent(result as Record<string, unknown>, text, parsed.ui_event)
         ctx.status = 200
         ctx.set('Content-Type', 'application/json')
-        ctx.body = result
+        ctx.body = uiEventId ? { ...result, ui_event_id: uiEventId } : result
         return
       } catch (err) {
         if (isUnsupportedBridgeSteerError(err)) {

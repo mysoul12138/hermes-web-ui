@@ -10,11 +10,15 @@ vi.mock('../../packages/server/src/services/gateway-bootstrap', () => ({
 }))
 
 // Mock updateUsage so we can assert calls without real DB
-const { mockUpdateUsage } = vi.hoisted(() => ({
+const { mockUpdateUsage, mockAppendSteerUiEvent } = vi.hoisted(() => ({
   mockUpdateUsage: vi.fn(),
+  mockAppendSteerUiEvent: vi.fn(),
 }))
 vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
   updateUsage: mockUpdateUsage,
+}))
+vi.mock('../../packages/server/src/db/hermes/conversation-lineage', () => ({
+  appendSteerUiEvent: mockAppendSteerUiEvent,
 }))
 
 const { mockTuiBridge } = vi.hoisted(() => ({
@@ -126,6 +130,97 @@ describe('Proxy Handler', () => {
     expect(mockFetch).not.toHaveBeenCalled()
     expect(ctx.status).toBe(200)
     expect(ctx.body).toMatchObject({ ok: true, status: 'queued', run_id: 'bridge-run-1' })
+  })
+
+  it('persists a steer UI event only after bridge steer is queued', async () => {
+    mockTuiBridge.isEnabled.mockReturnValue(true)
+    mockTuiBridge.steer.mockResolvedValue({
+      ok: true,
+      status: 'queued',
+      bridge: true,
+      run_id: 'bridge-run-1',
+      text: 'adjust direction',
+    })
+    mockAppendSteerUiEvent.mockReturnValue({ event_id: 'ui.steer.root.local-1' })
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: {
+        body: {
+          text: 'adjust direction',
+          ui_event: {
+            conversation_id: 'root',
+            source_session_id: 'child',
+            anchor_session_id: 'child',
+            anchor_after_message_id: '42',
+            client_message_id: 'local-1',
+            client_previous_message_id: '42',
+            client_timestamp: 1710000000123,
+          },
+        },
+      },
+    })
+    await proxy(ctx)
+
+    expect(mockAppendSteerUiEvent).toHaveBeenCalledWith({
+      conversation_id: 'root',
+      source_session_id: 'child',
+      anchor_session_id: 'child',
+      anchor_message_id: null,
+      anchor_after_message_id: '42',
+      content: 'adjust direction',
+      client_message_id: 'local-1',
+      metadata_json: JSON.stringify({
+        client_message_id: 'local-1',
+        client_previous_message_id: '42',
+        client_timestamp: 1710000000123,
+      }),
+      created_at: 1710000000,
+    })
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(ctx.body).toMatchObject({ ok: true, status: 'queued', ui_event_id: 'ui.steer.root.local-1' })
+  })
+
+  it('does not persist steer UI events when steer falls back or is unsupported', async () => {
+    mockTuiBridge.isEnabled.mockReturnValue(true)
+    mockTuiBridge.steer.mockResolvedValue({
+      ok: true,
+      status: 'sent',
+      bridge: true,
+      run_id: 'bridge-run-1',
+      text: 'adjust direction',
+    })
+
+    const ctx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: {
+        body: {
+          text: 'adjust direction',
+          ui_event: { conversation_id: 'root', client_message_id: 'local-1' },
+        },
+      },
+    })
+    await proxy(ctx)
+
+    expect(mockAppendSteerUiEvent).not.toHaveBeenCalled()
+
+    mockTuiBridge.steer.mockRejectedValueOnce(new Error('unknown method: session.steer'))
+    const unsupportedCtx = createMockCtx({
+      path: '/api/hermes/v1/sessions/sess-1/steer',
+      req: { method: 'POST' },
+      request: {
+        body: {
+          text: 'adjust direction',
+          ui_event: { conversation_id: 'root', client_message_id: 'local-1' },
+        },
+      },
+    })
+    await proxy(unsupportedCtx)
+
+    expect(mockAppendSteerUiEvent).not.toHaveBeenCalled()
+    expect(unsupportedCtx.body).toMatchObject({ ok: false, status: 'unsupported', bridge: true })
   })
 
   it('returns unsupported instead of 502 when bridge has no session.steer method', async () => {

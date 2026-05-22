@@ -187,6 +187,8 @@ export function mapHermesMessages(msgs: HermesMessage[]): Message[] {
       content: msg.content || '',
       timestamp: Math.round(msg.timestamp * 1000),
       reasoning: msg.reasoning ? msg.reasoning : undefined,
+      ...(msg.steered ? { steered: true } : {}),
+      ...(msg.ui_event_id ? { ui_event_id: msg.ui_event_id } : {}),
     }))
   }
   return result
@@ -318,6 +320,7 @@ export function messagesEquivalent(a: Message[], b: Message[]): boolean {
     if ((left.toolCallId || '') !== (right.toolCallId || '')) return false
     if ((left.toolStatus || '') !== (right.toolStatus || '')) return false
     if ((left.reasoning || '') !== (right.reasoning || '')) return false
+    if ((left.ui_event_id || '') !== (right.ui_event_id || '')) return false
     if (!!left.isStreaming !== !!right.isStreaming) return false
     if (!!left.queued !== !!right.queued) return false
     if (!!left.steered !== !!right.steered) return false
@@ -360,10 +363,17 @@ export function compareServerMessages(local: Message[], server: Message[]) {
   }
 }
 
+export function isServerPersistedSteerMessage(message: Message): boolean {
+  return message.role === 'user'
+    && (!!message.ui_event_id || String(message.id || '').startsWith('ui.steer.'))
+}
+
 export function withLocalSteeredMessages(mapped: Message[], current: Message[]): Message[] {
+  const serverPersistedSteers = mapped.filter(isServerPersistedSteerMessage)
   const localSteeredByText = new Map<string, Message[]>()
   for (const message of current) {
     if (message.role !== 'user' || !message.steered) continue
+    if (matchesServerPersistedSteer(message, serverPersistedSteers)) continue
     const text = message.content.trim()
     if (!text) continue
     const queue = localSteeredByText.get(text) || []
@@ -375,6 +385,12 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
 
   const merged = mapped.map((message, mappedIndex) => {
     if (message.role !== 'user') return message
+    if (isServerPersistedSteerMessage(message)) {
+      return {
+        ...message,
+        steered: true,
+      }
+    }
     const candidates = localSteeredByText.get(message.content.trim())
     const localSteered = findClosestSteeredMessage(message, candidates)
     if (!localSteered) return message
@@ -398,6 +414,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
   const localPreserved = current.filter(message => {
     if (message.queued) return true
     if (!message.steered) return false
+    if (matchesServerPersistedSteer(message, serverPersistedSteers)) return false
     return !matchedLocalSteeredIds.has(message.id)
   })
   if (!localPreserved.length) return reorderedMerged
@@ -463,6 +480,24 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     anchorIds.add(msg.id)
   }
   return result
+}
+
+function matchesServerPersistedSteer(local: Message, serverSteers: Message[]): boolean {
+  if (!serverSteers.length || local.role !== 'user' || !local.steered) return false
+  const localId = String(local.id || '')
+  const localUiEventId = local.ui_event_id || (localId.startsWith('ui.steer.') ? localId.slice('ui.steer.'.length) : '')
+  const localText = local.content.trim()
+  const localTs = normalizeMessageTimestamp(local.timestamp || 0)
+  return serverSteers.some(server => {
+    const serverId = String(server.id || '')
+    const serverUiEventId = server.ui_event_id || (serverId.startsWith('ui.steer.') ? serverId.slice('ui.steer.'.length) : '')
+    if (localUiEventId && serverUiEventId && localUiEventId === serverUiEventId) return true
+    if (localId && serverId && localId === serverId) return true
+    if (!localText || localText !== server.content.trim()) return false
+    const serverTs = normalizeMessageTimestamp(server.timestamp || 0)
+    if (!localTs || !serverTs) return false
+    return Math.abs(localTs - serverTs) <= STEER_TIMESTAMP_MATCH_WINDOW_MS
+  })
 }
 
 function findClosestSteeredMessage(message: Message, candidates: Message[] | undefined): Message | undefined {

@@ -7,8 +7,12 @@ const isDev = process.env.NODE_ENV !== 'production'
 const isTest = process.env.VITEST === 'true' || process.env.NODE_ENV === 'test'
 
 // In WSL, always use home directory to avoid cross-filesystem issues
+const TEST_DB_DIR = process.env.HERMES_TEST_DB_DIR
+  ? resolve(process.env.HERMES_TEST_DB_DIR)
+  : resolve(process.cwd(), 'packages/server/data', `test-runtime-${process.env.VITEST_POOL_ID || process.env.VITEST_WORKER_ID || process.pid}`)
+
 const DB_DIR = isTest
-  ? resolve(process.cwd(), 'packages/server/data/test-runtime')
+  ? TEST_DB_DIR
   : isDev
   ? resolve(process.cwd(), 'packages/server/data')
   : config.appHome

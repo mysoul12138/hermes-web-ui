@@ -1,4 +1,4 @@
-import { cancelRun, startRun, steerSession, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
+import { cancelRun, startRun, steerSession, streamRunEvents, type ChatMessage, type RunEvent, type SteerUiEventPayload } from '@/api/hermes/chat'
 import {
   getPendingApproval,
   respondApproval as respondApprovalApi,
@@ -78,6 +78,7 @@ import {
   serverHasBetterToolDetails,
   mergeServerToolDetails,
   withLocalSteeredMessages,
+  isServerPersistedSteerMessage,
   messagesEquivalent,
   isStaleBridgeRunError,
   sanitizeForCache,
@@ -122,6 +123,7 @@ export interface Message {
   isStreaming?: boolean
   queued?: boolean
   steered?: boolean
+  ui_event_id?: string
   previousMessageId?: string
   nextMessageId?: string
   subagentId?: string
@@ -340,7 +342,7 @@ function appendSteerHistory(
   sid: string,
   content: string,
   timestamp: number,
-  anchors?: { previousMessageId?: string, nextMessageId?: string },
+  anchors?: { previousMessageId?: string, nextMessageId?: string, uiEventId?: string },
 ) {
   return _appendSteerHistory(getProfileName(), sid, content, timestamp, anchors)
 }
@@ -1166,12 +1168,39 @@ export const useChatStore = defineStore('chat', () => {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
   }
 
-  function addSteeredMessage(sid: string, content: string, attachments?: Attachment[]): string {
+  function numericMessageId(id: unknown): string | undefined {
+    if (typeof id === 'number' && Number.isFinite(id)) return String(id)
+    if (typeof id === 'string' && /^\d+$/.test(id)) return id
+    return undefined
+  }
+
+  function buildSteerUiEventPayload(
+    sid: string,
+    targetSessionId: string,
+    optimisticId: string,
+    timestamp: number,
+    previousMessage: Message | undefined,
+  ): SteerUiEventPayload {
+    const previousBackendId = numericMessageId(previousMessage?.id)
+    const previousSessionId = (previousMessage as any)?.session_id || targetSessionId || sid
+    return {
+      conversation_id: rootSessionIdFor(sid),
+      source_session_id: targetSessionId || sid,
+      anchor_session_id: previousBackendId ? previousSessionId : undefined,
+      anchor_after_message_id: previousBackendId,
+      client_message_id: optimisticId,
+      client_previous_message_id: previousMessage?.id,
+      client_timestamp: timestamp,
+    }
+  }
+
+  function addSteeredMessage(sid: string, content: string, attachments?: Attachment[]): { id: string, timestamp: number, previousMessage?: Message } {
     const text = content.trim()
     const id = uid()
     const timestamp = Date.now()
     const existingMessages = getSessionMsgs(sid)
-    const previousMessageId = existingMessages[existingMessages.length - 1]?.id
+    const previousMessage = existingMessages[existingMessages.length - 1]
+    const previousMessageId = previousMessage?.id
     const userMsg: Message = {
       id,
       role: 'user',
@@ -1187,7 +1216,7 @@ export const useChatStore = defineStore('chat', () => {
       persistActiveMessages()
       persistSessionsList()
     }
-    return id
+    return { id, timestamp, previousMessage }
   }
 
   function removeLocalSteeredMessage(sid: string, id: string) {
@@ -1200,6 +1229,33 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function updateSteerHistoryUiEventId(sid: string, optimistic: { id: string, timestamp: number }, content: string, uiEventId: string) {
+    const entries = readSteerHistory(sid)
+    if (!entries.length) return
+    const text = content.trim()
+    const optimisticTs = normalizeMessageTimestamp(optimistic.timestamp)
+    let matchIndex = entries.findIndex(entry => entry.uiEventId === uiEventId || (entry as any).ui_event_id === uiEventId)
+    if (matchIndex < 0) {
+      let bestDistance = Number.POSITIVE_INFINITY
+      entries.forEach((entry, index) => {
+        if (entry.content.trim() !== text) return
+        const entryTs = normalizeMessageTimestamp(entry.timestamp || 0)
+        const distance = entryTs && optimisticTs ? Math.abs(entryTs - optimisticTs) : 0
+        if (entryTs && optimisticTs && distance > 5000) return
+        if (distance >= bestDistance) return
+        matchIndex = index
+        bestDistance = distance
+      })
+    }
+    if (matchIndex < 0) return
+    entries[matchIndex] = {
+      ...entries[matchIndex],
+      uiEventId,
+      clientMessageId: optimistic.id,
+    } as SteerHistoryEntry
+    writeSteerHistory(sid, entries)
+  }
+
   function reapplySteerHistory(sid: string, messages: Message[]): Message[] {
     const history = readSteerHistory(sid)
     if (!history.length) return messages
@@ -1209,17 +1265,20 @@ export const useChatStore = defineStore('chat', () => {
         timestamp: normalizeMessageTimestamp(entry.timestamp || 0),
         previousMessageId: entry.previousMessageId,
         nextMessageId: entry.nextMessageId,
+        uiEventId: entry.uiEventId || (entry as any).ui_event_id,
       }))
       .filter(entry => !!entry.content)
     if (!pendingEntries.length) return messages
     return messages.map(message => {
       if (message.role !== 'user') return message
+      if (isServerPersistedSteerMessage(message)) return { ...message, steered: true }
       const text = message.content.trim()
       if (!text) return message
       let matchIndex = -1
       let matchDistance = Number.POSITIVE_INFINITY
       const messageTimestamp = normalizeMessageTimestamp(message.timestamp || 0)
       for (const [index, entry] of pendingEntries.entries()) {
+        if (entry.uiEventId) continue
         if (entry.content !== text) continue
         if (!entry.timestamp || !messageTimestamp) {
           if (matchIndex < 0) matchIndex = index
@@ -1235,6 +1294,7 @@ export const useChatStore = defineStore('chat', () => {
       return {
         ...message,
         steered: true,
+        ui_event_id: message.ui_event_id || entry.uiEventId,
         previousMessageId: message.previousMessageId || entry.previousMessageId,
         nextMessageId: message.nextMessageId || entry.nextMessageId,
       }
@@ -1243,14 +1303,23 @@ export const useChatStore = defineStore('chat', () => {
 
   async function steerBusyInput(sid: string, content: string, attachments?: Attachment[], targetSessionId = sid) {
     const text = content.trim()
-    const optimisticId = addSteeredMessage(sid, text, attachments)
+    const optimistic = addSteeredMessage(sid, text, attachments)
+    const uiEvent = buildSteerUiEventPayload(sid, targetSessionId, optimistic.id, optimistic.timestamp, optimistic.previousMessage)
     try {
-      const result = await steerSession(targetSessionId, text)
+      const result = await steerSession(targetSessionId, text, uiEvent)
       if (result?.ok) {
+        if (result.ui_event_id) {
+          updateMessage(sid, optimistic.id, {
+            id: `ui.steer.${result.ui_event_id}`,
+            ui_event_id: result.ui_event_id,
+          } as Partial<Message>)
+          updateSteerHistoryUiEventId(sid, optimistic, text, result.ui_event_id)
+          persistSessionMessages(sid)
+        }
         return
       }
     } catch (err) {
-      removeLocalSteeredMessage(sid, optimisticId)
+      removeLocalSteeredMessage(sid, optimistic.id)
       if (isStaleBridgeRunError(err)) {
         console.warn('Steer target is no longer running; sending as a new turn')
         clearInFlight(sid)
@@ -1262,7 +1331,7 @@ export const useChatStore = defineStore('chat', () => {
       console.warn('Steer failed, falling back to queue:', err)
     }
     // Fall back to queue
-    removeLocalSteeredMessage(sid, optimisticId)
+    removeLocalSteeredMessage(sid, optimistic.id)
     queueBusyInput(sid, content, attachments)
   }
 

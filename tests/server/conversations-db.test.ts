@@ -72,6 +72,104 @@ function createSchema(db: any) {
   `)
 }
 
+function createLineageSchema(db: any) {
+  db.exec(`
+    CREATE TABLE conversation_threads (
+      conversation_id TEXT PRIMARY KEY,
+      root_session_id TEXT NOT NULL,
+      title TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      schema_version INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE TABLE conversation_session_edges (
+      edge_id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      parent_session_id TEXT,
+      child_session_id TEXT NOT NULL,
+      edge_type TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      superseded_at INTEGER
+    );
+
+    CREATE TABLE conversation_ui_events (
+      event_id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      source_session_id TEXT,
+      anchor_session_id TEXT,
+      anchor_message_id TEXT,
+      anchor_after_message_id TEXT,
+      content TEXT,
+      metadata_json TEXT,
+      created_at INTEGER NOT NULL,
+      superseded_at INTEGER
+    );
+  `)
+}
+
+function insertConversationThread(db: any, thread: Record<string, unknown>) {
+  db.prepare(`
+    INSERT INTO conversation_threads (
+      conversation_id, root_session_id, title, status, created_at, updated_at, schema_version
+    ) VALUES (
+      @conversation_id, @root_session_id, @title, @status, @created_at, @updated_at, @schema_version
+    )
+  `).run({
+    title: null,
+    status: 'active',
+    created_at: 1,
+    updated_at: 1,
+    schema_version: 1,
+    ...thread,
+  })
+}
+
+function insertConversationEdge(db: any, edge: Record<string, unknown>) {
+  db.prepare(`
+    INSERT INTO conversation_session_edges (
+      edge_id, conversation_id, parent_session_id, child_session_id,
+      edge_type, confidence, created_by, created_at, superseded_at
+    ) VALUES (
+      @edge_id, @conversation_id, @parent_session_id, @child_session_id,
+      @edge_type, @confidence, @created_by, @created_at, @superseded_at
+    )
+  `).run({
+    parent_session_id: null,
+    confidence: 'explicit',
+    created_by: 'test',
+    superseded_at: null,
+    ...edge,
+  })
+}
+
+function insertConversationUiEvent(db: any, event: Record<string, unknown>) {
+  db.prepare(`
+    INSERT INTO conversation_ui_events (
+      event_id, conversation_id, event_type, source_session_id,
+      anchor_session_id, anchor_message_id, anchor_after_message_id,
+      content, metadata_json, created_at, superseded_at
+    ) VALUES (
+      @event_id, @conversation_id, @event_type, @source_session_id,
+      @anchor_session_id, @anchor_message_id, @anchor_after_message_id,
+      @content, @metadata_json, @created_at, @superseded_at
+    )
+  `).run({
+    source_session_id: null,
+    anchor_session_id: null,
+    anchor_message_id: null,
+    anchor_after_message_id: null,
+    content: null,
+    metadata_json: null,
+    superseded_at: null,
+    ...event,
+  })
+}
+
 function insertSession(db: any, session: Record<string, unknown>) {
   db.prepare(`
     INSERT INTO sessions (
@@ -244,6 +342,105 @@ describe('conversation DB service', () => {
       'continuation two answer',
     ])
     expect(detail?.branches || []).toEqual([])
+  })
+
+  it('keeps tool calls and removes replayed history when aggregating inferred continuations', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Root',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'compression',
+      message_count: 4,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'cont',
+      parent_session_id: 'root',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Root #2',
+      started_at: 201,
+      ended_at: 260,
+      end_reason: null,
+      message_count: 6,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'root', role: 'user', content: 'original question', timestamp: 101 })
+    insertMessage(db, {
+      id: 2,
+      session_id: 'root',
+      role: 'assistant',
+      content: 'checking',
+      tool_calls: JSON.stringify([{ id: 'call_1', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }]),
+      timestamp: 102,
+    })
+    insertMessage(db, { id: 3, session_id: 'root', role: 'tool', content: '{"output":"/tmp"}', tool_call_id: 'call_1', timestamp: 103 })
+    insertMessage(db, { id: 4, session_id: 'root', role: 'assistant', content: 'root answer', timestamp: 104 })
+
+    insertMessage(db, { id: 5, session_id: 'cont', role: 'user', content: 'original question', timestamp: 201 })
+    insertMessage(db, {
+      id: 6,
+      session_id: 'cont',
+      role: 'assistant',
+      content: 'checking',
+      tool_calls: JSON.stringify([{ id: 'call_1', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }]),
+      timestamp: 202,
+    })
+    insertMessage(db, { id: 7, session_id: 'cont', role: 'tool', content: '[Duplicate tool output]', tool_call_id: 'call_1', timestamp: 203 })
+    insertMessage(db, { id: 8, session_id: 'cont', role: 'assistant', content: 'root answer', timestamp: 204 })
+    insertMessage(db, { id: 11, session_id: 'cont', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 204.5 })
+    insertMessage(db, { id: 9, session_id: 'cont', role: 'user', content: 'new continuation request', timestamp: 205 })
+    insertMessage(db, { id: 10, session_id: 'cont', role: 'assistant', content: 'continued answer', timestamp: 206 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('root', { source: 'tui', humanOnly: true })
+
+    expect(detail?.thread_session_count).toBe(2)
+    expect(detail?.messages.map((message: any) => `${message.session_id}:${message.role}:${message.content}`)).toEqual([
+      'root:user:original question',
+      'root:assistant:checking',
+      'root:tool:{"output":"/tmp"}',
+      'root:assistant:root answer',
+      'cont:user:new continuation request',
+      'cont:assistant:continued answer',
+    ])
+    expect(detail?.messages[1]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [{ id: 'call_1', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }],
+    })
+    expect(detail?.messages[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_1',
+    })
   })
 
   it('infers parentless bridge continuations from full parent message history when the parent tail moved on', async () => {
@@ -822,9 +1019,6 @@ describe('conversation DB service', () => {
       '指南已覆盖今天的源码改动。',
       '更新指南skill',
       'skill 已更新。',
-      '添加一个skill 以后只要涉及写代码就要加载这个skill',
-      '先看看我这次 指南更新 是否包括了今天的源码改动',
-      '更新指南skill',
       '增加一条记忆规则 以后创建skill 或者安装skill 时 一定要做场景匹配',
       'new assistant answer',
     ])
@@ -3124,5 +3318,646 @@ describe('conversation DB service', () => {
       'root request',
       'root answer',
     ])
+  })
+
+  it('uses explicit conversation edges for mainline order without timestamp fallback', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const [id, startedAt, title] of [
+      ['edge-root', 300, 'Root title'],
+      ['edge-cont', 100, 'Continuation should be second'],
+      ['edge-cont-2', 200, 'Continuation should be third'],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title,
+        started_at: startedAt,
+        ended_at: startedAt + 10,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'edge-root', root_session_id: 'edge-root' })
+    insertConversationEdge(db, { edge_id: 'root-edge', conversation_id: 'edge-root', child_session_id: 'edge-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'cont-edge', conversation_id: 'edge-root', parent_session_id: 'edge-root', child_session_id: 'edge-cont', edge_type: 'continues', created_at: 2 })
+    insertConversationEdge(db, { edge_id: 'cont-edge-2', conversation_id: 'edge-root', parent_session_id: 'edge-cont', child_session_id: 'edge-cont-2', edge_type: 'continues', created_at: 3 })
+
+    insertMessage(db, { id: 1, session_id: 'edge-root', role: 'user', content: 'root user', timestamp: 300 })
+    insertMessage(db, { id: 2, session_id: 'edge-root', role: 'assistant', content: 'root assistant', timestamp: 301 })
+    insertMessage(db, { id: 3, session_id: 'edge-cont', role: 'user', content: 'cont user', timestamp: 100 })
+    insertMessage(db, { id: 4, session_id: 'edge-cont', role: 'assistant', content: 'cont assistant', timestamp: 101 })
+    insertMessage(db, { id: 5, session_id: 'edge-cont-2', role: 'user', content: 'cont2 user', timestamp: 200 })
+    insertMessage(db, { id: 6, session_id: 'edge-cont-2', role: 'assistant', content: 'cont2 assistant', timestamp: 201 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['edge-root'])
+    expect(summaries[0]?.represented_session_ids).toEqual(['edge-root', 'edge-cont', 'edge-cont-2'])
+
+    const detail = await mod.getConversationDetailFromDb('edge-cont-2', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'root user',
+      'root assistant',
+      'cont user',
+      'cont assistant',
+      'cont2 user',
+      'cont2 assistant',
+    ])
+    expect(detail?.continuation_edges).toEqual([
+      { child_session_id: 'edge-cont', parent_session_id: 'edge-root', kind: 'explicit_bridge_link' },
+      { child_session_id: 'edge-cont-2', parent_session_id: 'edge-cont', kind: 'explicit_bridge_link' },
+    ])
+    expect(detail?.branches ?? []).toEqual([])
+  })
+
+  it('hides legacy compression continuation child replay of the root opening user message', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    for (const [id, parent, startedAt, title, endedAt, endReason] of [
+      ['replay-root', null, 100, 'Version check', 200, 'compression'],
+      ['replay-cont', 'replay-root', 201, 'Version check #2', null, null],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: parent,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title,
+        started_at: startedAt,
+        ended_at: endedAt,
+        end_reason: endReason,
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertMessage(db, { id: 1, session_id: 'replay-root', role: 'user', content: '看看hindsight 和hermes agent 有没有发布新版本', timestamp: 101 })
+    insertMessage(db, {
+      id: 2,
+      session_id: 'replay-root',
+      role: 'assistant',
+      content: '我先查真实来源。',
+      tool_calls: JSON.stringify([{ id: 'call_root', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }]),
+      finish_reason: 'tool_calls',
+      timestamp: 102,
+    })
+    insertMessage(db, { id: 20, session_id: 'replay-root', role: 'tool', content: '{"output":"/repo"}', tool_call_id: 'call_root', timestamp: 103 })
+    insertMessage(db, { id: 3, session_id: 'replay-cont', role: 'user', content: '看看hindsight 和hermes agent 有没有发布新版本', timestamp: 201 })
+    insertMessage(db, {
+      id: 4,
+      session_id: 'replay-cont',
+      role: 'assistant',
+      content: '我先查真实来源。',
+      tool_calls: JSON.stringify([{ id: 'call_root', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }]),
+      finish_reason: 'tool_calls',
+      timestamp: 202,
+    })
+    insertMessage(db, { id: 21, session_id: 'replay-cont', role: 'tool', content: '[Duplicate tool output — same content as a more recent call]', tool_call_id: 'call_root', timestamp: 202.5 })
+    insertMessage(db, { id: 5, session_id: 'replay-cont', role: 'assistant', content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.', timestamp: 203 })
+    insertMessage(db, { id: 6, session_id: 'replay-cont', role: 'user', content: '把主 Hermes venv 的 Hindsight 升到 0.6.2', timestamp: 204 })
+    insertMessage(db, { id: 7, session_id: 'replay-cont', role: 'assistant', content: '继续升级并验证。', timestamp: 205 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('replay-cont', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      '看看hindsight 和hermes agent 有没有发布新版本',
+      '我先查真实来源。',
+      '{"output":"/repo"}',
+      '把主 Hermes venv 的 Hindsight 升到 0.6.2',
+      '继续升级并验证。',
+    ])
+    expect(detail?.messages[1]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [{ id: 'call_root', function: { name: 'shell', arguments: '{"cmd":"pwd"}' } }],
+      finish_reason: 'tool_calls',
+    })
+    expect(detail?.messages[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_root',
+    })
+  })
+
+  it('keeps a real new user message at the start of an explicit continuation child', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const [id, parent, startedAt] of [
+      ['real-user-root', null, 100],
+      ['real-user-cont', 'real-user-root', 200],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: parent,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: id,
+        started_at: startedAt,
+        ended_at: startedAt + 10,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'real-user-root', root_session_id: 'real-user-root' })
+    insertConversationEdge(db, { edge_id: 'real-user-root-edge', conversation_id: 'real-user-root', child_session_id: 'real-user-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'real-user-cont-edge', conversation_id: 'real-user-root', parent_session_id: 'real-user-root', child_session_id: 'real-user-cont', edge_type: 'continues', created_at: 2 })
+
+    insertMessage(db, { id: 1, session_id: 'real-user-root', role: 'user', content: 'root opening question', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'real-user-root', role: 'assistant', content: 'root answer', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'real-user-cont', role: 'user', content: 'new follow-up question', timestamp: 201 })
+    insertMessage(db, { id: 4, session_id: 'real-user-cont', role: 'assistant', content: 'new follow-up answer', timestamp: 202 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('real-user-cont', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'root opening question',
+      'root answer',
+      'new follow-up question',
+      'new follow-up answer',
+    ])
+  })
+
+  it('inserts persisted steer UI events after their explicit graph anchor', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const [id, startedAt] of [
+      ['steer-root', 100],
+      ['steer-cont', 200],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: id,
+        started_at: startedAt,
+        ended_at: startedAt + 10,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'steer-root', root_session_id: 'steer-root' })
+    insertConversationEdge(db, { edge_id: 'steer-root-edge', conversation_id: 'steer-root', child_session_id: 'steer-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'steer-cont-edge', conversation_id: 'steer-root', parent_session_id: 'steer-root', child_session_id: 'steer-cont', edge_type: 'continues', created_at: 2 })
+    insertMessage(db, { id: 1, session_id: 'steer-root', role: 'user', content: 'root user', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'steer-root', role: 'assistant', content: 'root assistant', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'steer-cont', role: 'user', content: 'cont user', timestamp: 201 })
+    insertMessage(db, { id: 4, session_id: 'steer-cont', role: 'assistant', content: 'cont assistant', timestamp: 202 })
+    insertConversationUiEvent(db, {
+      event_id: 'steer-event-1',
+      conversation_id: 'steer-root',
+      event_type: 'steer',
+      source_session_id: 'steer-cont',
+      anchor_session_id: 'steer-cont',
+      anchor_after_message_id: '3',
+      content: '调整方向',
+      created_at: 203,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const rootDetail = await mod.getConversationDetailFromDb('steer-root', { humanOnly: true })
+    const childDetail = await mod.getConversationDetailFromDb('steer-cont', { humanOnly: true })
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      'root user',
+      'root assistant',
+      'cont user',
+      '调整方向',
+      'cont assistant',
+    ])
+    expect(childDetail?.messages).toEqual(rootDetail?.messages)
+    const steer = rootDetail?.messages.find((message: any) => message.content === '调整方向') as any
+    expect(steer).toMatchObject({
+      id: 'ui.steer.steer-event-1',
+      role: 'user',
+      session_id: 'steer-cont',
+      steered: true,
+      ui_event_id: 'steer-event-1',
+    })
+  })
+
+  it('keeps multiple persisted steer UI events with the same anchor in stable order', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+    insertSession(db, {
+      id: 'multi-steer-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'multi',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertConversationThread(db, { conversation_id: 'multi-steer-root', root_session_id: 'multi-steer-root' })
+    insertConversationEdge(db, { edge_id: 'multi-root-edge', conversation_id: 'multi-steer-root', child_session_id: 'multi-steer-root', edge_type: 'root', created_at: 1 })
+    insertMessage(db, { id: 1, session_id: 'multi-steer-root', role: 'user', content: 'user', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'multi-steer-root', role: 'assistant', content: 'assistant', timestamp: 102 })
+    insertConversationUiEvent(db, {
+      event_id: 'steer-b',
+      conversation_id: 'multi-steer-root',
+      event_type: 'steer',
+      source_session_id: 'multi-steer-root',
+      anchor_session_id: 'multi-steer-root',
+      anchor_after_message_id: '1',
+      content: 'second steer',
+      created_at: 104,
+    })
+    insertConversationUiEvent(db, {
+      event_id: 'steer-a',
+      conversation_id: 'multi-steer-root',
+      event_type: 'steer',
+      source_session_id: 'multi-steer-root',
+      anchor_session_id: 'multi-steer-root',
+      anchor_after_message_id: '1',
+      content: 'first steer',
+      created_at: 103,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('multi-steer-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'user',
+      'first steer',
+      'second steer',
+      'assistant',
+    ])
+  })
+
+  it('places persisted steer UI events at the source segment end when anchor is hidden or missing', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+    insertSession(db, {
+      id: 'hidden-anchor-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'hidden',
+      started_at: 100,
+      ended_at: 200,
+      end_reason: 'tui_shutdown',
+      message_count: 3,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertConversationThread(db, { conversation_id: 'hidden-anchor-root', root_session_id: 'hidden-anchor-root' })
+    insertConversationEdge(db, { edge_id: 'hidden-root-edge', conversation_id: 'hidden-anchor-root', child_session_id: 'hidden-anchor-root', edge_type: 'root', created_at: 1 })
+    insertMessage(db, { id: 1, session_id: 'hidden-anchor-root', role: 'user', content: 'visible user', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'hidden-anchor-root', role: 'assistant', content: 'visible assistant', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'hidden-anchor-root', role: 'user', content: '[system: hidden anchor]', timestamp: 103 })
+    insertConversationUiEvent(db, {
+      event_id: 'hidden-steer',
+      conversation_id: 'hidden-anchor-root',
+      event_type: 'steer',
+      source_session_id: 'hidden-anchor-root',
+      anchor_session_id: 'hidden-anchor-root',
+      anchor_after_message_id: '3',
+      content: 'hidden anchor steer',
+      created_at: 104,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('hidden-anchor-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'visible user',
+      'visible assistant',
+      'hidden anchor steer',
+    ])
+  })
+
+  it('does not mix similar parentless bridge prompts into an explicit graph', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const [id, startedAt, title] of [
+      ['explicit-root', 100, 'shared title'],
+      ['explicit-cont', 200, 'shared title'],
+      ['similar-prompt', 210, 'shared title'],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title,
+        started_at: startedAt,
+        ended_at: startedAt + 10,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'explicit-root', root_session_id: 'explicit-root' })
+    insertConversationEdge(db, { edge_id: 'explicit-root-edge', conversation_id: 'explicit-root', child_session_id: 'explicit-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'explicit-cont-edge', conversation_id: 'explicit-root', parent_session_id: 'explicit-root', child_session_id: 'explicit-cont', edge_type: 'continues', created_at: 2 })
+
+    insertMessage(db, { id: 1, session_id: 'explicit-root', role: 'user', content: 'root request', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'explicit-root', role: 'assistant', content: 'root answer', timestamp: 102 })
+    insertMessage(db, {
+      id: 7,
+      session_id: 'explicit-root',
+      role: 'assistant',
+      content: '',
+      tool_calls: JSON.stringify([{ id: 'call-explicit-1', type: 'function', function: { name: 'terminal', arguments: '{"command":"pwd"}' } }]),
+      finish_reason: 'tool_calls',
+      reasoning_content: 'checking workspace',
+      timestamp: 103,
+    })
+    insertMessage(db, {
+      id: 8,
+      session_id: 'explicit-root',
+      role: 'tool',
+      content: '{"output":"/repo","exit_code":0}',
+      tool_call_id: 'call-explicit-1',
+      tool_name: 'terminal',
+      timestamp: 104,
+    })
+    insertMessage(db, { id: 3, session_id: 'explicit-cont', role: 'user', content: 'continue request', timestamp: 201 })
+    insertMessage(db, { id: 4, session_id: 'explicit-cont', role: 'assistant', content: 'continue answer', timestamp: 202 })
+    insertMessage(db, {
+      id: 5,
+      session_id: 'similar-prompt',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: root answer\n\nCurrent user message:\nwrong prompt',
+      timestamp: 211,
+    })
+    insertMessage(db, { id: 6, session_id: 'similar-prompt', role: 'assistant', content: 'wrong answer', timestamp: 212 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const rootDetail = await mod.getConversationDetailFromDb('explicit-root', { humanOnly: true })
+    const promptDetail = await mod.getConversationDetailFromDb('similar-prompt', { humanOnly: true })
+    expect(rootDetail?.messages.map((message: any) => message.content)).toEqual([
+      'root request',
+      'root answer',
+      '',
+      '{"output":"/repo","exit_code":0}',
+      'continue request',
+      'continue answer',
+    ])
+    expect(rootDetail?.messages[2]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [{ id: 'call-explicit-1', type: 'function', function: { name: 'terminal', arguments: '{"command":"pwd"}' } }],
+      finish_reason: 'tool_calls',
+      reasoning: 'checking workspace',
+    })
+    expect(rootDetail?.messages[3]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-explicit-1',
+      tool_name: 'terminal',
+      content: '{"output":"/repo","exit_code":0}',
+    })
+    expect(promptDetail?.messages.map((message: any) => message.content)).toEqual([
+      'wrong prompt',
+      'wrong answer',
+    ])
+  })
+
+  it('falls back when explicit graph is incomplete or cyclic', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const id of ['fallback-root', 'fallback-child']) {
+      insertSession(db, {
+        id,
+        parent_session_id: id === 'fallback-child' ? 'fallback-root' : null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: id,
+        started_at: id === 'fallback-root' ? 100 : 201,
+        ended_at: id === 'fallback-root' ? 200 : 300,
+        end_reason: 'compression',
+        message_count: 2,
+        tool_call_count: 1,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'fallback-root', root_session_id: 'fallback-root' })
+    insertConversationEdge(db, { edge_id: 'fallback-root-edge', conversation_id: 'fallback-root', child_session_id: 'fallback-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'missing-edge', conversation_id: 'fallback-root', parent_session_id: 'fallback-root', child_session_id: 'missing-child', edge_type: 'continues', created_at: 2 })
+    insertMessage(db, { id: 1, session_id: 'fallback-root', role: 'user', content: 'fallback root', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'fallback-root', role: 'assistant', content: 'fallback root answer', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'fallback-child', role: 'user', content: 'fallback child', timestamp: 202 })
+    insertMessage(db, { id: 4, session_id: 'fallback-child', role: 'assistant', content: 'fallback child answer', timestamp: 203 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('fallback-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'fallback root',
+      'fallback root answer',
+      'fallback child',
+      'fallback child answer',
+    ])
+  })
+
+  it('rejects explicit graphs with double parent or double continues child and falls back', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const id of ['double-root', 'double-a', 'double-b']) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: id,
+        started_at: id === 'double-root' ? 100 : id === 'double-a' ? 201 : 301,
+        ended_at: id === 'double-root' ? 200 : id === 'double-a' ? 250 : 350,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+      insertMessage(db, { id: id === 'double-root' ? 1 : id === 'double-a' ? 3 : 5, session_id: id, role: 'user', content: `${id} user`, timestamp: id === 'double-root' ? 101 : id === 'double-a' ? 202 : 302 })
+      insertMessage(db, { id: id === 'double-root' ? 2 : id === 'double-a' ? 4 : 6, session_id: id, role: 'assistant', content: `${id} assistant`, timestamp: id === 'double-root' ? 102 : id === 'double-a' ? 203 : 303 })
+    }
+    insertConversationThread(db, { conversation_id: 'double-root', root_session_id: 'double-root' })
+    insertConversationEdge(db, { edge_id: 'double-root-edge', conversation_id: 'double-root', child_session_id: 'double-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'double-a-edge', conversation_id: 'double-root', parent_session_id: 'double-root', child_session_id: 'double-a', edge_type: 'continues', created_at: 2 })
+    insertConversationEdge(db, { edge_id: 'double-b-edge', conversation_id: 'double-root', parent_session_id: 'double-root', child_session_id: 'double-b', edge_type: 'continues', created_at: 3 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('double-root', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'double-root user',
+      'double-root assistant',
+    ])
+  })
+
+  it('keeps explicit branch edges out of the mainline', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    createLineageSchema(db)
+
+    for (const [id, source, parent] of [
+      ['branch-root', 'tui', null],
+      ['branch-cont', 'tui', null],
+      ['branch-agent', 'subagent', 'branch-root'],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: parent,
+        source,
+        model: 'openai/gpt-5.4',
+        title: id,
+        started_at: id === 'branch-root' ? 100 : id === 'branch-cont' ? 200 : 150,
+        ended_at: id === 'branch-root' ? 180 : id === 'branch-cont' ? 260 : 170,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+    }
+    insertConversationThread(db, { conversation_id: 'branch-root', root_session_id: 'branch-root' })
+    insertConversationEdge(db, { edge_id: 'branch-root-edge', conversation_id: 'branch-root', child_session_id: 'branch-root', edge_type: 'root', created_at: 1 })
+    insertConversationEdge(db, { edge_id: 'branch-cont-edge', conversation_id: 'branch-root', parent_session_id: 'branch-root', child_session_id: 'branch-cont', edge_type: 'continues', created_at: 2 })
+    insertConversationEdge(db, { edge_id: 'branch-agent-edge', conversation_id: 'branch-root', parent_session_id: 'branch-root', child_session_id: 'branch-agent', edge_type: 'subagent', created_at: 3 })
+    insertMessage(db, { id: 1, session_id: 'branch-root', role: 'user', content: 'root user', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'branch-root', role: 'assistant', content: 'root assistant', timestamp: 102 })
+    insertMessage(db, { id: 3, session_id: 'branch-cont', role: 'user', content: 'cont user', timestamp: 201 })
+    insertMessage(db, { id: 4, session_id: 'branch-cont', role: 'assistant', content: 'cont assistant', timestamp: 202 })
+    insertMessage(db, { id: 5, session_id: 'branch-agent', role: 'user', content: 'agent user', timestamp: 151 })
+    insertMessage(db, { id: 6, session_id: 'branch-agent', role: 'assistant', content: 'agent assistant', timestamp: 152 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('branch-cont', { humanOnly: true })
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'root user',
+      'root assistant',
+      'cont user',
+      'cont assistant',
+    ])
+    expect(detail?.branches?.map((branch: any) => branch.session_id)).toEqual(['branch-agent'])
+    expect(detail?.branch_session_count).toBe(1)
   })
 })
