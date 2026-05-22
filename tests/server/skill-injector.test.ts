@@ -23,6 +23,19 @@ afterEach(async () => {
 })
 
 describe('HermesSkillInjector', () => {
+  it('runs scheduled injection in the background and reports failures', async () => {
+    const { scheduleSkillInjection } = await import('../../packages/server/src/services/hermes/skill-injector')
+    const onFailure = vi.fn()
+    const task = vi.fn().mockRejectedValue(new Error('copy failed'))
+
+    scheduleSkillInjection(task, onFailure)
+    await Promise.resolve()
+
+    expect(task).toHaveBeenCalledTimes(1)
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect(onFailure.mock.calls[0][0]).toBeInstanceOf(Error)
+  })
+
   it('resolves source directories for override, production bundle, and development layouts', async () => {
     const root = await tempDir('hermes-skill-injector-paths-')
     const override = join(root, 'override-skills')
@@ -39,7 +52,7 @@ describe('HermesSkillInjector', () => {
     expect(HermesSkillInjector.resolveSourceDir({} as any, join(root, 'packages', 'server', 'src', 'services', 'hermes'))).toBe(devSkills)
   })
 
-  it('syncs bundled skills and replaces existing bundled copies', async () => {
+  it('injects missing bundled skills without replacing user-owned same-name skills', async () => {
     const source = await tempDir('hermes-skill-source-')
     const hermesHome = await tempDir('hermes-skill-home-')
     process.env.HERMES_HOME = hermesHome
@@ -56,13 +69,13 @@ describe('HermesSkillInjector', () => {
     const result = await new HermesSkillInjector(source).injectMissingSkills()
 
     expect(result.injected).toEqual(['new-skill'])
-    expect(result.updated).toEqual(['existing-skill'])
-    expect(result.skipped).toEqual([])
+    expect(result.updated).toEqual([])
+    expect(result.skipped).toEqual(['existing-skill'])
     await expect(readFile(join(hermesHome, 'skills', 'new-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# New Skill\n')
-    await expect(readFile(join(hermesHome, 'skills', 'existing-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# Bundled Existing\n')
+    await expect(readFile(join(hermesHome, 'skills', 'existing-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# User Existing\n')
   })
 
-  it('syncs bundled skills into default and named profiles only touching bundled names', async () => {
+  it('injects missing bundled skills into default and named profile skill directories', async () => {
     const source = await tempDir('hermes-skill-source-')
     const hermesHome = await tempDir('hermes-skill-home-')
     process.env.HERMES_HOME = hermesHome
@@ -90,12 +103,36 @@ describe('HermesSkillInjector', () => {
       join(hermesHome, 'profiles', 'beta', 'skills'),
     ])
     expect(result.injected).toEqual(['webui-skill'])
-    expect(result.updated).toEqual(['webui-skill', 'webui-skill'])
+    expect(result.updated).toEqual([])
+    expect(result.skipped).toEqual(['webui-skill', 'webui-skill'])
 
-    await expect(readFile(join(hermesHome, 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# WebUI Skill\n')
+    await expect(readFile(join(hermesHome, 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# Old WebUI Skill\n')
     await expect(readFile(join(hermesHome, 'profiles', 'alpha', 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# WebUI Skill\n')
-    await expect(readFile(join(hermesHome, 'profiles', 'beta', 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# WebUI Skill\n')
+    await expect(readFile(join(hermesHome, 'profiles', 'beta', 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# Old Profile Skill\n')
     await expect(readFile(join(hermesHome, 'skills', 'local-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# Local Skill\n')
     await expect(readFile(join(hermesHome, 'profiles', 'beta', 'skills', 'profile-local', 'SKILL.md'), 'utf-8')).resolves.toBe('# Profile Local\n')
+  })
+
+  it('injects bundled skills when both default and named profiles are missing them', async () => {
+    const source = await tempDir('hermes-skill-source-')
+    const hermesHome = await tempDir('hermes-skill-home-')
+    process.env.HERMES_HOME = hermesHome
+
+    await mkdir(join(source, 'webui-skill'), { recursive: true })
+    await writeFile(join(source, 'webui-skill', 'SKILL.md'), '# WebUI Skill\n', 'utf-8')
+    await mkdir(join(hermesHome, 'profiles', 'alpha'), { recursive: true })
+
+    const { HermesSkillInjector } = await import('../../packages/server/src/services/hermes/skill-injector')
+    const result = await new HermesSkillInjector(source).injectMissingSkills()
+
+    expect(result.targets.map(target => target.targetDir)).toEqual([
+      join(hermesHome, 'skills'),
+      join(hermesHome, 'profiles', 'alpha', 'skills'),
+    ])
+    expect(result.injected).toEqual(['webui-skill', 'webui-skill'])
+    expect(result.updated).toEqual([])
+    expect(result.skipped).toEqual([])
+    await expect(readFile(join(hermesHome, 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# WebUI Skill\n')
+    await expect(readFile(join(hermesHome, 'profiles', 'alpha', 'skills', 'webui-skill', 'SKILL.md'), 'utf-8')).resolves.toBe('# WebUI Skill\n')
   })
 })

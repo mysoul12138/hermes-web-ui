@@ -81,22 +81,27 @@ export async function bootstrap() {
   await mkdir(config.dataDir, { recursive: true })
 
   try {
-    const { HermesSkillInjector } = await import('./services/hermes/skill-injector')
-    const injectionResult = await new HermesSkillInjector().injectMissingSkills()
-    if (injectionResult.injected.length > 0) {
-      logger.info({
-        injected: [...new Set(injectionResult.injected)],
-        targetCount: injectionResult.targets.length,
-      }, '[bootstrap] bundled skills injected')
-    }
-    if (injectionResult.updated.length > 0) {
-      logger.info({
-        updated: [...new Set(injectionResult.updated)],
-        targetCount: injectionResult.targets.length,
-      }, '[bootstrap] bundled skills updated')
-    }
+    const { HermesSkillInjector, scheduleSkillInjection } = await import('./services/hermes/skill-injector')
+    scheduleSkillInjection(
+      async () => {
+        const injectionResult = await new HermesSkillInjector().injectMissingSkills()
+        if (injectionResult.injected.length > 0) {
+          logger.info({
+            injected: [...new Set(injectionResult.injected)],
+            targetCount: injectionResult.targets.length,
+          }, '[bootstrap] bundled skills injected')
+        }
+        if (injectionResult.updated.length > 0) {
+          logger.info({
+            updated: [...new Set(injectionResult.updated)],
+            targetCount: injectionResult.targets.length,
+          }, '[bootstrap] bundled skills updated')
+        }
+      },
+      (err) => logger.warn(err, '[bootstrap] failed to inject bundled skills'),
+    )
   } catch (err) {
-    logger.warn(err, '[bootstrap] failed to inject bundled skills')
+    logger.warn(err, '[bootstrap] failed to schedule bundled skills injection')
   }
 
   const authToken = await getToken()

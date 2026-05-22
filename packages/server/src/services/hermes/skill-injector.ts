@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'fs'
-import { copyFile, mkdir, readdir, rm, stat } from 'fs/promises'
+import { copyFile, mkdir, readdir, stat } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { logger } from '../logger'
@@ -15,6 +15,10 @@ export interface SkillInjectionTargetResult {
 export interface SkillInjectionResult extends SkillInjectionTargetResult {
   sourceDir: string
   targets: SkillInjectionTargetResult[]
+}
+
+export function scheduleSkillInjection(task: () => Promise<unknown>, onFailure: (err: unknown) => void): void {
+  void task().catch(onFailure)
 }
 
 export class HermesSkillInjector {
@@ -148,13 +152,12 @@ export class HermesSkillInjector {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue
       const sourceSkillDir = join(this.sourceDir, entry.name)
       const targetSkillDir = join(targetDir, entry.name)
-      const existed = existsSync(targetSkillDir)
       if (existsSync(targetSkillDir)) {
-        await rm(targetSkillDir, { recursive: true, force: true })
+        result.skipped.push(entry.name)
+        continue
       }
       await this.copyDir(sourceSkillDir, targetSkillDir)
-      if (existed) result.updated.push(entry.name)
-      else result.injected.push(entry.name)
+      result.injected.push(entry.name)
     }
 
     if (result.injected.length > 0 || result.updated.length > 0) {
