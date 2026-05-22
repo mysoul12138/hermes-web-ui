@@ -44,6 +44,8 @@ export interface CompressedContext {
         hadSnapshot: boolean
         compressed: boolean
         summaryTokenEstimate: number
+        messageTokenEstimate?: number
+        contextTokenEstimate?: number
     }
 }
 
@@ -89,6 +91,13 @@ export interface GatewayCaller {
 
 export type SessionCleaner = (sessionId: string) => void
 
+export type ContextProgress = (event: {
+    status: 'compressing'
+    path: 'snapshot' | 'full'
+    messageCount: number
+    tokenCount: number
+}) => void
+
 // ─── Build Context Input ───────────────────────────────────
 
 export interface MemberInfo {
@@ -111,4 +120,9 @@ export interface BuildContextInput {
     currentMessage: StoredMessage
     compression?: Partial<CompressionConfig>
     profile?: string
+    contextTokenEstimator?: (
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        instructions: string,
+    ) => Promise<number | null | undefined>
+    onProgress?: ContextProgress
 }

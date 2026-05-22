@@ -247,11 +247,33 @@ export function mergeToolResult(previous: string | undefined, next: string | und
   return `${previous}\n\n${next}`
 }
 
-export function usageFromRunEvent(evt: RunEvent): { input_tokens: number; output_tokens: number } | null {
+export function contextTokensFromRunEvent(evt: RunEvent): number | undefined {
+  const raw = evt as RunEvent & {
+    contextTokens?: unknown
+    context_tokens?: unknown
+    context_token_count?: unknown
+    usage?: { context_tokens?: unknown; input_tokens?: unknown; total_tokens?: unknown }
+  }
+  const candidates = [
+    raw.contextTokens,
+    raw.context_tokens,
+    raw.context_token_count,
+    raw.usage?.context_tokens,
+    raw.usage?.input_tokens,
+  ]
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value)
+  }
+  return undefined
+}
+
+export function usageFromRunEvent(evt: RunEvent): { input_tokens: number; output_tokens: number; context_tokens?: number } | null {
+  const contextTokens = contextTokensFromRunEvent(evt)
   if (evt.usage) {
     return {
       input_tokens: evt.usage.input_tokens ?? 0,
       output_tokens: evt.usage.output_tokens ?? 0,
+      ...(contextTokens != null ? { context_tokens: contextTokens } : {}),
     }
   }
   const raw = evt as RunEvent & { inputTokens?: number; outputTokens?: number }
@@ -261,5 +283,6 @@ export function usageFromRunEvent(evt: RunEvent): { input_tokens: number; output
   return {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
+    ...(contextTokens != null ? { context_tokens: contextTokens } : {}),
   }
 }

@@ -151,6 +151,7 @@ export interface Session {
   messageCount?: number
   inputTokens?: number
   outputTokens?: number
+  contextTokens?: number
   endedAt?: number | null
   lastActiveAt?: number
   workspace?: string | null
@@ -707,6 +708,7 @@ export const useChatStore = defineStore('chat', () => {
       : nextSession.messageCount
     existing.inputTokens = nextSession.inputTokens
     existing.outputTokens = nextSession.outputTokens
+    existing.contextTokens = nextSession.contextTokens
     existing.endedAt = nextSession.endedAt
     existing.lastActiveAt = nextSession.lastActiveAt
     existing.branchSessionCount = nextSession.branchSessionCount

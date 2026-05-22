@@ -78,6 +78,7 @@ export interface BridgeRunEvent {
   inline_diff?: string
   input_tokens?: number
   output_tokens?: number
+  context_tokens?: number
   reasoning_tokens?: number
   api_calls?: number
   cost_usd?: number
@@ -90,6 +91,7 @@ export interface BridgeRunEvent {
   resultMessages?: number
   beforeTokens?: number
   afterTokens?: number
+  contextTokens?: number
   summaryTokens?: number
   verbatimCount?: number
   compressedStartIndex?: number
@@ -97,6 +99,7 @@ export interface BridgeRunEvent {
     input_tokens: number
     output_tokens: number
     total_tokens: number
+    context_tokens?: number
     reasoning_tokens?: number
     cache_read_tokens?: number
     cache_write_tokens?: number
@@ -394,10 +397,12 @@ function normalizeUsagePayload(payload: Record<string, any>): BridgeRunEvent['us
   const inputTokens = finiteNumber(raw.input_tokens ?? raw.inputTokens)
   const outputTokens = finiteNumber(raw.output_tokens ?? raw.outputTokens)
   if (inputTokens === undefined || outputTokens === undefined) return undefined
+  const contextTokens = finiteNumber(raw.context_tokens ?? raw.contextTokens ?? raw.context_token_count ?? raw.contextTokenCount)
   return {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: finiteNumber(raw.total_tokens ?? raw.totalTokens) ?? inputTokens + outputTokens,
+    context_tokens: contextTokens ?? inputTokens,
     reasoning_tokens: finiteNumber(raw.reasoning_tokens ?? raw.reasoningTokens),
     cache_read_tokens: finiteNumber(raw.cache_read_tokens ?? raw.cacheReadTokens),
     cache_write_tokens: finiteNumber(raw.cache_write_tokens ?? raw.cacheWriteTokens),
@@ -655,6 +660,7 @@ export class TuiBridgeService {
         resultMessages: Math.min(contextMessageCount, 8),
         beforeTokens: contextTokenCount,
         afterTokens: contextTokenCount,
+        contextTokens: contextTokenCount,
         summaryTokens: 0,
         verbatimCount: Math.min(contextMessageCount, 8),
         compressedStartIndex: 0,
@@ -1422,8 +1428,10 @@ export class TuiBridgeService {
   private completedEventWithUsage(state: RunState, event: BridgeRunEvent): BridgeRunEvent {
     const normalized = event.usage || normalizeUsagePayload(event as Record<string, any>)
     if (normalized && normalized.input_tokens + normalized.output_tokens > 0) {
+      const contextTokens = normalized.context_tokens ?? normalized.input_tokens
       return {
         ...event,
+        contextTokens,
         usage: normalized,
         usage_source: normalized.source || event.usage_source || 'provider',
       }
@@ -1435,12 +1443,14 @@ export class TuiBridgeService {
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       total_tokens: inputTokens + outputTokens,
+      context_tokens: inputTokens,
       source: 'server-tokenizer',
     }
     return {
       ...event,
       input_tokens: inputTokens,
       output_tokens: outputTokens,
+      contextTokens: inputTokens,
       usage: fallback,
       usage_source: fallback.source,
     }

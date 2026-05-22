@@ -202,6 +202,68 @@ describe('ContextEngine.buildContext', () => {
         expect(mockSummarize).not.toHaveBeenCalled()
     })
 
+    it('records full context estimates without compressing when under threshold', async () => {
+        const messages = makeMessages(3)
+        mockFetcher.getMessages = vi.fn().mockReturnValue(messages)
+        const contextTokenEstimator = vi.fn().mockResolvedValue(19_379)
+
+        const result = await engine.buildContext({
+            roomId: 'room-1',
+            agentId: 'agent-1',
+            agentName: 'Claude',
+            agentDescription: 'Helper',
+            agentSocketId: 'agent-socket',
+            roomName: 'general',
+            memberNames: ['Alice'],
+            members: [{ userId: 'u1', name: 'Alice', description: '' }],
+            upstream: 'http://localhost:8642',
+            apiKey: null,
+            currentMessage: messages[messages.length - 1],
+            contextTokenEstimator,
+        })
+
+        expect(result.meta.compressed).toBe(false)
+        expect(result.meta.contextTokenEstimate).toBe(19_379)
+        expect(result.meta.messageTokenEstimate).toBeGreaterThan(0)
+        expect(contextTokenEstimator).toHaveBeenCalledWith(
+            expect.arrayContaining([{ role: 'assistant', content: expect.stringContaining('Message 0') }]),
+            expect.stringContaining('Claude'),
+        )
+        expect(mockSummarize).not.toHaveBeenCalled()
+    })
+
+    it('uses full context estimates to trigger compression and progress', async () => {
+        const messages = makeMessages(20)
+        mockFetcher.getMessages = vi.fn().mockReturnValue(messages)
+        const onProgress = vi.fn()
+
+        const result = await engine.buildContext({
+            roomId: 'room-1',
+            agentId: 'agent-1',
+            agentName: 'Claude',
+            agentDescription: 'Helper',
+            agentSocketId: 'agent-socket',
+            roomName: 'general',
+            memberNames: [],
+            members: [],
+            upstream: 'http://localhost:8642',
+            apiKey: null,
+            currentMessage: messages[messages.length - 1],
+            contextTokenEstimator: vi.fn().mockResolvedValue(120_000),
+            onProgress,
+        })
+
+        expect(result.meta.compressed).toBe(true)
+        expect(result.meta.contextTokenEstimate).toBeGreaterThan(0)
+        expect(mockSummarize).toHaveBeenCalledTimes(1)
+        expect(onProgress).toHaveBeenCalledWith({
+            status: 'compressing',
+            path: 'full',
+            messageCount: 20,
+            tokenCount: 120_000,
+        })
+    })
+
     it('splits into head/tail and compresses middle when over threshold', async () => {
         const messages = makeMessages(20)
         mockFetcher.getMessages = vi.fn().mockReturnValue(messages)

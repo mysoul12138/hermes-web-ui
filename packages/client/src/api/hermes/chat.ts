@@ -123,6 +123,9 @@ export interface RunEvent {
   output_tokens?: number
   inputTokens?: number
   outputTokens?: number
+  context_tokens?: number
+  contextTokens?: number
+  context_token_count?: number
   reasoning_tokens?: number
   usage_source?: string
   api_calls?: number
@@ -143,6 +146,7 @@ export interface RunEvent {
     input_tokens: number
     output_tokens: number
     total_tokens: number
+    context_tokens?: number
     source?: string
   }
   web_session_id?: string

@@ -41,7 +41,7 @@ export function isBridgeFallbackSession(detail: { source?: string; messages?: un
   return detail?.source === 'webui-bridge' && Array.isArray(detail.messages) && detail.messages.length === 0
 }
 
-export function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number } | null | undefined, options: { allowReset?: boolean } = {}) {
+export function applySessionUsage(session: Session | undefined | null, usage: { input_tokens: number; output_tokens: number; context_tokens?: number } | null | undefined, options: { allowReset?: boolean } = {}) {
   if (!session || !usage) return
   const currentInput = session.inputTokens ?? 0
   const currentOutput = session.outputTokens ?? 0
@@ -49,6 +49,9 @@ export function applySessionUsage(session: Session | undefined | null, usage: { 
   const nextInput = usage.input_tokens ?? 0
   const nextOutput = usage.output_tokens ?? 0
   const nextTotal = nextInput + nextOutput
+  if (typeof usage.context_tokens === 'number' && Number.isFinite(usage.context_tokens) && usage.context_tokens >= 0) {
+    session.contextTokens = Math.floor(usage.context_tokens)
+  }
   if (nextTotal > 0 && (options.allowReset || currentTotal === 0 || nextTotal >= currentTotal)) {
     session.inputTokens = nextInput
     session.outputTokens = nextOutput

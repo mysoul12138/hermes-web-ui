@@ -1329,10 +1329,32 @@ describe('Chat Store', () => {
       event: 'usage.updated',
       inputTokens: 321,
       outputTokens: 12,
+      contextTokens: 9001,
     })
 
     expect(store.activeSession?.inputTokens).toBe(321)
     expect(store.activeSession?.outputTokens).toBe(12)
+    expect(store.activeSession?.contextTokens).toBe(9001)
+  })
+
+  it('updates active session context tokens from completed usage events', async () => {
+    let onEvent!: (event: any) => void
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('finish with context usage')
+    await flushPromises()
+
+    onEvent({
+      event: 'run.completed',
+      usage: { input_tokens: 123, output_tokens: 45, total_tokens: 168, context_tokens: 4321 },
+      output: 'done',
+    })
+
+    expect(store.activeSession?.contextTokens).toBe(4321)
   })
 
   it('sends the currently selected model instead of the model captured at session creation', async () => {

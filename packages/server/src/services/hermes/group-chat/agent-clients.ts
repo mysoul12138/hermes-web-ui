@@ -8,6 +8,7 @@ import { getActiveProfileName } from '../hermes-profile'
 import { logger } from '../../../services/logger'
 import { updateUsage } from '../../../db/hermes/usage-store'
 import { getSessionDetailFromDbWithProfile } from '../../../db/hermes/sessions-db'
+import { countTokens } from '../../../lib/context-compressor'
 import { resolveMentionTargets, stripMentionRoutingTokens } from './mention-routing'
 
 export const GROUP_CHAT_AGENT_SOCKET_SECRET = randomBytes(32).toString('hex')
@@ -35,6 +36,14 @@ interface MemberData {
     id: string
     name: string
     joinedAt: number
+}
+
+export function estimateGroupContextTokens(
+    history: Array<{ content?: unknown }>,
+    instructions?: string,
+): number {
+    const historyTokens = history.reduce((sum, item) => sum + countTokens(String(item.content || '')), 0)
+    return historyTokens + countTokens(instructions || '')
 }
 
 interface JoinResult {
@@ -180,9 +189,9 @@ class AgentClient {
         this.socket!.emit('stop_typing', { roomId })
     }
 
-    emitContextStatus(roomId: string, status: 'compressing' | 'replying' | 'ready'): void {
+    emitContextStatus(roomId: string, status: 'compressing' | 'replying' | 'ready', detail: Record<string, unknown> = {}): void {
         this.ensureConnected()
-        this.socket!.emit('context_status', { roomId, agentName: this.name, status })
+        this.socket!.emit('context_status', { roomId, agentName: this.name, status, ...detail })
     }
 
     getJoinedRooms(): string[] {
@@ -228,7 +237,7 @@ class AgentClient {
     async replyToMention(
         roomId: string,
         msg: { content: string; senderName: string; senderId: string; timestamp: number },
-        onStatus?: (status: 'compressing' | 'replying' | 'ready') => void,
+        onStatus?: (status: 'compressing' | 'replying' | 'ready', detail?: Record<string, unknown>) => void,
     ): Promise<void> {
         logger.debug(`[AgentClients] ${this.name} mentioned by ${msg.senderName}: "${msg.content.slice(0, 50)}"`)
         if (!this.gatewayManager) {
@@ -285,6 +294,14 @@ class AgentClient {
                         currentMessage: msg,
                         compression,
                         profile: this.profile,
+                        onProgress: (event: { status: 'compressing'; messageCount: number; tokenCount: number }) => {
+                            onStatus?.('compressing', {
+                                messageCount: event.messageCount,
+                                tokenCount: event.tokenCount,
+                            })
+                        },
+                        contextTokenEstimator: async (history: Array<{ role: 'user' | 'assistant'; content: string }>, estimateInstructions: string) =>
+                            estimateGroupContextTokens(history, estimateInstructions),
                     })
                     conversationHistory = ctx.conversationHistory
                     instructions = ctx.instructions
@@ -696,8 +713,8 @@ export class AgentClients {
         }
 
         this._processingRooms.add(agentKey)
-        const onStatus = (status: 'compressing' | 'replying' | 'ready') => {
-            agent.emitContextStatus(roomId, status)
+        const onStatus = (status: 'compressing' | 'replying' | 'ready', detail?: Record<string, unknown>) => {
+            agent.emitContextStatus(roomId, status, detail)
             logger.debug(`[AgentClients] room ${roomId} agent ${agent.name} status: ${status}`)
         }
 

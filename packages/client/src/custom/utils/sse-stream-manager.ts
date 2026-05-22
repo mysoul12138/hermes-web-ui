@@ -112,7 +112,7 @@ export function processRunEvent(
           totalMessages: numberFromRunEvent(evt.totalMessages),
           resultMessages: numberFromRunEvent(evt.resultMessages),
           beforeTokens: numberFromRunEvent(evt.beforeTokens),
-          afterTokens: numberFromRunEvent(evt.afterTokens),
+          afterTokens: numberFromRunEvent(evt.contextTokens ?? evt.context_tokens ?? evt.context_token_count ?? evt.afterTokens),
           summaryTokens: numberFromRunEvent(evt.summaryTokens),
           verbatimCount: numberFromRunEvent(evt.verbatimCount),
           error: typeof evt.error === 'string' ? evt.error : undefined,

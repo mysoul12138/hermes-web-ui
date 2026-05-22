@@ -26,7 +26,7 @@ vi.mock('../../packages/server/src/services/auth', () => ({
   getToken: vi.fn(async () => 'test-token'),
 }))
 
-import { AgentClients } from '../../packages/server/src/services/hermes/group-chat/agent-clients'
+import { AgentClients, estimateGroupContextTokens } from '../../packages/server/src/services/hermes/group-chat/agent-clients'
 import { groupChatRoutes, setGroupChatServer } from '../../packages/server/src/routes/hermes/group-chat'
 
 function routeHandler(path: string, method: string) {
@@ -39,6 +39,12 @@ describe('Group Chat member/agent identity sync', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     socketHandlers.clear()
+  })
+
+  it('includes agent instructions in group context token estimates', () => {
+    const messageOnly = estimateGroupContextTokens([{ content: 'hello' }], '')
+    const withInstructions = estimateGroupContextTokens([{ content: 'hello' }], 'system prompt with tools')
+    expect(withInstructions).toBeGreaterThan(messageOnly)
   })
 
   it('uses the persisted group-chat agent id as the runtime agent id and socket user id', async () => {

@@ -727,6 +727,8 @@ describe('TuiBridgeService steer compatibility', () => {
     })
     expect(completed.usage.input_tokens).toBeGreaterThan(0)
     expect(completed.usage.output_tokens).toBeGreaterThan(0)
+    expect(completed.contextTokens).toBe(completed.usage.input_tokens)
+    expect(completed.usage.context_tokens).toBe(completed.usage.input_tokens)
     expect(mockUpdateUsage).toHaveBeenCalledWith('web-session', expect.objectContaining({
       inputTokens: completed.usage.input_tokens,
       outputTokens: completed.usage.output_tokens,
@@ -755,6 +757,7 @@ describe('TuiBridgeService steer compatibility', () => {
         event: 'compression.completed',
         compressed: true,
         totalMessages: 2,
+        contextTokens: result.context_token_count,
       }),
     ])
     expect(result).toMatchObject({
@@ -976,8 +979,10 @@ describe('TuiBridgeService steer compatibility', () => {
           input_tokens: 7,
           output_tokens: 3,
           total_tokens: 10,
+          context_tokens: 7,
           source: 'provider',
         }),
+        contextTokens: 7,
       }),
     ])
     expect(mockUpdateUsage).toHaveBeenCalledWith('web-session', expect.objectContaining({

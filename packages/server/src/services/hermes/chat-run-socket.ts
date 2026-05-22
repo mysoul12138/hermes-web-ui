@@ -178,6 +178,7 @@ interface SessionState {
   profile?: string
   inputTokens?: number
   outputTokens?: number
+  contextTokens?: number
   isAborting?: boolean
   queue: QueuedRun[]
   responseRun?: ResponseRunState
@@ -441,6 +442,7 @@ export class ChatRunSocket {
       events: state.isWorking ? state.events : [],
       inputTokens: state.inputTokens,
       outputTokens: state.outputTokens,
+      contextTokens: state.contextTokens,
       queueLength: state.queue?.length || 0,
     })
 
@@ -479,6 +481,7 @@ export class ChatRunSocket {
         events: [],
         inputTokens,
         outputTokens,
+        contextTokens: inputTokens + outputTokens,
         queue: [],
       }
     } catch (err) {
@@ -984,8 +987,12 @@ export class ChatRunSocket {
           })
           const finalOutput = parsed.response || parsed
           const finalText = extractResponseText(finalOutput)
+          const usage = finalOutput.usage || {}
+          const rawContextTokens = usage.context_tokens ?? usage.contextTokens ?? usage.context_token_count ?? usage.contextTokenCount ?? usage.input_tokens ?? usage.inputTokens
+          const contextTokens = typeof rawContextTokens === 'number' && Number.isFinite(rawContextTokens) && rawContextTokens >= 0
+            ? Math.floor(rawContextTokens)
+            : undefined
           if (upstreamEvent === 'response.completed' && session_id) {
-            const usage = finalOutput.usage || {}
             updateUsage(session_id, {
               inputTokens: usage.input_tokens ?? usage.inputTokens ?? 0,
               outputTokens: usage.output_tokens ?? usage.outputTokens ?? 0,
@@ -995,14 +1002,20 @@ export class ChatRunSocket {
               model: finalOutput.model || '',
               profile: this.sessionMap.get(session_id)?.profile,
             })
+            const state = this.sessionMap.get(session_id)
+            if (state && contextTokens != null) state.contextTokens = contextTokens
           }
+          const eventUsage = finalOutput.usage && typeof finalOutput.usage === 'object'
+            ? { ...finalOutput.usage, ...(contextTokens != null ? { context_tokens: contextTokens } : {}) }
+            : finalOutput.usage
           const eventName = upstreamEvent === 'response.completed' ? 'run.completed' : 'run.failed'
           emit(eventName, {
             event: eventName,
             run_id: responseId || finalOutput.id,
             response_id: responseId || finalOutput.id,
             output: finalText,
-            usage: finalOutput.usage,
+            usage: eventUsage,
+            contextTokens,
             error: finalOutput.error || parsed.error,
             queue_remaining: queueLen,
           })
@@ -1440,11 +1453,13 @@ export class ChatRunSocket {
       }
       state.inputTokens = inputTokens
       state.outputTokens = outputTokens
+      state.contextTokens = inputTokens + outputTokens
       emit('usage.updated', {
         event: 'usage.updated',
         session_id: sid,
         inputTokens,
         outputTokens,
+        contextTokens: state.contextTokens,
       })
       return { inputTokens, outputTokens }
     } catch (err: any) {
