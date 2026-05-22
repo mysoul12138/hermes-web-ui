@@ -1,6 +1,6 @@
 import { resolve, join } from 'path'
 import { homedir } from 'os'
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync, readdirSync } from 'fs'
 
 const HERMES_BASE = process.env.HERMES_HOME || resolve(homedir(), '.hermes')
 
@@ -53,6 +53,27 @@ export function getActiveProfileName(): string {
   } catch {
     return 'default'
   }
+}
+
+/**
+ * List profiles known on disk. The CLI table is presentation-oriented, so
+ * callers that parse it need disk names as stable anchors.
+ */
+export function listProfileNamesFromDisk(): string[] {
+  const names = new Set<string>(['default'])
+  const profilesDir = join(HERMES_BASE, 'profiles')
+  try {
+    for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.trim()) {
+        names.add(entry.name)
+      }
+    }
+  } catch { }
+  return [...names].sort((a, b) => {
+    if (a === 'default') return -1
+    if (b === 'default') return 1
+    return a.localeCompare(b)
+  })
 }
 
 /**
