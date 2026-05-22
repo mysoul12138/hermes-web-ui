@@ -19,6 +19,7 @@ vi.mock('vue-i18n', () => ({
 vi.mock('@/stores/hermes/kanban', () => ({
   useKanbanStore: () => ({
     assignees: [{ name: 'alice', counts: { todo: 1 } }],
+    stats: { by_assignee: { default: 0, alice: 1 } },
     createTask: mockCreateTask,
   }),
 }))
@@ -85,5 +86,13 @@ describe('KanbanCreateForm', () => {
     expect(mockMessage.success).toHaveBeenCalledWith('kanban.message.taskCreated')
     expect(wrapper.emitted('created')).toBeTruthy()
     expect(wrapper.emitted('close')).toBeTruthy()
+  })
+
+  it('uses compact profile names for assignee options', () => {
+    const wrapper = mount(KanbanCreateForm)
+
+    expect(wrapper.text()).toContain('default')
+    expect(wrapper.text()).toContain('alice')
+    expect(wrapper.text()).not.toContain('alice · kanban.stats.tasks')
   })
 })
