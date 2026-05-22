@@ -80,6 +80,25 @@ export async function bootstrap() {
   await mkdir(config.uploadDir, { recursive: true })
   await mkdir(config.dataDir, { recursive: true })
 
+  try {
+    const { HermesSkillInjector } = await import('./services/hermes/skill-injector')
+    const injectionResult = await new HermesSkillInjector().injectMissingSkills()
+    if (injectionResult.injected.length > 0) {
+      logger.info({
+        injected: [...new Set(injectionResult.injected)],
+        targetCount: injectionResult.targets.length,
+      }, '[bootstrap] bundled skills injected')
+    }
+    if (injectionResult.updated.length > 0) {
+      logger.info({
+        updated: [...new Set(injectionResult.updated)],
+        targetCount: injectionResult.targets.length,
+      }, '[bootstrap] bundled skills updated')
+    }
+  } catch (err) {
+    logger.warn(err, '[bootstrap] failed to inject bundled skills')
+  }
+
   const authToken = await getToken()
   await initLoginLimiter()
   const app = new Koa()

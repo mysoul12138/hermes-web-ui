@@ -7,6 +7,25 @@ import { SessionDeleter } from '../../services/hermes/session-deleter'
 import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { logger } from '../../services/logger'
 import { smartCloneCleanup } from '../../services/hermes/profile-credentials'
+import { HermesSkillInjector } from '../../services/hermes/skill-injector'
+
+async function injectBundledSkillsForProfile(name: string): Promise<void> {
+  try {
+    const targetDir = HermesSkillInjector.resolveTargetDirForProfile(name)
+    const result = await new HermesSkillInjector(undefined, targetDir).injectMissingSkills()
+    const target = result.targets[0]
+    if (target && (target.injected.length > 0 || target.updated.length > 0)) {
+      logger.info({
+        profile: name,
+        targetDir,
+        injected: target.injected,
+        updated: target.updated,
+      }, '[profiles] synced bundled skills for profile')
+    }
+  } catch (err: any) {
+    logger.warn(err, '[profiles] failed to sync bundled skills for profile "%s"', name)
+  }
+}
 
 export async function list(ctx: any) {
   try {
@@ -84,6 +103,7 @@ export async function create(ctx: any) {
         logger.error(err, 'Failed to start gateway for profile "%s"', name)
       }
     }
+    await injectBundledSkillsForProfile(name)
     ctx.body = {
       success: true,
       message: output.trim(),
@@ -199,6 +219,8 @@ export async function switchProfile(ctx: any) {
     } catch (err: any) {
       logger.error(err, 'Ensure config failed')
     }
+
+    await injectBundledSkillsForProfile(name)
 
     // TODO: re-enable pending session delete drain after confirming safety
     // const drainResult = await SessionDeleter.getInstance().drain(name)
