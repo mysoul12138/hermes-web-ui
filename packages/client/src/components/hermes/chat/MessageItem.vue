@@ -831,14 +831,14 @@ onBeforeUnmount(() => {
                   <rect x="14" y="4" width="4" height="16"/>
                 </svg>
               </button>
-          <span class="message-time">{{ timeStr }}</span>
-              <button
-                v-if="copyableContent"
-                class="copy-bubble-btn"
-                :class="{ copied: copiedBubble }"
-                @click="copyBubbleContent"
-                :title="t('chat.copyBubble')"
-              >
+          <span v-if="message.role !== 'assistant'" class="message-time">{{ timeStr }}</span>
+          <button
+            v-if="copyableContent"
+            class="copy-bubble-btn"
+            :class="{ copied: copiedBubble }"
+            @click="copyBubbleContent"
+            :title="t('chat.copyBubble')"
+          >
                 <svg v-if="copiedBubble" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
                   <polyline points="20 6 9 17 4 12"/>
                 </svg>
@@ -847,6 +847,7 @@ onBeforeUnmount(() => {
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                 </svg>
           </button>
+          <span v-if="message.role === 'assistant'" class="message-time">{{ timeStr }}</span>
         </div>
         <div class="message-meta-status">
           <span v-if="message.steered" class="queued-badge">{{ t('chat.messageSteered') }}</span>

@@ -168,7 +168,7 @@ describe('MessageItem tool details', () => {
     expect(toolWrapper.find('.tool-status-badge').exists()).toBe(true)
   })
 
-  it('keeps the copy action rendered while timestamp remains a separate hover-only element', () => {
+  it('renders assistant meta with the copy action before the timestamp', () => {
     const wrapper = mount(MessageItem, {
       props: {
         message: {
@@ -181,9 +181,31 @@ describe('MessageItem tool details', () => {
     })
 
     const meta = wrapper.find('.message-meta-hover')
+    const copyButton = meta.find('.copy-bubble-btn').element
+    const timestamp = meta.find('.message-time').element
     expect(meta.exists()).toBe(true)
     expect(meta.find('.copy-bubble-btn').exists()).toBe(true)
     expect(meta.find('.message-time').exists()).toBe(true)
+    expect(copyButton.compareDocumentPosition(timestamp) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps user meta with the timestamp before the copy action', () => {
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'user-copy-meta',
+          role: 'user',
+          content: 'copyable prompt',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    const meta = wrapper.find('.message-meta-hover')
+    const timestamp = meta.find('.message-time').element
+    const copyButton = meta.find('.copy-bubble-btn').element
+    expect(meta.exists()).toBe(true)
+    expect(timestamp.compareDocumentPosition(copyButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('does not render a thinking block when reasoning duplicates assistant content', () => {
