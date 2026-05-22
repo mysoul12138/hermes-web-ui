@@ -5,6 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 const mockSystemApi = vi.hoisted(() => ({
   checkHealth: vi.fn(),
   fetchAvailableModels: vi.fn(),
+  addCustomModel: vi.fn(),
+  removeCustomModel: vi.fn(),
   updateDefaultModel: vi.fn(),
   updateModelAlias: vi.fn(),
   updateModelVisibility: vi.fn(),
@@ -26,6 +28,8 @@ describe('App Store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    mockSystemApi.addCustomModel.mockResolvedValue({ success: true, custom_models: {} })
+    mockSystemApi.removeCustomModel.mockResolvedValue({ success: true, custom_models: {} })
     window.localStorage.clear()
     window.localStorage.setItem('hermes_api_key', 'test-token')
   })
@@ -112,6 +116,85 @@ describe('App Store', () => {
     expect(store.selectedModel).toBe('deepseek-reasoner')
     expect(store.selectedProvider).toBe('deepseek')
     expect(mockSystemApi.updateDefaultModel).not.toHaveBeenCalled()
+  })
+
+  it('loads persisted custom models from the server response', async () => {
+    mockSystemApi.fetchAvailableModels.mockResolvedValue({
+      default: 'gemma-4-26b-a4b-it',
+      default_provider: 'google-ai-studio',
+      groups: [{
+        provider: 'google-ai-studio',
+        label: 'Google AI Studio',
+        base_url: 'https://generativelanguage.googleapis.com/v1beta',
+        models: ['gemma-4-26b-a4b-it'],
+        api_key: '',
+      }],
+      allProviders: [],
+      custom_models: {
+        'google-ai-studio': ['gemma-4-26b-a4b-it'],
+      },
+    })
+    const store = useAppStore()
+
+    await store.loadModels()
+
+    expect(store.selectedModel).toBe('gemma-4-26b-a4b-it')
+    expect(store.customModels).toEqual({
+      'google-ai-studio': ['gemma-4-26b-a4b-it'],
+    })
+  })
+
+  it('persists manually entered custom models and removes them from loaded groups', async () => {
+    mockSystemApi.addCustomModel.mockResolvedValue({
+      success: true,
+      custom_models: { deepseek: ['manual-model'] },
+    })
+    mockSystemApi.removeCustomModel.mockResolvedValue({
+      success: true,
+      custom_models: {},
+    })
+    const store = useAppStore()
+    store.modelGroups = [{
+      provider: 'deepseek',
+      label: 'DeepSeek',
+      base_url: 'https://api.deepseek.com/v1',
+      models: ['deepseek-chat'],
+      available_models: ['deepseek-chat'],
+      api_key: '',
+    }]
+
+    await store.switchModel('manual-model', 'deepseek')
+
+    expect(store.selectedModel).toBe('manual-model')
+    expect(store.customModels).toEqual({ deepseek: ['manual-model'] })
+    expect(mockSystemApi.addCustomModel).toHaveBeenCalledWith({
+      provider: 'deepseek',
+      model: 'manual-model',
+    })
+
+    store.modelGroups = [{
+      provider: 'deepseek',
+      label: 'DeepSeek',
+      base_url: 'https://api.deepseek.com/v1',
+      models: ['deepseek-chat', 'manual-model'],
+      available_models: ['deepseek-chat', 'manual-model'],
+      api_key: '',
+    }]
+
+    await store.removeCustomModel('manual-model', 'deepseek')
+
+    expect(store.customModels).toEqual({})
+    expect(store.modelGroups[0].models).toEqual(['deepseek-chat'])
+    expect(store.modelGroups[0].available_models).toEqual(['deepseek-chat'])
+    expect(mockSystemApi.removeCustomModel).toHaveBeenCalledWith({
+      provider: 'deepseek',
+      model: 'manual-model',
+    })
+    expect(store.selectedModel).toBe('deepseek-chat')
+    expect(mockSystemApi.updateDefaultModel).toHaveBeenLastCalledWith({
+      default: 'deepseek-chat',
+      provider: 'deepseek',
+    })
   })
 
   it('clears the updating state and reports failure when self-update request fails', async () => {

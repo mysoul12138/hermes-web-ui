@@ -123,6 +123,27 @@ describe('models controller — model visibility', () => {
     })
   })
 
+  it('merges Web UI custom models into available provider groups', async () => {
+    mockReadAppConfig.mockResolvedValue({
+      customModels: {
+        deepseek: ['gemma-4-26b-a4b-it', 'deepseek-chat'],
+      },
+    })
+
+    const ctx = makeCtx()
+    await ctrl.getAvailable(ctx)
+
+    expect(ctx.status).toBe(200)
+    expect(ctx.body.groups[0]).toMatchObject({
+      provider: 'deepseek',
+      models: ['deepseek-chat', 'deepseek-reasoner', 'gemma-4-26b-a4b-it'],
+      available_models: ['deepseek-chat', 'deepseek-reasoner', 'gemma-4-26b-a4b-it'],
+    })
+    expect(ctx.body.custom_models).toEqual({
+      deepseek: ['gemma-4-26b-a4b-it', 'deepseek-chat'],
+    })
+  })
+
   it('saves include visibility in web-ui app config only', async () => {
     mockReadAppConfig.mockResolvedValue({ copilotEnabled: true })
     mockWriteAppConfig.mockResolvedValue({
@@ -140,5 +161,62 @@ describe('models controller — model visibility', () => {
       success: true,
       model_visibility: { deepseek: { mode: 'include', models: ['deepseek-chat'] } },
     })
+  })
+
+  it('adds and removes custom models in web-ui app config only', async () => {
+    mockReadAppConfig.mockResolvedValueOnce({
+      customModels: { deepseek: ['existing'] },
+    })
+    mockWriteAppConfig.mockResolvedValueOnce({
+      customModels: { deepseek: ['existing', 'manual-model'] },
+    })
+
+    const addCtx = makeCtx({ provider: 'deepseek', model: 'manual-model' })
+    await ctrl.addCustomModel(addCtx)
+
+    expect(mockWriteAppConfig).toHaveBeenCalledWith({
+      customModels: { deepseek: ['existing', 'manual-model'] },
+    })
+    expect(addCtx.body).toEqual({
+      success: true,
+      custom_models: { deepseek: ['existing', 'manual-model'] },
+    })
+
+    mockReadAppConfig.mockResolvedValueOnce({
+      customModels: { deepseek: ['existing', 'manual-model'] },
+    })
+    mockWriteAppConfig.mockResolvedValueOnce({
+      customModels: { deepseek: ['existing'] },
+    })
+
+    const removeCtx = makeCtx({ provider: 'deepseek', model: 'manual-model' })
+    await ctrl.removeCustomModel(removeCtx)
+
+    expect(mockWriteAppConfig).toHaveBeenLastCalledWith({
+      customModels: { deepseek: ['existing'] },
+    })
+    expect(removeCtx.body).toEqual({
+      success: true,
+      custom_models: { deepseek: ['existing'] },
+    })
+  })
+
+  it('removes custom models from query params when DELETE body is missing', async () => {
+    mockReadAppConfig.mockResolvedValueOnce({
+      customModels: { deepseek: ['manual-model'] },
+    })
+    mockWriteAppConfig.mockResolvedValueOnce({
+      customModels: {},
+    })
+
+    const ctx = makeCtx()
+    ctx.request.body = undefined
+    ctx.query = { provider: 'deepseek', model: 'manual-model' }
+
+    await ctrl.removeCustomModel(ctx)
+
+    expect(ctx.status).toBe(200)
+    expect(mockWriteAppConfig).toHaveBeenCalledWith({ customModels: {} })
+    expect(ctx.body).toEqual({ success: true, custom_models: {} })
   })
 })

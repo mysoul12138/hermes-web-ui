@@ -21,6 +21,9 @@ export interface AppConfig {
   // Web UI-only display aliases keyed by provider -> canonical model ID.
   modelAliases?: Record<string, Record<string, string>>
 
+  // Web UI-only manually entered model IDs keyed by provider.
+  customModels?: Record<string, string[]>
+
   // Web UI-only model picker visibility.
   modelVisibility?: Record<string, ModelVisibilityRule>
 }
