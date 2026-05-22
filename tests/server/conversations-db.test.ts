@@ -2731,6 +2731,626 @@ describe('conversation DB service', () => {
     expect(detail?.continuation_edges).toEqual([])
   })
 
+  it('does not fold a real explicit bridge-linked child when its bridge context belongs to another session', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    for (const [id, startedAt, firstMessage] of [
+      ['skill-root', 100, '我更新了 skill 并完成验证。'],
+      ['actual-context-root', 200, '构建已通过，现在执行替换 dist 脚本。'],
+      ['wrong-linked-child', 300, 'Previous conversation context:\nassistant: 构建已通过，现在执行替换 dist 脚本。\n\nCurrent user message:\n我又更新了 skill'],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: startedAt,
+        ended_at: startedAt + 20,
+        end_reason: 'tui_shutdown',
+        message_count: 2,
+        tool_call_count: id === 'wrong-linked-child' ? 1 : 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+      insertMessage(db, { id: startedAt, session_id: id, role: 'user', content: firstMessage, timestamp: startedAt })
+      insertMessage(db, { id: startedAt + 1, session_id: id, role: 'assistant', content: `${id} answer`, timestamp: startedAt + 1 })
+    }
+    db.close()
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('wrong-linked-child', 'skill-root')
+    linksDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('skill-root', { humanOnly: true })
+    expect(detail?.thread_session_count).toBe(1)
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual(['skill-root', 'skill-root'])
+    expect(detail?.continuation_edges).toEqual([])
+
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    const skillSummary = summaries.find((summary: any) => summary.id === 'skill-root')
+    expect(skillSummary?.represented_session_ids).toEqual(['skill-root'])
+  })
+
+  it('merges the 20260521_010637 and 20260521_162954 bridge continuation pair into one conversation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: '20260521_010637_f388c9',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779296813.16795,
+      ended_at: 1779298433.9293,
+      end_reason: 'compression',
+      message_count: 16,
+      tool_call_count: 8,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260521_162954_ec7b91',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779352209.750183,
+      ended_at: 1779374907.8455565,
+      end_reason: 'tui_shutdown',
+      message_count: 30,
+      tool_call_count: 15,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: '20260521_010637_f388c9',
+      role: 'assistant',
+      content: '我已完成验证并更新了 skill。',
+      timestamp: 1779298430,
+    })
+    insertMessage(db, {
+      id: 2,
+      session_id: '20260521_162954_ec7b91',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 我已完成验证并更新了 skill。\n\nCurrent user message:\n我又更新了 skill',
+      timestamp: 1779352666,
+    })
+    insertMessage(db, {
+      id: 3,
+      session_id: '20260521_162954_ec7b91',
+      role: 'assistant',
+      content: '继续处理这次 skill 更新。',
+      timestamp: 1779352667,
+    })
+    db.close()
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('20260521_162954_ec7b91', '20260521_010637_f388c9')
+    linksDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['20260521_010637_f388c9'])
+    expect(summaries[0]?.represented_session_ids).toEqual([
+      '20260521_010637_f388c9',
+      '20260521_162954_ec7b91',
+    ])
+
+    const detail = await mod.getConversationDetailFromDb('20260521_010637_f388c9', { humanOnly: true })
+    expect(detail?.thread_session_count).toBe(2)
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual([
+      '20260521_010637_f388c9',
+      '20260521_162954_ec7b91',
+      '20260521_162954_ec7b91',
+    ])
+    expect(detail?.continuation_edges).toEqual([
+      {
+        child_session_id: '20260521_162954_ec7b91',
+        parent_session_id: '20260521_010637_f388c9',
+        kind: 'explicit_bridge_link',
+      },
+    ])
+  })
+
+  it('merges the 20260520_093333 long bridge/native continuation chain into one conversation', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: '20260520_093333_3c3fc9',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779240000,
+      ended_at: 1779240300,
+      end_reason: 'compression',
+      message_count: 20,
+      tool_call_count: 5,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: '20260520_093333_3c3fc9',
+      role: 'assistant',
+      content: '这是一个 LoL 桌面辅助工具。',
+      timestamp: 1779240010,
+    })
+    insertSession(db, {
+      id: '20260520_094805_7da759',
+      parent_session_id: '20260520_093333_3c3fc9',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779240300.005,
+      ended_at: 1779240400,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260520_113325_fc6bb5',
+      parent_session_id: '20260520_094805_7da759',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779240400.005,
+      ended_at: 1779251306,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 2,
+      session_id: '20260520_113325_fc6bb5',
+      role: 'assistant',
+      content: '我先把生涯页补拉逻辑接进去，并保持最小改动：',
+      timestamp: 1779240410,
+    })
+    insertSession(db, {
+      id: 'wrapper-only-noise',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779327805,
+      ended_at: 1779329851,
+      end_reason: 'tui_shutdown',
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'wrapper-only-noise',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: 我先把生涯页补拉逻辑接进去，并保持最小改动：\n\nCurrent user message:\n排队中的 wrapper',
+      timestamp: 1779327839,
+    })
+
+    for (const [id, startedAt, content, assistantText, toolCount] of [
+      ['20260521_104358_93df6b', 1779331453.4812186, 'Previous conversation context:\nassistant: 我先把生涯页补拉逻辑接进去，并保持最小改动：\n\nCurrent user message:\n现在依然只是 全部分类 和 海克斯大乱斗分类有战绩数据', '确认到了：`getSummonerGamesByPuuid` 返回的是 match-history 里的 `games` 外层对象，里面有 `games` 和 `gameCount`，`gameCount` 可作为继续分页的总数。', 38],
+      ['20260521_112836_60efe9', 1779334131.96097, 'Previous conversation context:\nassistant: 确认到了：`getSummonerGamesByPuuid` 返回的是 match-history 里的 `games` 外层对象，里面有 `games` 和 `gameCount`，`gameCount` 可作为继续分页的总数。\n\nCurrent user message:\n还是不行  其他分类还是没有战绩数据', '结论：你的判断是对的，这次我已经把“只补拉最近几批”的限制修掉了。', 63],
+      ['20260521_163829_126d61', 1779352724.72178, 'Previous conversation context:\nassistant: 验证通过了。我再做一次 diff 自检，确认这次只动了加载提示和对应测试，没有碰其它无关逻辑。\n\nCurrent user message:\n继续', '结论：已在正确项目路径 `E:\\BaiduNetdiskDownload\\Seraphine-main3\\Seraphine-main` 修复这两个崩溃风险。', 44],
+    ] as const) {
+      insertSession(db, {
+        id,
+        parent_session_id: null,
+        source: 'tui',
+        model: 'openai/gpt-5.4',
+        title: null,
+        started_at: startedAt,
+        ended_at: startedAt + 60,
+        end_reason: 'compression',
+        message_count: 2,
+        tool_call_count: toolCount,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: 'openai',
+        estimated_cost_usd: 0,
+        actual_cost_usd: 0,
+        cost_status: 'estimated',
+      })
+      insertMessage(db, { id: Math.floor(startedAt), session_id: id, role: 'user', content, timestamp: startedAt })
+      if (id === '20260521_104358_93df6b') {
+        insertMessage(db, {
+          id: Math.floor(startedAt) + 1,
+          session_id: id,
+          role: 'assistant',
+          content: assistantText,
+          tool_calls: JSON.stringify([{ id: 'call-1', type: 'function', function: { name: 'terminal', arguments: '{"command":"echo ok"}' } }]),
+          finish_reason: 'tool_calls',
+          timestamp: startedAt + 1,
+        })
+        insertMessage(db, { id: Math.floor(startedAt) + 2, session_id: id, role: 'tool', content: '{"output":"ok"}', tool_call_id: 'call-1', timestamp: startedAt + 2 })
+        insertMessage(db, { id: Math.floor(startedAt) + 3, session_id: id, role: 'assistant', content: '我继续查真实代码链路和测试数据。', timestamp: startedAt + 3 })
+      } else {
+        insertMessage(db, { id: Math.floor(startedAt) + 1, session_id: id, role: 'assistant', content: assistantText, timestamp: startedAt + 1 })
+      }
+    }
+    insertSession(db, {
+      id: '20260521_120834_978995',
+      parent_session_id: '20260521_112836_60efe9',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779336514.26016,
+      ended_at: 1779337339.41401,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260521_122219_0769a5',
+      parent_session_id: '20260521_120834_978995',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779337339.41898,
+      ended_at: 1779337761.25051,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260521_141328_90d2af',
+      parent_session_id: '20260521_122219_0769a5',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779337761.25445,
+      ended_at: 1779346468.20947,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1779336514,
+      session_id: '20260521_120834_978995',
+      role: 'assistant',
+      content: '日志显示 loaded_source 一直等于 20。',
+      timestamp: 1779336515,
+    })
+    insertMessage(db, {
+      id: 1779337761,
+      session_id: '20260521_141328_90d2af',
+      role: 'assistant',
+      content: '验证通过了。我再做一次 diff 自检，确认这次只动了加载提示和对应测试，没有碰其它无关逻辑。',
+      timestamp: 1779337762,
+    })
+    db.close()
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('20260521_104358_93df6b', '20260520_093333_3c3fc9')
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('20260521_112836_60efe9', '20260520_093333_3c3fc9')
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('20260521_163829_126d61', '20260520_093333_3c3fc9')
+    linksDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['20260520_093333_3c3fc9'])
+    expect(summaries[0]?.represented_session_ids).toEqual([
+      '20260520_093333_3c3fc9',
+      '20260520_094805_7da759',
+      '20260520_113325_fc6bb5',
+      '20260521_104358_93df6b',
+      '20260521_112836_60efe9',
+      '20260521_120834_978995',
+      '20260521_122219_0769a5',
+      '20260521_141328_90d2af',
+      '20260521_163829_126d61',
+    ])
+
+    const detail = await mod.getConversationDetailFromDb('20260520_093333_3c3fc9', { humanOnly: true })
+    expect(detail?.thread_session_count).toBe(9)
+    expect(detail?.continuation_edges).toEqual([
+      {
+        child_session_id: '20260520_094805_7da759',
+        parent_session_id: '20260520_093333_3c3fc9',
+        kind: 'native_parent',
+      },
+      {
+        child_session_id: '20260520_113325_fc6bb5',
+        parent_session_id: '20260520_094805_7da759',
+        kind: 'native_parent',
+      },
+      {
+        child_session_id: '20260521_104358_93df6b',
+        parent_session_id: '20260520_113325_fc6bb5',
+        kind: 'fallback_inference',
+      },
+      {
+        child_session_id: '20260521_112836_60efe9',
+        parent_session_id: '20260521_104358_93df6b',
+        kind: 'fallback_inference',
+      },
+      {
+        child_session_id: '20260521_120834_978995',
+        parent_session_id: '20260521_112836_60efe9',
+        kind: 'native_parent',
+      },
+      {
+        child_session_id: '20260521_122219_0769a5',
+        parent_session_id: '20260521_120834_978995',
+        kind: 'native_parent',
+      },
+      {
+        child_session_id: '20260521_141328_90d2af',
+        parent_session_id: '20260521_122219_0769a5',
+        kind: 'native_parent',
+      },
+      {
+        child_session_id: '20260521_163829_126d61',
+        parent_session_id: '20260521_141328_90d2af',
+        kind: 'fallback_inference',
+      },
+    ])
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual([
+      '20260520_093333_3c3fc9',
+      '20260520_113325_fc6bb5',
+      '20260521_104358_93df6b',
+      '20260521_104358_93df6b',
+      '20260521_104358_93df6b',
+      '20260521_104358_93df6b',
+      '20260521_112836_60efe9',
+      '20260521_112836_60efe9',
+      '20260521_120834_978995',
+      '20260521_141328_90d2af',
+      '20260521_163829_126d61',
+      '20260521_163829_126d61',
+    ])
+    expect(detail?.messages.some((message: any) => message.role === 'tool')).toBe(true)
+  })
+
+  it('does not include an empty legacy bridge-linked child in detail edges or represented_session_ids', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: '20260521_010637_f388c9',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 120,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260521_013353_5c5063',
+      parent_session_id: '20260521_010637_f388c9',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 121,
+      ended_at: 140,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260522_201335_b99765',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 300,
+      ended_at: 320,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: '20260521_010637_f388c9', role: 'user', content: '我更新了 skill', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: '20260521_010637_f388c9', role: 'assistant', content: 'skill 已更新。', timestamp: 102 })
+    insertMessage(db, {
+      id: 3,
+      session_id: '20260521_013353_5c5063',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: skill 已更新。\n\nCurrent user message:\n继续',
+      timestamp: 121,
+    })
+    insertMessage(db, { id: 4, session_id: '20260521_013353_5c5063', role: 'assistant', content: '继续验证。', timestamp: 122 })
+    db.close()
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+    linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('20260522_201335_b99765', '20260521_010637_f388c9')
+    linksDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('20260521_010637_f388c9', { humanOnly: true })
+    expect(detail?.thread_session_count).toBe(2)
+    expect(detail?.messages.map((message: any) => message.session_id)).toEqual([
+      '20260521_010637_f388c9',
+      '20260521_010637_f388c9',
+      '20260521_013353_5c5063',
+      '20260521_013353_5c5063',
+    ])
+    expect(detail?.continuation_edges).toEqual([
+      {
+        child_session_id: '20260521_013353_5c5063',
+        parent_session_id: '20260521_010637_f388c9',
+        kind: 'native_parent',
+      },
+    ])
+
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    const summary = summaries.find((item: any) => item.id === '20260521_010637_f388c9')
+    expect(summary?.represented_session_ids).toEqual([
+      '20260521_010637_f388c9',
+      '20260521_013353_5c5063',
+    ])
+  })
+
   it('includes explicit bridge-linked continuation child ids in represented_session_ids even when the root stayed open', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')

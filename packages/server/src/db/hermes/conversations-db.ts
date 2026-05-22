@@ -709,6 +709,49 @@ function emptyCompressionPivotBridgeEvidencePath(
   return null
 }
 
+function emptyCompressionPivotNativeContinuationPath(
+  parent: ConversationSessionRow,
+  pivot: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): ConversationSessionRow[] | null {
+  if (pivot.id === parent.id || pivot.source !== parent.source || pivot.source !== 'tui') return null
+  if (pivot.parent_session_id !== parent.id) return null
+  if (!isEmptyCompressionSession(pivot)) return null
+  if (!hasConversationContent(parent)) return null
+  if (!isLikelyOrphanContinuation(parent, pivot)) return null
+
+  const path: ConversationSessionRow[] = []
+  const seen = new Set<string>()
+  let current: ConversationSessionRow | null = pivot
+
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    path.push(current)
+    const childIds: string[] = childrenByParent.get(current.id) || []
+    const children: ConversationSessionRow[] = childIds
+      .map((childId: string) => byId.get(childId))
+      .filter((child): child is ConversationSessionRow => !!child)
+      .filter((child: ConversationSessionRow) => child.source === current?.source && child.source !== 'tool')
+
+    if (children.length !== 1) return null
+    const next: ConversationSessionRow = children[0]
+    if (Number(next.started_at || 0) < Number(current.started_at || 0)) return null
+
+    if (isEmptyCompressionSession(next)) {
+      if (!isLikelyOrphanContinuation(current, next)) return null
+      current = next
+      continue
+    }
+
+    if (!hasConversationContent(next)) return null
+    if (!isLikelyOrphanContinuation(current, next)) return null
+    return [...path, next]
+  }
+
+  return null
+}
+
 function isTrustedEmptyCompressionPivotLink(
   parent: ConversationSessionRow,
   child: ConversationSessionRow,
@@ -732,6 +775,7 @@ function isTrustedEmptyCompressionPivotLink(
 
   const firstPivot = emptyAncestors[0] || child
   const path = emptyCompressionPivotBridgeEvidencePath(anchor, firstPivot, byId, childrenByParent)
+    || emptyCompressionPivotNativeContinuationPath(anchor, firstPivot, byId, childrenByParent)
   if (!path?.some(session => session.id === child.id)) return false
   if (parent.id === anchor.id) return path[0]?.id === child.id
   return path.some((session, index) => index > 0 && path[index - 1]?.id === parent.id && session.id === child.id)
@@ -954,8 +998,8 @@ function findInferredBridgeContextParent(session: ConversationSessionRow, sessio
     .filter(candidate => candidate.id !== session.id)
     .filter(candidate => candidate.source === session.source)
     .filter(candidate => candidate.source !== 'tool')
+    .filter(candidate => !isBridgePromptOnlyContinuationStub(candidate))
     .filter(candidate => Number(candidate.started_at || 0) <= sessionStarted)
-    .filter(candidate => sessionStarted - Number(candidate.last_active || candidate.started_at || 0) <= DUPLICATE_CONTINUATION_WINDOW_SECONDS)
     .filter(candidate => candidate.has_visible_messages || Number(candidate.tool_call_count || 0) > 0)
     .sort((left, right) => {
       const leftAnchor = Number(left.last_active || left.started_at || 0)
@@ -1036,6 +1080,86 @@ function isBridgePromptOnlyContinuationStub(session: ConversationSessionRow): bo
     && Number(session.tool_call_count || 0) === 0
 }
 
+function explicitBridgeLinkMatchesParent(parent: ConversationSessionRow, child: ConversationSessionRow): boolean {
+  if (!hasConversationContent(child)) return false
+  const prompt = child.raw_preview || child.preview || child.title
+  if (!isBridgeContextPrompt(prompt)) return true
+  return bridgeContextHistoryMatchesSession(parent, prompt)
+}
+
+function resolvesToBridgeBoundary(
+  session: ConversationSessionRow,
+  boundary: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  parentEvidence: Map<string, ParentEvidence>,
+): boolean {
+  const seen = new Set<string>()
+  let current: ConversationSessionRow | undefined = session
+  while (current && !seen.has(current.id)) {
+    if (current.id === boundary.id) return true
+    seen.add(current.id)
+
+    const evidence = parentEvidence.get(current.id)
+    if (evidence) {
+      current = byId.get(evidence.parentId)
+      continue
+    }
+
+    if (!current.parent_session_id) return false
+    const nativeParent = byId.get(current.parent_session_id)
+    if (!nativeParent || nativeParent.source !== current.source || nativeParent.source === 'tool') return false
+    current = nativeParent
+  }
+  return false
+}
+
+function resolveLegacyBridgeParent(
+  session: ConversationSessionRow,
+  explicitParent: ConversationSessionRow | null,
+  candidates: ConversationSessionRow[],
+  byId: Map<string, ConversationSessionRow>,
+  parentEvidence: Map<string, ParentEvidence>,
+): { parent: ConversationSessionRow | null, kind: ParentEvidenceKind | null, reason: string } {
+  const prompt = session.raw_preview || session.preview || session.title
+  const inferredParent = isBridgeContextPrompt(prompt)
+    ? findInferredBridgeContextParent(session, candidates)
+    : null
+
+  if (inferredParent) {
+    if (explicitParent && explicitParent.id === inferredParent.id && explicitBridgeLinkMatchesParent(explicitParent, session)) {
+      return { parent: explicitParent, kind: 'explicit_bridge_link', reason: 'explicit-link' }
+    }
+    if (explicitParent) {
+      if (resolvesToBridgeBoundary(inferredParent, explicitParent, byId, parentEvidence)) {
+        return {
+          parent: inferredParent,
+          kind: 'fallback_inference',
+          reason: 'inferred-within-explicit-link',
+        }
+      }
+      if (explicitBridgeLinkMatchesParent(explicitParent, session)) {
+        return { parent: explicitParent, kind: 'explicit_bridge_link', reason: 'explicit-link' }
+      }
+      return { parent: null, kind: null, reason: 'explicit-link-context-mismatch' }
+    }
+    return {
+      parent: inferredParent,
+      kind: 'fallback_inference',
+      reason: 'inferred',
+    }
+  }
+
+  if (explicitParent && explicitBridgeLinkMatchesParent(explicitParent, session)) {
+    return { parent: explicitParent, kind: 'explicit_bridge_link', reason: 'explicit-link' }
+  }
+
+  if (explicitParent) {
+    return { parent: null, kind: null, reason: 'explicit-link-context-mismatch' }
+  }
+
+  return { parent: null, kind: null, reason: 'no-bridge-parent' }
+}
+
 function shouldSuppressBridgePromptTopLevelConversation(
   session: ConversationSessionRow,
   parentEvidence: Map<string, ParentEvidence>,
@@ -1062,7 +1186,12 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFal
       return left.id.localeCompare(right.id)
     })
 
-  for (const session of sessions) {
+  const sessionsByStartedAt = [...sessions].sort((left, right) => {
+    if (left.started_at !== right.started_at) return left.started_at - right.started_at
+    return left.id.localeCompare(right.id)
+  })
+
+  for (const session of sessionsByStartedAt) {
     const explicitParentId = explicitLinks[session.id]
     if (explicitParentId) {
       const explicitParent = byId.get(explicitParentId)
@@ -1070,20 +1199,26 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFal
         logConversationDecision('skip-invalid-explicit-bridge-link', session, { explicitParentId })
         continue
       }
-      if (explicitParent && explicitParent.id !== session.id) {
-        if (
-          isBridgePromptOnlyContinuationStub(session)
-          && !bridgeContextHistoryMatchesSession(explicitParent, session.raw_preview || session.preview || session.title)
-        ) {
-          logConversationDecision('skip-explicit-bridge-link-wrapper-only-mismatch', session, {
+      const resolution = resolveLegacyBridgeParent(session, explicitParent, sortedCandidates.filter(candidate => {
+        if (candidate.id === session.id) return false
+        if (candidate.source !== session.source) return false
+        if (candidate.source === 'tool') return false
+        return Number(candidate.started_at || 0) <= Number(session.started_at || 0)
+      }), byId, map)
+      if (resolution.parent) {
+        map.set(session.id, { parentId: resolution.parent.id, kind: resolution.kind || 'explicit_bridge_link' })
+        if (resolution.reason === 'inferred-within-explicit-link') {
+          logConversationDecision('use-inferred-bridge-parent-over-explicit-link', session, {
             explicitParentId: explicitParent.id,
-            explicitParentPreview: explicitParent.preview,
+            inferredParentId: resolution.parent.id,
           })
-          continue
         }
-        map.set(session.id, { parentId: explicitParent.id, kind: 'explicit_bridge_link' })
         continue
       }
+      logConversationDecision('skip-explicit-bridge-link-context-mismatch', session, {
+        explicitParentId: explicitParent.id,
+        explicitParentPreview: explicitParent.preview,
+      })
     }
     if (session.parent_session_id != null) continue
     if (!isBridgeContextPrompt(session.raw_preview || session.preview || session.title)) continue
