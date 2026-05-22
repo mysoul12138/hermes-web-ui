@@ -1050,6 +1050,7 @@ new_0_5_14_4: 'Fix SQLite connection not released on shutdown causing database l
     backendTimeout: 'Delai de lecture du fichier depasse',
     unsupportedBackend: 'Le backend de terminal actuel ne prend pas en charge le telechargement de fichiers',
     invalidPath: 'Chemin de fichier invalide',
+    contentDisplay: 'Affichage du contenu',
     download: 'Telecharger',
     downloadFile: 'Telecharger le fichier',
   },

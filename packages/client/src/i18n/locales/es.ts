@@ -1065,6 +1065,7 @@ new_0_5_14_4: 'Fix SQLite connection not released on shutdown causing database l
     backendTimeout: 'Tiempo de lectura del archivo agotado',
     unsupportedBackend: 'El backend del terminal actual no admite la descarga de archivos',
     invalidPath: 'Ruta de archivo invalida',
+    contentDisplay: 'Contenido',
     download: 'Descargar',
     downloadFile: 'Descargar archivo',
   },

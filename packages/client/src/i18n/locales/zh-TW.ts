@@ -1080,6 +1080,7 @@ locale.sidebar = {
     backendTimeout: '檔案讀取逾時',
     unsupportedBackend: '目前 terminal backend 暫不支援檔案下載',
     invalidPath: '無效的檔案路徑',
+    contentDisplay: '內容展示',
     download: '下載',
     downloadFile: '下載檔案',
   },

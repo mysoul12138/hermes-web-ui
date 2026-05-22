@@ -1069,6 +1069,7 @@ new_0_5_14_4: 'Fix SQLite connection not released on shutdown causing database l
     backendTimeout: 'Zeituberschreitung beim Lesen der Datei',
     unsupportedBackend: 'Aktuelles Terminal-Backend unterstutzt keine Datei-Downloads',
     invalidPath: 'Ungultiger Dateipfad',
+    contentDisplay: 'Inhalt anzeigen',
     download: 'Herunterladen',
     downloadFile: 'Datei herunterladen',
   },
