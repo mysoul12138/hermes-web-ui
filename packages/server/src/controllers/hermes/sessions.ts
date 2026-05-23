@@ -194,7 +194,7 @@ async function getDbSessionDetailForRequest(
   }
   if (session.source === 'tui') {
     try {
-      const conversationDetail = await getConversationDetailFromDb(lookupSessionId, { source: 'tui', humanOnly: true })
+      const conversationDetail = await getConversationDetailFromDb(lookupSessionId, { humanOnly: true })
       if (conversationDetail && !hasPendingDeletedConversation(conversationDetail)) {
         const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
         logger.info({

@@ -357,7 +357,7 @@ describe('session conversations controller', () => {
     const ctx: any = { params: { id: 'root' }, body: null }
     await mod.get(ctx)
 
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('root', { source: 'tui', humanOnly: true })
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('root', { humanOnly: true })
     expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['root prompt', 'continued answer'])
     expect(ctx.body.session.message_count).toBe(2)
     expect(ctx.body.session.thread_session_count).toBe(2)
@@ -418,7 +418,7 @@ describe('session conversations controller', () => {
 
     expect(getSessionDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209')
     expect(getSessionDetailFromDbMock).not.toHaveBeenCalledWith('mphv3lt0mn8vlb')
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { source: 'tui', humanOnly: true })
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { humanOnly: true })
     expect(ctx.body.session).toMatchObject({
       id: '20260523_124225_b6d209',
       source: 'tui',
@@ -481,7 +481,7 @@ describe('session conversations controller', () => {
 
     expect(getSessionDetailFromDbMock).toHaveBeenNthCalledWith(1, 'mphv3lt0mn8vlb')
     expect(getSessionDetailFromDbMock).toHaveBeenNthCalledWith(2, '20260523_124225_b6d209')
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { source: 'tui', humanOnly: true })
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { humanOnly: true })
     expect(ctx.body.session.id).toBe('20260523_124225_b6d209')
     expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['real prompt', 'real answer'])
   })
@@ -530,7 +530,7 @@ describe('session conversations controller', () => {
     const ctx: any = { params: { id: 'child-continuation' }, body: null }
     await mod.get(ctx)
 
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('child-continuation', { source: 'tui', humanOnly: true })
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('child-continuation', { humanOnly: true })
     expect(ctx.body.session.title).toBe('Stable root title')
     expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['root prompt', 'continued answer'])
   })
@@ -581,7 +581,7 @@ describe('session conversations controller', () => {
     const ctx: any = { params: { id: 'dirty-root' }, body: null }
     await mod.get(ctx)
 
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('dirty-root', { source: 'tui', humanOnly: true })
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('dirty-root', { humanOnly: true })
     expect(ctx.body.session.messages.map((message: any) => message.session_id)).toEqual(['dirty-root', 'dirty-root'])
     expect(ctx.body.session.messages.map((message: any) => message.content)).not.toContain('unrelated prompt')
     expect(ctx.body.session.message_count).toBe(2)

@@ -1,4 +1,4 @@
-import { getActiveProfileDir } from '../../services/hermes/hermes-profile'
+import { getActiveProfileDir, getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { readBridgeContinuationLinks } from '../../services/hermes/bridge-continuation-links'
 import {
   listActiveExplicitConversationSessionEdges,
@@ -30,6 +30,7 @@ const LINEAGE_TOLERANCE_SECONDS = 3
 const DUPLICATE_CONTINUATION_WINDOW_SECONDS = 600
 const LIVE_WINDOW_SECONDS = 300
 const DEFAULT_CONVERSATION_LIMIT = 200
+const CANONICAL_FACTS_CACHE_TTL_MS = 1500
 const BRIDGE_CONTEXT_PROMPT_PREFIX = 'previous conversation context:'
 const BRIDGE_CURRENT_USER_MARKER = 'current user message:'
 const SYNTHETIC_USER_PREFIXES = [
@@ -136,6 +137,37 @@ interface CanonicalConversationFacts extends CanonicalGraphFacts {
   explicitSessionIds: Set<string>
 }
 
+type CanonicalFactsCacheKey = {
+  home: string
+  profile: string
+  source?: string
+  includeTool: boolean
+}
+
+type CanonicalFactsCacheEntry = {
+  expiresAtMs: number
+  key: CanonicalFactsCacheKey
+  facts?: CanonicalConversationFacts
+  promise?: Promise<CanonicalConversationFacts>
+}
+
+export interface CanonicalFactsCacheStats {
+  builds: number
+  hits: number
+  misses: number
+  coalesced: number
+  entries: number
+}
+
+let canonicalFactsNow = () => Date.now()
+let canonicalFactsStats = {
+  builds: 0,
+  hits: 0,
+  misses: 0,
+  coalesced: 0,
+}
+const canonicalFactsCache = new Map<string, CanonicalFactsCacheEntry>()
+
 interface ExplicitLineageFacts {
   threads: ConversationThreadRow[]
   edges: ConversationSessionEdgeRow[]
@@ -144,6 +176,76 @@ interface ExplicitLineageFacts {
 
 function conversationDbPath(): string {
   return `${getActiveProfileDir()}/state.db`
+}
+
+function normalizeCanonicalSource(source: string | undefined): string {
+  return source || '__all__'
+}
+
+function canonicalFactsCacheKeyValue(key: CanonicalFactsCacheKey): string {
+  return JSON.stringify({
+    home: key.home,
+    profile: key.profile,
+    source: normalizeCanonicalSource(key.source),
+    includeTool: key.includeTool,
+  })
+}
+
+function currentCanonicalFactsCacheKey(source: string | undefined, includeTool: boolean): CanonicalFactsCacheKey {
+  return {
+    home: getActiveProfileDir(),
+    profile: getActiveProfileName(),
+    source,
+    includeTool,
+  }
+}
+
+function equivalentCanonicalFactsKey(
+  candidate: CanonicalFactsCacheKey,
+  requested: CanonicalFactsCacheKey,
+): boolean {
+  return candidate.home === requested.home
+    && candidate.profile === requested.profile
+    && normalizeCanonicalSource(candidate.source) === normalizeCanonicalSource(requested.source)
+    && (candidate.includeTool === requested.includeTool || (candidate.includeTool && !requested.includeTool))
+}
+
+function findReusableCanonicalFactsCacheEntry(
+  requested: CanonicalFactsCacheKey,
+  nowMs: number,
+): CanonicalFactsCacheEntry | null {
+  let fallback: CanonicalFactsCacheEntry | null = null
+  for (const entry of canonicalFactsCache.values()) {
+    if (entry.expiresAtMs <= nowMs) continue
+    if (!equivalentCanonicalFactsKey(entry.key, requested)) continue
+    if (entry.key.includeTool === requested.includeTool) return entry
+    fallback = entry
+  }
+  return fallback
+}
+
+export function clearCanonicalConversationFactsCache() {
+  canonicalFactsCache.clear()
+}
+
+export function getCanonicalConversationFactsCacheStats(): CanonicalFactsCacheStats {
+  return {
+    ...canonicalFactsStats,
+    entries: canonicalFactsCache.size,
+  }
+}
+
+export function resetCanonicalConversationFactsCacheStats() {
+  canonicalFactsStats = {
+    builds: 0,
+    hits: 0,
+    misses: 0,
+    coalesced: 0,
+  }
+}
+
+export function setCanonicalConversationFactsCacheClock(clock: (() => number) | null) {
+  canonicalFactsNow = clock || (() => Date.now())
 }
 
 function normalizeNumber(value: unknown, fallback = 0): number {
@@ -3269,11 +3371,12 @@ async function loadRawConversationSessions(source?: string, includeTool = false)
   }
 }
 
-async function buildCanonicalConversationFacts(
+async function buildCanonicalConversationFactsUncached(
   source: string | undefined,
   includeTool: boolean,
   startedAt?: number,
 ): Promise<CanonicalConversationFacts> {
+  canonicalFactsStats.builds += 1
   const sessions = await loadConversationSessions(source, includeTool)
   if (startedAt != null) traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
 
@@ -3334,6 +3437,58 @@ async function buildCanonicalConversationFacts(
   }
 }
 
+async function buildCanonicalConversationFacts(
+  source: string | undefined,
+  includeTool: boolean,
+  startedAt?: number,
+): Promise<CanonicalConversationFacts> {
+  const nowMs = canonicalFactsNow()
+  const requestedKey = currentCanonicalFactsCacheKey(source, includeTool)
+  const reusable = findReusableCanonicalFactsCacheEntry(requestedKey, nowMs)
+  if (reusable?.facts) {
+    canonicalFactsStats.hits += 1
+    if (startedAt != null) traceAggregationTiming('canonical-facts-cache-hit', startedAt, {
+      source: source || null,
+      includeTool,
+      cachedIncludeTool: reusable.key.includeTool,
+    })
+    return reusable.facts
+  }
+  if (reusable?.promise) {
+    canonicalFactsStats.coalesced += 1
+    if (startedAt != null) traceAggregationTiming('canonical-facts-cache-coalesced', startedAt, {
+      source: source || null,
+      includeTool,
+      cachedIncludeTool: reusable.key.includeTool,
+    })
+    return reusable.promise
+  }
+
+  canonicalFactsStats.misses += 1
+  const cacheKey = canonicalFactsCacheKeyValue(requestedKey)
+  const promise = buildCanonicalConversationFactsUncached(source, includeTool, startedAt)
+  canonicalFactsCache.set(cacheKey, {
+    key: requestedKey,
+    expiresAtMs: nowMs + CANONICAL_FACTS_CACHE_TTL_MS,
+    promise,
+  })
+
+  try {
+    const facts = await promise
+    const resolvedAt = canonicalFactsNow()
+    canonicalFactsCache.set(cacheKey, {
+      key: requestedKey,
+      expiresAtMs: resolvedAt + CANONICAL_FACTS_CACHE_TTL_MS,
+      facts,
+    })
+    return facts
+  } catch (err) {
+    const current = canonicalFactsCache.get(cacheKey)
+    if (current?.promise === promise) canonicalFactsCache.delete(cacheKey)
+    throw err
+  }
+}
+
 export async function listConversationSummariesFromDb(options: ConversationListOptions = {}): Promise<ConversationSummary[]> {
   const startedAt = Date.now()
   const humanOnly = options.humanOnly !== false
@@ -3345,7 +3500,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
     return sortByRecency(sessions.map(toSummary)).slice(0, limit)
   }
 
-  const facts = await buildCanonicalConversationFacts(options.source, false, startedAt)
+  const facts = await buildCanonicalConversationFacts(options.source, true, startedAt)
   const {
     sessions,
     byId,

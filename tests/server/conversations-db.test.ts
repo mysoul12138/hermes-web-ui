@@ -4,9 +4,11 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 
 const profileDirState = vi.hoisted(() => ({ value: '' }))
+const profileNameState = vi.hoisted(() => ({ value: 'default' }))
 
 vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
   getActiveProfileDir: () => profileDirState.value,
+  getActiveProfileName: () => profileNameState.value,
 }))
 
 vi.mock('../../packages/server/src/services/hermes/tui-live', () => ({
@@ -270,11 +272,50 @@ function insertMessage(db: any, message: Record<string, unknown>) {
   })
 }
 
+function seedSimpleConversation(db: any, source = 'tui', id = `${source}-root`) {
+  insertSession(db, {
+    id,
+    parent_session_id: null,
+    source,
+    model: 'openai/gpt-5.4',
+    title: `${source} root`,
+    started_at: 100,
+    ended_at: 120,
+    end_reason: 'tui_shutdown',
+    message_count: 2,
+    tool_call_count: 0,
+    input_tokens: 1,
+    output_tokens: 2,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    billing_provider: 'openai',
+    estimated_cost_usd: 0,
+    actual_cost_usd: 0,
+    cost_status: 'estimated',
+  })
+  insertMessage(db, {
+    id: source === 'tui' ? 1 : 11,
+    session_id: id,
+    role: 'user',
+    content: `hello from ${source}`,
+    timestamp: 101,
+  })
+  insertMessage(db, {
+    id: source === 'tui' ? 2 : 12,
+    session_id: id,
+    role: 'assistant',
+    content: `reply from ${source}`,
+    timestamp: 102,
+  })
+}
+
 describe('conversation DB service', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-20T00:00:00Z'))
+    profileNameState.value = 'default'
     profileDirState.value = mkdtempSync(join(tmpdir(), 'hwui-conversations-db-'))
     process.env.HERMES_TEST_DB_DIR = join(profileDirState.value, 'webui-db')
   })
@@ -283,12 +324,124 @@ describe('conversation DB service', () => {
     vi.useRealTimers()
     delete process.env.HERMES_TEST_DB_DIR
     try {
+      const conversationsDbModule = await import('../../packages/server/src/db/hermes/conversations-db')
+      conversationsDbModule.setCanonicalConversationFactsCacheClock(null)
+      conversationsDbModule.clearCanonicalConversationFactsCache()
+      conversationsDbModule.resetCanonicalConversationFactsCacheStats()
+    } catch {
+      // Best-effort cleanup for tests that never imported the conversation DB.
+    }
+    try {
       const dbModule = await import('../../packages/server/src/db')
       dbModule.closeDb()
     } catch {
       // Best-effort cleanup for tests that never touched the WebUI DB.
     }
     if (profileDirState.value) rmSync(profileDirState.value, { recursive: true, force: true })
+  })
+
+  it('reuses canonical facts for consecutive summary and detail requests within the short TTL', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db)
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+
+    const summaries = await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    const detail = await mod.getConversationDetailFromDb(summaries[0].id, { source: 'tui', humanOnly: true })
+
+    expect(detail?.messages.map((message: any) => message.content)).toEqual([
+      'hello from tui',
+      'reply from tui',
+    ])
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 1,
+      hits: 1,
+      misses: 1,
+    })
+  })
+
+  it('coalesces in-flight canonical facts builds for concurrent summary and detail requests', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db)
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+
+    const [summaries, detail] = await Promise.all([
+      mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true }),
+      mod.getConversationDetailFromDb('tui-root', { source: 'tui', humanOnly: true }),
+    ])
+
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['tui-root'])
+    expect(detail?.thread_session_count).toBe(1)
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 1,
+      coalesced: 1,
+      misses: 1,
+    })
+  })
+
+  it('rebuilds canonical facts after the short TTL expires', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db)
+    db.close()
+
+    let now = 1_000
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+    mod.setCanonicalConversationFactsCacheClock(() => now)
+
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    now += 1_501
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    mod.setCanonicalConversationFactsCacheClock(null)
+
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 2,
+      hits: 0,
+      misses: 2,
+    })
+  })
+
+  it('keeps canonical facts cache isolated by source and profile', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db, 'tui', 'tui-root')
+    seedSimpleConversation(db, 'cli', 'cli-root')
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+
+    await mod.listConversationSummariesFromDb({ humanOnly: true })
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    await mod.listConversationSummariesFromDb({ source: 'cli', humanOnly: true })
+    profileNameState.value = 'secondary'
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 4,
+      hits: 0,
+      misses: 4,
+    })
   })
 
   it('folds parentless bridge context continuations back into the root conversation', async () => {
