@@ -233,6 +233,37 @@ describe('session DB detail', () => {
     ])
   })
 
+  it('uses sanitized user intent instead of a leading commit hash for session detail titles', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'hash-prefixed-session',
+      source: 'tui',
+      model: 'gpt-5.5',
+      started_at: 100,
+      ended_at: 120,
+      message_count: 2,
+      tool_call_count: 0,
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: 'hash-prefixed-session',
+      role: 'user',
+      content: 'c184519c5d1306f8cc5774709fe52236b60fc5ec    看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的',
+      timestamp: 101,
+    })
+    insertMessage(db, { id: 2, session_id: 'hash-prefixed-session', role: 'assistant', content: '我来分析。', timestamp: 102 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/sessions-db')
+    const detail = await mod.getSessionDetailFromDb('hash-prefixed-session')
+
+    expect(detail?.title).toBe('看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的')
+  })
+
   it('does not auto-link a parentless bridge prompt continuation when the compression parent already has an explicit continuation child', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')

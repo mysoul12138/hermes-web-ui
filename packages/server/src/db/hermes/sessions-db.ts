@@ -1,6 +1,7 @@
 import { getActiveProfileDir, getProfileDir } from '../../services/hermes/hermes-profile'
 import type { LocalUsageStats } from './usage-store'
 import { logger } from '../../services/logger'
+import { normalizeSessionTitleCandidate, selectSessionTitle } from './title-helpers'
 
 const SQLITE_AVAILABLE = (() => {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -45,6 +46,7 @@ export interface HermesSessionRow {
   actual_cost_usd: number | null
   cost_status: string
   preview: string
+  title_preview?: string
   last_active: number
 }
 
@@ -114,8 +116,8 @@ function mapRow(row: Record<string, unknown>): HermesSessionRow {
   const startedAt = normalizeNumber(row.started_at)
   const rawTitle = normalizeNullableString(row.title)
   const preview = String(row.preview || '')
-  // Fallback: when no explicit title, use first user message as title (same as CLI path)
-  const title = rawTitle || (preview ? (preview.length > 40 ? preview.slice(0, 40) + '...' : preview) : null)
+  const titlePreview = normalizeSessionTitleCandidate(row.title_preview || preview)
+  const title = selectSessionTitle(rawTitle, titlePreview, preview)
   return {
     id: String(row.id || ''),
     source: String(row.source || ''),
@@ -138,6 +140,7 @@ function mapRow(row: Record<string, unknown>): HermesSessionRow {
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
     preview: String(row.preview || ''),
+    title_preview: titlePreview || '',
     last_active: normalizeNumber(row.last_active, startedAt),
   }
 }
@@ -173,6 +176,16 @@ const SESSION_SELECT = `
     ),
     ''
   ) AS preview,
+  COALESCE(
+    (
+      SELECT REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' ')
+      FROM messages m
+      WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+      ORDER BY m.timestamp, m.id
+      LIMIT 1
+    ),
+    ''
+  ) AS title_preview,
   COALESCE((SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id), s.started_at) AS last_active
 `
 
@@ -514,7 +527,7 @@ function projectSessionSummary(root: HermesSessionInternalRow, chain: HermesSess
     ...rootRow,
     id: root.id,
     model: latest.model || root.model,
-    title: root.title || latest.title,
+    title: selectSessionTitle(root.title, latest.title, root.title_preview, latest.title_preview, root.preview, latest.preview),
     ended_at: latest.ended_at,
     end_reason: latest.end_reason,
     message_count: latest.message_count,
@@ -728,6 +741,7 @@ function aggregateSessionDetail(
   const actualCosts = chain
     .map(session => session.actual_cost_usd)
     .filter((value): value is number => value != null)
+  const firstTitlePreview = chain.map(session => session.title_preview).find(Boolean) || ''
   const firstPreview = chain.map(session => session.preview).find(Boolean) || root.preview
 
   const { parent_session_id: _parentSessionId, ...rootRow } = root
@@ -767,7 +781,7 @@ function aggregateSessionDetail(
     ...rootRow,
     id: requestedSessionId,
     source: latest.source || root.source,
-    title: root.title || latest.title || (firstPreview ? (firstPreview.length > 40 ? `${firstPreview.slice(0, 40)}...` : firstPreview) : null),
+    title: selectSessionTitle(root.title, latest.title, firstTitlePreview, firstPreview),
     preview: latest.preview || root.preview || firstPreview || '',
     model: latest.model || root.model,
     ended_at: latest.ended_at,

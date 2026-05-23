@@ -250,6 +250,46 @@ function looksLikeContinuationPrompt(text: string | null | undefined): boolean {
     || normalized.startsWith('current user message:')
 }
 
+function isLowQualitySessionTitle(text: string | null | undefined): boolean {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim().toLowerCase()
+  if (!normalized) return true
+  if (normalized === 'running tui session') return true
+  if (looksLikeContinuationPrompt(normalized)) return true
+  if (/^\d{8}_\d{6}_[0-9a-f]+$/i.test(normalized)) return true
+  if (/^[0-9a-f]{7,64}(?:\.\.\.|…)?$/i.test(normalized)) return true
+  if (/^[{[]/.test(normalized)) return true
+  return false
+}
+
+function sanitizeSessionTitleCandidate(text: string | null | undefined): string | null {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return null
+  const stripped = normalized.replace(/^(?:[0-9a-f]{7,64})(?:\s+|[:：,-]+\s+)/i, '').trim() || normalized
+  if (isLowQualitySessionTitle(stripped)) return null
+  return stripped.length > 40 ? `${stripped.slice(0, 40)}...` : stripped
+}
+
+function titleFromFirstUserMessage(messages: Message[] | null | undefined): string | null {
+  const firstUser = (messages || []).find(m => m.role === 'user' && !m.steered)
+  if (!firstUser) return null
+  const rawTitle = firstUser.attachments?.length
+    ? firstUser.attachments.map(a => a.name).join(', ')
+    : firstUser.content
+  return sanitizeSessionTitleCandidate(rawTitle)
+}
+
+function applySafeSessionTitle(session: Session | undefined | null, detailTitle: string | null | undefined, source: string, detail: Record<string, unknown> = {}, options: { replacePlaceholder?: boolean } = {}) {
+  if (!session) return
+  const safeDetailTitle = sanitizeSessionTitleCandidate(detailTitle)
+  const existingIsLowQuality = isLowQualitySessionTitle(session.title)
+  const firstUserTitle = titleFromFirstUserMessage(session.messages)
+  const nextTitle = safeDetailTitle || (existingIsLowQuality || options.replacePlaceholder ? firstUserTitle : null)
+  if (!nextTitle) return
+  if (!existingIsLowQuality && !safeDetailTitle && nextTitle === firstUserTitle) return
+  logTitleMutation(source, session.id, session.title, nextTitle, detail)
+  session.title = nextTitle
+}
+
 function looksLikeWrapperOnlyMessages(messages: Message[] | null | undefined): boolean {
   if (!Array.isArray(messages) || messages.length !== 1) return false
   const [message] = messages
@@ -397,9 +437,10 @@ export const useChatStore = defineStore('chat', () => {
   const activeSessionId = ref<string | null>(null)
   const focusMessageId = ref<string | null>(null)
   const streamStates = ref<Map<string, AbortController>>(new Map())
+  const streamRunSessions = ref<Map<string, string>>(new Map())
   const pendingRunStarts = ref<Set<string>>(new Set())
   const cancelledPendingStarts = ref<Set<string>>(new Set())
-  const isStreaming = computed(() => activeSessionId.value != null && streamStates.value.has(activeSessionId.value))
+  const isStreaming = computed(() => activeSessionId.value != null && hasActiveStreamForSession(activeSessionId.value))
   const autoPlaySpeechEnabled = ref(false)
 
   function setAutoPlaySpeech(enabled: boolean) {
@@ -527,6 +568,23 @@ export const useChatStore = defineStore('chat', () => {
     return null
   }
 
+  function hasActiveStreamForSession(sessionId: string): boolean {
+    return candidateSessionIdsForRun(sessionId).some(candidateId => streamStates.value.has(candidateId))
+  }
+
+  function activeStreamSessionIdForRun(runId: string): string | null {
+    const owner = streamRunSessions.value.get(runId)
+    if (owner && streamStates.value.has(owner)) return owner
+    for (const [sessionId] of streamStates.value) {
+      if (readInFlight(sessionId)?.runId === runId) {
+        streamRunSessions.value.set(runId, sessionId)
+        return sessionId
+      }
+    }
+    streamRunSessions.value.delete(runId)
+    return null
+  }
+
   function loadBranchSessionMetaIndex(): Record<string, BranchSessionMeta> {
     return loadJson<Record<string, BranchSessionMeta>>(branchSessionMetaKey()) || {}
   }
@@ -635,9 +693,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function branchToSession(branch: ConversationBranch, rootSessionId: string): Session {
+    const branchTitle = sanitizeSessionTitleCandidate(branch.title)
+      || sanitizeSessionTitleCandidate(branch.messages.find(message => message.content.trim())?.content)
+      || branch.session_id
     return {
       id: branch.session_id,
-      title: branch.title || branch.messages.find(message => message.content.trim())?.content.slice(0, 40) || branch.session_id,
+      title: branchTitle,
       source: branch.source === 'webui-bridge' ? 'tui' : (branch.source || undefined),
       messages: branchMessagesToMessages(branch),
       createdAt: Math.round(branch.started_at * 1000),
@@ -804,10 +865,7 @@ export const useChatStore = defineStore('chat', () => {
         if (branchId === activeSessionId.value) persistActiveMessages()
       }
       applySessionDetail(target, detail)
-      if (detail.title) {
-        logTitleMutation('branch.detail', target.id, target.title, detail.title, { rootSessionId, branchId })
-        target.title = detail.title
-      }
+      applySafeSessionTitle(target, detail.title, 'branch.detail', { rootSessionId, branchId })
     } catch {
       // Active branch hydration is best-effort; the parent run stream continues.
     }
@@ -1661,13 +1719,20 @@ export const useChatStore = defineStore('chat', () => {
 
   function resumeInFlightRun(sid: string): boolean {
     const inFlight = readInFlight(sid)
-    if (!inFlight || streamStates.value.has(sid)) return false
+    if (!inFlight || hasActiveStreamForSession(sid)) return false
     if (inFlight.runId.startsWith('bridge_run_')) {
       attachRunStream(sid, inFlight.runId)
       return true
     }
     startPolling(sid)
     return true
+  }
+
+  function mergeReplayableStreamText(existing: string, incoming: string): string {
+    if (!incoming) return existing
+    if (!existing) return incoming
+    if (incoming.startsWith(existing)) return incoming
+    return existing + incoming
   }
 
 
@@ -1711,24 +1776,18 @@ export const useChatStore = defineStore('chat', () => {
         const hasBetterToolDetails = serverHasBetterToolDetails(local, mapped)
         if (serverIsAhead) {
           target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
-          if (detail.title && !target.title) {
-            logTitleMutation('poll.detail.empty-title', target.id, target.title, detail.title, { sid })
-            target.title = detail.title
-          }
+          applySafeSessionTitle(target, detail.title, 'poll.detail.empty-title', { sid })
           if (sid === activeSessionId.value) persistActiveMessages()
         } else if (hasBetterToolDetails) {
           target.messages = mergeServerToolDetails(target.messages, mapped)
-          if (detail.title && !target.title) {
-            logTitleMutation('poll.detail.empty-title', target.id, target.title, detail.title, { sid })
-            target.title = detail.title
-          }
+          applySafeSessionTitle(target, detail.title, 'poll.detail.empty-title', { sid })
           if (sid === activeSessionId.value) persistActiveMessages()
         }
         void refreshSessionBranches(rootSessionIdFor(sid))
         syncApprovalFromMessages(sid, target.messages)
         // During a live SSE stream this poll is only a detail backfill. Do not
         // let a stable DB snapshot conclude the run before run.completed arrives.
-        if (streamStates.value.has(sid)) {
+        if (hasActiveStreamForSession(sid)) {
           pollSignatures.delete(sid)
           return
         }
@@ -1751,17 +1810,11 @@ export const useChatStore = defineStore('chat', () => {
               // retreating local state; otherwise commit the server view.
               if (serverIsAhead) {
                 target.messages = withLocalSteeredMessages(mergeServerToolDetails(mapped, target.messages), target.messages)
-                if (detail.title) {
-                  logTitleMutation('poll.detail.stable-exit', target.id, target.title, detail.title, { sid })
-                  target.title = detail.title
-                }
+                applySafeSessionTitle(target, detail.title, 'poll.detail.stable-exit', { sid }, { replacePlaceholder: true })
                 if (sid === activeSessionId.value) persistActiveMessages()
               } else if (hasBetterToolDetails) {
                 target.messages = mergeServerToolDetails(target.messages, mapped)
-                if (detail.title) {
-                  logTitleMutation('poll.detail.stable-exit', target.id, target.title, detail.title, { sid })
-                  target.title = detail.title
-                }
+                applySafeSessionTitle(target, detail.title, 'poll.detail.stable-exit', { sid }, { replacePlaceholder: true })
                 if (sid === activeSessionId.value) persistActiveMessages()
               }
               clearInFlight(sid)
@@ -2120,10 +2173,7 @@ export const useChatStore = defineStore('chat', () => {
         }
         clearClarify(sid)
       }
-      if (detail.title && !looksLikeContinuationPrompt(detail.title)) {
-        logTitleMutation('refreshActiveSession.detail', target.id, target.title, detail.title, { sid })
-        target.title = detail.title
-      }
+      applySafeSessionTitle(target, detail.title, 'refreshActiveSession.detail', { sid }, { replacePlaceholder: true })
       logActiveBinding('refreshActiveSession:end', {
         source: 'refreshActiveSession:end',
         sid,
@@ -2156,6 +2206,11 @@ export const useChatStore = defineStore('chat', () => {
 
 
   function attachRunStream(sid: string, runId: string) {
+    const existingStreamSid = activeStreamSessionIdForRun(runId)
+    if (existingStreamSid) {
+      markInFlight(sid, runId)
+      return
+    }
     clearPendingRunStart(sid)
     markInFlight(sid, runId)
     stopPolling(sid)
@@ -2175,6 +2230,9 @@ export const useChatStore = defineStore('chat', () => {
 
     const cleanup = () => {
       streamStates.value.delete(sid)
+      if (streamRunSessions.value.get(runId) === sid) {
+        streamRunSessions.value.delete(runId)
+      }
       if (persistTimer) {
         clearTimeout(persistTimer)
         persistTimer = null
@@ -2219,13 +2277,13 @@ export const useChatStore = defineStore('chat', () => {
         const update: Partial<Message> = {}
         if (delta.content) {
           const prev = message.content || ''
-          const next = prev + delta.content
+          const next = mergeReplayableStreamText(prev, delta.content)
           noteThinkingDelta(messageId, prev, next)
           if (message.reasoning) noteReasoningEnd(messageId)
           update.content = next
         }
         if (delta.reasoning) {
-          update.reasoning = (message.reasoning || '') + delta.reasoning
+          update.reasoning = mergeReplayableStreamText(message.reasoning || '', delta.reasoning)
           noteReasoningStart(messageId)
         }
         if (Object.keys(update).length > 0) updateMessage(targetSid, messageId, update)
@@ -2473,6 +2531,7 @@ export const useChatStore = defineStore('chat', () => {
     )
 
     streamStates.value.set(sid, ctrl)
+    streamRunSessions.value.set(runId, sid)
   }
 
 
@@ -2618,27 +2677,19 @@ export const useChatStore = defineStore('chat', () => {
           }
           clearClarify(sessionId)
         }
-        // Update title: use Hermes title, or fallback to first user message
-        if (detail.title && !looksLikeContinuationPrompt(detail.title)) {
+        // Update title: use a trusted Hermes title, or sanitized first user message.
+        const beforeSwitchTitle = targetSession.title
+        applySafeSessionTitle(targetSession, detail.title, 'switchSession.detail', { sessionId }, { replacePlaceholder: true })
+        if ((globalThis as any)?.__HERMES_CHAT_DEBUG__ && (beforeSwitchTitle || '') !== (targetSession.title || '')) {
           console.info('[chat.switchSession.detail]', {
             requestedSessionId: sessionId,
             detailId: detail.id,
             detailTitle: detail.title,
             activeSessionIdNow: activeSessionId.value,
             activeSessionObjIdNow: activeSession.value?.id || null,
-            beforeTitle: targetSession.title || '',
-            afterTitle: detail.title,
+            beforeTitle: beforeSwitchTitle || '',
+            afterTitle: targetSession.title || '',
           })
-          logTitleMutation('switchSession.detail', targetSession.id, targetSession.title, detail.title, { sessionId })
-          targetSession.title = detail.title
-        } else if (!targetSession.title) {
-          const firstUser = (targetSession.messages).find(m => m.role === 'user' && !m.steered)
-          if (firstUser) {
-            const t = firstUser.content.slice(0, 40)
-            const nextTitle = t + (firstUser.content.length > 40 ? '...' : '')
-            logTitleMutation('switchSession.fallback-first-user', targetSession.id, targetSession.title, nextTitle, { sessionId })
-            targetSession.title = nextTitle
-          }
         }
         applySessionDetail(targetSession, detail)
         logActiveBinding('switchSession:after-detail', {
@@ -2664,7 +2715,7 @@ export const useChatStore = defineStore('chat', () => {
     // not currently streaming, start polling fetchSession to pick up progress
     // that happened while we were gone. Exits automatically on stability.
     if (switchRequestId !== latestSwitchRequestId || activeSessionId.value !== sessionId || activeSession.value?.id !== sessionId) return
-    if (readInFlight(sessionId) && !streamStates.value.has(sessionId)) {
+    if (readInFlight(sessionId) && !hasActiveStreamForSession(sessionId)) {
       // If the server already shows this session as ended, the in-flight
       // record is stale — clear it and skip resume to avoid blocking the UI.
       if (activeSession.value?.endedAt != null) {
@@ -2766,15 +2817,7 @@ export const useChatStore = defineStore('chat', () => {
     const target = sessions.value.find(s => s.id === sessionId)
     if (!target) return
     if (!target.title) {
-      const firstUser = target.messages.find(m => m.role === 'user' && !m.steered)
-      if (firstUser) {
-        const title = firstUser.attachments?.length
-          ? firstUser.attachments.map(a => a.name).join(', ')
-          : firstUser.content
-        const nextTitle = title.slice(0, 40) + (title.length > 40 ? '...' : '')
-        logTitleMutation('updateSessionTitle', target.id, target.title, nextTitle, { sessionId })
-        target.title = nextTitle
-      }
+      applySafeSessionTitle(target, null, 'updateSessionTitle', { sessionId }, { replacePlaceholder: true })
     }
     target.updatedAt = Date.now()
   }

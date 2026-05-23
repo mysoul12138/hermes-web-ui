@@ -21,6 +21,19 @@ import { scrubBuggyReasoning } from '@/custom/utils/display-helpers'
 
 const STEER_TIMESTAMP_MATCH_WINDOW_MS = 5000
 
+function normalizeSessionTitleCandidate(value: string | null | undefined): string | null {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return null
+  const stripped = normalized.replace(/^(?:[0-9a-f]{7,64})(?:\s+|[:：,-]+\s+)/i, '').trim() || normalized
+  const lower = stripped.toLowerCase()
+  if (lower === 'running tui session') return null
+  if (lower.startsWith('previous conversation context:') || lower.startsWith('current user message:')) return null
+  if (/^\d{8}_\d{6}_[0-9a-f]+$/i.test(stripped)) return null
+  if (/^[0-9a-f]{7,64}(?:\.\.\.|…)?$/i.test(stripped)) return null
+  if (/^[{[]/.test(stripped)) return null
+  return stripped.length > 40 ? `${stripped.slice(0, 40)}...` : stripped
+}
+
 export function isPersistentTuiSessionId(sessionId: string): boolean {
   return /^\d{8}_\d{6}_[0-9a-f]+$/i.test(sessionId)
 }
@@ -206,7 +219,7 @@ export function mapHermesSession(s: SessionSummary | ConversationSummary): Sessi
     : [s.id]
   return {
     id: s.id,
-    title: s.title || s.preview || s.id,
+    title: normalizeSessionTitleCandidate(s.title) || normalizeSessionTitleCandidate(s.preview) || s.id,
     source: s.source === 'webui-bridge' ? 'tui' : (s.source || undefined),
     messages: [],
     createdAt: Math.round(s.started_at * 1000),

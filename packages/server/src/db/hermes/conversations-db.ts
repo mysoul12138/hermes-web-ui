@@ -21,6 +21,7 @@ import type {
 import { logger } from '../../services/logger'
 import { listLiveTuiSessionKeys } from '../../services/hermes/tui-live'
 import { getDb } from '../index'
+import { normalizeSessionTitleCandidate, selectSessionTitle } from './title-helpers'
 
 const SQLITE_AVAILABLE = (() => {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -97,9 +98,11 @@ interface ConversationSessionRow {
   actual_cost_usd: number | null
   cost_status: string
   raw_preview: string
+  raw_title_preview: string
   raw_context_anchor: string
   raw_visible_history: string
   preview: string
+  title_preview: string
   last_active: number
   has_visible_messages: boolean
   is_active: boolean
@@ -376,11 +379,13 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
   const startedAt = normalizeNumber(row.started_at)
   const endedAt = normalizeNullableNumber(row.ended_at)
   const rawPreview = safeText(row.raw_preview || row.preview || '')
+  const rawTitlePreview = safeText(row.raw_title_preview || rawPreview)
   const rawContextAnchor = safeText(row.raw_context_anchor || '')
   const rawVisibleHistory = safeText(row.raw_visible_history || '')
   const preview = excerpt(bridgeContextDisplayText(rawPreview) || rawPreview)
+  const titlePreview = normalizeSessionTitleCandidate(bridgeContextDisplayText(rawTitlePreview) || rawTitlePreview) || ''
   const rawTitle = normalizeNullableString(row.title)
-  const title = rawTitle || (preview ? (preview.length > 40 ? `${preview.slice(0, 40)}...` : preview) : null)
+  const title = selectSessionTitle(rawTitle, titlePreview, preview)
   const lastActive = normalizeNumber(row.last_active, startedAt)
   const isLiveTuiProcess = source === 'tui' && liveTuiSessionKeys.has(id)
 
@@ -407,9 +412,11 @@ function mapSessionRow(row: Record<string, unknown>, nowSeconds: number, liveTui
     actual_cost_usd: normalizeNullableNumber(row.actual_cost_usd),
     cost_status: String(row.cost_status || ''),
     raw_preview: rawPreview,
+    raw_title_preview: rawTitlePreview,
     raw_context_anchor: rawContextAnchor,
     raw_visible_history: rawVisibleHistory,
     preview: preview || (isLiveTuiProcess ? 'Running TUI session' : ''),
+    title_preview: titlePreview,
     last_active: lastActive,
     has_visible_messages: !!normalizeNumber(row.has_visible_messages) || isLiveTuiProcess,
     is_active: isLiveTuiProcess || (endedAt == null && nowSeconds - lastActive <= LIVE_WINDOW_SECONDS),
@@ -441,9 +448,11 @@ function createLiveTuiPlaceholderSession(id: string, nowSeconds: number): Conver
     actual_cost_usd: null,
     cost_status: '',
     raw_preview: 'Running TUI session',
+    raw_title_preview: '',
     raw_context_anchor: 'Running TUI session',
     raw_visible_history: 'Running TUI session',
     preview: 'Running TUI session',
+    title_preview: '',
     last_active: nowSeconds,
     has_visible_messages: true,
     is_active: true,
@@ -2155,6 +2164,7 @@ function aggregateSummary(
   const root = summaryChain[0]
   const visibleHead = requestedRoot || root
   const last = summaryChain[summaryChain.length - 1]
+  const firstTitlePreview = summaryChain.map(session => session.title_preview).find(Boolean) || ''
   const firstPreview = summaryChain.map(session => session.preview).find(Boolean) || ''
   const costStatuses = Array.from(new Set(summaryChain.map(session => safeText(session.cost_status)).filter(Boolean)))
   const normalizedBranchSessionCount = requestedRoot && isBridgeContextBranchContinuationChild(requestedRoot, byId)
@@ -2175,7 +2185,7 @@ function aggregateSummary(
 
   return {
     ...toSummary(visibleHead),
-    title: root.title || last.title || firstPreview || null,
+    title: selectSessionTitle(root.title, last.title, firstTitlePreview, firstPreview),
     preview: last.preview || visibleHead.preview || root.preview || firstPreview,
     started_at: Number(visibleHead.started_at || 0),
     ended_at: last?.ended_at ?? null,
@@ -2207,8 +2217,9 @@ function conversationTitleForChain(chain: ConversationSessionRow[]): string | nu
   if (!chain.length) return null
   const root = chain[0]
   const last = chain[chain.length - 1]
+  const firstTitlePreview = chain.map(session => session.title_preview).find(Boolean) || ''
   const firstPreview = chain.map(session => session.preview).find(Boolean) || ''
-  return root.title || last.title || firstPreview || null
+  return selectSessionTitle(root.title, last.title, firstTitlePreview, firstPreview)
 }
 
 function normalizeDetailMessage(row: Record<string, unknown>, fallbackTimestamp: number): ConversationMessage | null {
@@ -3312,6 +3323,22 @@ function buildConversationSessionSql(source?: string, includeTool = false): { sq
         ),
         ''
       ) AS raw_preview,
+      COALESCE(
+        (
+          SELECT REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' ')
+          FROM messages m
+          WHERE m.session_id = s.id
+            AND m.role = 'user'
+            AND m.content IS NOT NULL
+            AND m.content != ''
+            AND LOWER(m.content) NOT LIKE '[system:%'
+            AND LOWER(m.content) NOT LIKE 'you''ve reached the maximum number of tool-calling iterations allowed.%'
+            AND LOWER(m.content) NOT LIKE 'you have reached the maximum number of tool-calling iterations allowed.%'
+          ORDER BY m.timestamp, m.id
+          LIMIT 1
+        ),
+        ''
+      ) AS raw_title_preview,
       COALESCE(
         (
           SELECT REPLACE(REPLACE(m.content, CHAR(10), ' '), CHAR(13), ' ')

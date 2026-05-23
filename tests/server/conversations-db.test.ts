@@ -366,6 +366,100 @@ describe('conversation DB service', () => {
     })
   })
 
+  it('uses sanitized user intent instead of a leading commit hash for generated titles', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    insertSession(db, {
+      id: 'hash-prefixed-title',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 120,
+      end_reason: null,
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: 'hash-prefixed-title',
+      role: 'user',
+      content: 'c184519c5d1306f8cc5774709fe52236b60fc5ec    看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的',
+      timestamp: 101,
+    })
+    insertMessage(db, { id: 2, session_id: 'hash-prefixed-title', role: 'assistant', content: '我来分析。', timestamp: 102 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'hash-prefixed-title',
+      role: 'tool',
+      content: '{"output":"c184519c5d1306f8cc5774709fe52236b60fc5ec"}',
+      tool_call_id: 'call-1',
+      tool_name: 'terminal',
+      timestamp: 103,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    const detail = await mod.getConversationDetailFromDb('hash-prefixed-title', { source: 'tui', humanOnly: true })
+
+    expect(summaries[0]?.title).toBe('看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的')
+    expect(detail?.title).toBe('看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的')
+  })
+
+  it('does not derive a conversation title from assistant-only hash-like output', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    insertSession(db, {
+      id: 'assistant-hash-only',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 200,
+      ended_at: 220,
+      end_reason: null,
+      message_count: 1,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertMessage(db, {
+      id: 1,
+      session_id: 'assistant-hash-only',
+      role: 'assistant',
+      content: 'c184519c5d1306f8cc5774709fe52236b60fc5ec',
+      timestamp: 201,
+    })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const detail = await mod.getConversationDetailFromDb('assistant-hash-only', { source: 'tui', humanOnly: true })
+
+    expect(detail?.title).toBeNull()
+  })
+
   it('coalesces in-flight canonical facts builds for concurrent summary and detail requests', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')

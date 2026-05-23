@@ -626,6 +626,7 @@ describe('Chat Store', () => {
     await store.switchSession(persistentSessionId)
     await flushPromises()
 
+    expect(mockChatApi.streamRunEvents).toHaveBeenCalledTimes(1)
     expect(window.localStorage.getItem(bridgePersistentSessionKey(capturedWebSessionId))).toBe(persistentSessionId)
     expect(store.activeSessionId).toBe(persistentSessionId)
     expect(store.isRunActive).toBe(true)
@@ -2342,6 +2343,29 @@ describe('Chat Store', () => {
     expect(store.messages.find(message => message.role === 'assistant')?.reasoning).toBe('ABC')
   })
 
+  it('does not append a replayed full assistant prefix into the same bubble twice', async () => {
+    vi.useFakeTimers()
+    let onEvent: ((event: Record<string, any>) => void) | null = null
+    mockChatApi.streamRunEvents.mockImplementation((
+      _runId: string,
+      eventHandler: (event: Record<string, any>) => void,
+    ) => {
+      onEvent = eventHandler
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('debug duplicate stream')
+    await flushPromises()
+
+    onEvent?.({ event: 'message.delta', delta: 'Same answer text.' })
+    await vi.advanceTimersByTimeAsync(120)
+    onEvent?.({ event: 'message.delta', delta: 'Same answer text. Continued.' })
+    await vi.advanceTimersByTimeAsync(120)
+
+    expect(store.messages.find(message => message.role === 'assistant')?.content).toBe('Same answer text. Continued.')
+  })
+
   it('hydrates from default-profile legacy cache and migrates bulky storage to new keys only', async () => {
     const cachedSession = {
       id: 'legacy-1',
@@ -2833,6 +2857,37 @@ describe('Chat Store', () => {
 
     expect(store.activeSessionId).toBe(sid)
     expect(store.activeSession?.title).toBe('diff 里我又看到一个很小的 Windows path normalizati...')
+  })
+
+  it('does not let a hash-like detail title overwrite a running placeholder when user intent is available', async () => {
+    const sid = '20260523_212739_43fd93'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, sid)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([
+      { id: sid, title: 'Running TUI session', source: 'tui', messages: [], createdAt: 1, updatedAt: 1 },
+    ]))
+
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([
+      { ...makeSummary(sid, 'Running TUI session'), source: 'tui' },
+    ])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      ...makeDetail(sid, [
+        {
+          id: 'u1',
+          session_id: sid,
+          role: 'user',
+          content: 'c184519c5d1306f8cc5774709fe52236b60fc5ec    看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的',
+          timestamp: 1,
+        },
+        { id: 'a1', session_id: sid, role: 'assistant', content: '我来分析。', timestamp: 2 },
+      ]),
+      title: 'c184519c5d1306f8cc5774709fe52236b60fc5ec...',
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.activeSessionId).toBe(sid)
+    expect(store.activeSession?.title).toBe('看看上游 从这个提交开始 包括这个提交 有没有值得cherry-pick的')
   })
 
   it('does not replay steer history from a slower previous session into the newly active session', async () => {

@@ -30,9 +30,28 @@ function normalizeComparableText(text: string): string {
 }
 
 function looksAnswerPreview(reasoning: string, content: string): boolean {
-  if (!content.startsWith(reasoning)) return false
   if (reasoning.length < 24 || content.length < 40) return false
   if (reasoning.length > 520) return false
-  if (reasoning.length / content.length < 0.35) return false
-  return true
+  const ratio = reasoning.length / content.length
+  if (content.startsWith(reasoning)) return ratio >= 0.35
+  if (ratio < 0.45 || ratio > 1.35) return false
+  return commonSubsequenceRatio(reasoning, content) >= 0.72
+}
+
+function commonSubsequenceRatio(a: string, b: string): number {
+  const left = [...a]
+  const right = [...b]
+  if (left.length === 0 || right.length === 0) return 0
+  const previous = new Array(right.length + 1).fill(0)
+  const current = new Array(right.length + 1).fill(0)
+  for (let i = 1; i <= left.length; i += 1) {
+    current.fill(0)
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = left[i - 1] === right[j - 1]
+        ? previous[j - 1] + 1
+        : Math.max(previous[j], current[j - 1])
+    }
+    for (let j = 0; j <= right.length; j += 1) previous[j] = current[j]
+  }
+  return previous[right.length] / Math.min(left.length, right.length)
 }
