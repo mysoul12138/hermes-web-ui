@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { getDb, isSqliteAvailable } from '../index'
+import { invalidateCanonicalConversationFactsCache } from './canonical-facts-cache-invalidation'
 import {
   CONVERSATION_DISPLAY_RULES_SCHEMA,
   CONVERSATION_DISPLAY_RULES_TABLE,
@@ -285,7 +286,9 @@ export function upsertConversationThread(
     updatedAt,
     input.schema_version ?? 1,
   )
-  return getConversationThread(db, input.conversation_id)!
+  const thread = getConversationThread(db, input.conversation_id)!
+  invalidateCanonicalConversationFactsCache()
+  return thread
 }
 
 export function getConversationThread(
@@ -357,7 +360,9 @@ export function upsertConversationSessionEdge(
       createdAt,
       input.superseded_at ?? null,
     )
-    return getConversationSessionEdge(db, input.edge_id)!
+    const inserted = getConversationSessionEdge(db, input.edge_id)!
+    invalidateCanonicalConversationFactsCache()
+    return inserted
   }
 
   db.prepare(`
@@ -375,7 +380,9 @@ export function upsertConversationSessionEdge(
     input.superseded_at ?? null,
     existing.edge_id,
   )
-  return getConversationSessionEdge(db, existing.edge_id)!
+  const updated = getConversationSessionEdge(db, existing.edge_id)!
+  invalidateCanonicalConversationFactsCache()
+  return updated
 }
 
 export function getConversationSessionEdge(
@@ -443,7 +450,9 @@ export function supersedeConversationSessionEdge(
     SET superseded_at = ?
     WHERE edge_id = ?
   `).run(supersededAt, edgeId)
-  return getConversationSessionEdge(db, edgeId)
+  const updated = getConversationSessionEdge(db, edgeId)
+  invalidateCanonicalConversationFactsCache()
+  return updated
 }
 
 export function appendConversationUiEvent(
@@ -479,7 +488,9 @@ export function appendConversationUiEvent(
     createdAt,
     input.superseded_at ?? null,
   )
-  return getConversationUiEvent(db, input.event_id)!
+  const inserted = getConversationUiEvent(db, input.event_id)!
+  invalidateCanonicalConversationFactsCache()
+  return inserted
 }
 
 export function getConversationUiEvent(
@@ -579,7 +590,9 @@ export function upsertConversationDisplayRule(
     normalizeEnabled(input.enabled),
     createdAt,
   )
-  return getConversationDisplayRule(db, input.rule_id)!
+  const rule = getConversationDisplayRule(db, input.rule_id)!
+  invalidateCanonicalConversationFactsCache()
+  return rule
 }
 
 export function getConversationDisplayRule(

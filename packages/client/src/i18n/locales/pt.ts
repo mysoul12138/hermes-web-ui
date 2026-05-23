@@ -118,6 +118,7 @@ export default {
     contextEditSuccess: 'Tamanho do contexto atualizado',
     contextEditFailed: 'Falha na atualização',
     emptyState: 'Inicie uma conversa com o Hermes Agent',
+    updatingSessionContent: 'Atualizando conteudo da sessao',
     inputPlaceholder: 'Digite uma mensagem... (Enter para enviar, Shift+Enter para nova linha)',
     attachFiles: 'Anexar arquivos',
     messageQueue: 'Fila de mensagens',

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { getActiveProfileDir } from './hermes-profile'
+import { invalidateCanonicalConversationFactsCache } from '../../db/hermes/canonical-facts-cache-invalidation'
 
 const DB_FILE = 'webui-bridge-links.db'
 const TABLE = 'bridge_continuation_links'
@@ -63,6 +64,7 @@ export function writeBridgeContinuationLink(childSessionId: string, parentSessio
       VALUES (?, ?)
       ON CONFLICT(child_session_id) DO UPDATE SET parent_session_id = excluded.parent_session_id
     `).run(child, parent)
+    invalidateCanonicalConversationFactsCache()
   } finally {
     db.close()
   }

@@ -1,5 +1,6 @@
 import { getDb, isSqliteAvailable } from '../index'
 import { SESSION_LINEAGE_SCHEMA, SESSION_LINEAGE_TABLE } from './schemas'
+import { invalidateCanonicalConversationFactsCache } from './canonical-facts-cache-invalidation'
 
 export type SessionLineageAuthority = 'explicit' | 'inferred' | 'repaired'
 export type SessionLineageRelation = 'root' | 'continuation' | 'branch' | 'wrapper'
@@ -244,6 +245,7 @@ export function upsertSessionLineage(
       row.created_at ?? now,
       now,
     )
+    invalidateCanonicalConversationFactsCache()
   } catch {
     // Best-effort only.
   }

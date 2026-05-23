@@ -34,6 +34,7 @@ vi.mock('@/api/hermes/clarify', () => mockClarifyApi)
 import { useChatStore } from '@/stores/hermes/chat'
 
 const PROFILE = 'default'
+const CACHE_SCHEMA_VERSION_KEY = `hermes_session_cache_schema_v_${PROFILE}`
 
 async function flush() {
   for (let i = 0; i < 4; i += 1) await Promise.resolve()
@@ -60,6 +61,7 @@ describe('chat store — reasoning.available should not clobber content', () => 
     setActivePinia(createPinia())
     vi.clearAllMocks()
     window.localStorage.clear()
+    window.localStorage.setItem(CACHE_SCHEMA_VERSION_KEY, '2')
     mockSessionsApi.fetchSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
     mockSessionsApi.fetchSessionUsageSingle?.mockResolvedValue?.(null)
@@ -181,8 +183,8 @@ describe('chat store — reasoning.available should not clobber content', () => 
         {
           id: 'a',
           role: 'assistant',
-          content: 'The capital of France is Paris. It sits on the Seine.',
-          reasoning: 'The capital of France is Paris.', // prefix of content — buggy
+          content: 'The capital of France is Paris. It sits on the Seine, and it has been a major European cultural center for centuries.',
+          reasoning: 'The capital of France is Paris. It sits on the Seine.', // answer-preview prefix — buggy
           timestamp: 2,
         },
         {
@@ -203,6 +205,52 @@ describe('chat store — reasoning.available should not clobber content', () => 
     const b = hydrated.find(m => m.id === 'b')!
     expect(a.reasoning).toBeUndefined()
     expect(b.reasoning).toBe('Real thinking that happens before the answer.')
+  })
+
+  it('keeps real reasoning that is longer than content and only overlaps a final answer phrase', async () => {
+    const sid = 'sess-real-overlap'
+    window.localStorage.setItem(`hermes_active_session_${PROFILE}`, sid)
+    window.localStorage.setItem(
+      `hermes_sessions_cache_v1_${PROFILE}`,
+      JSON.stringify([
+        {
+          id: sid,
+          title: 'Real overlap',
+          source: 'api_server',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]),
+    )
+    const cjkReasoning = '我需要先判断用户是不是只问法国首都，再确认没有要求解释历史。最终答案短句是巴黎，但这只是推理摘要里的锚点，不是正文复制。'
+    const englishReasoning = 'I should verify the question is asking for the capital only, then answer directly. The final phrase is Paris, but this is reasoning context rather than a copied answer.'
+    window.localStorage.setItem(
+      `hermes_session_msgs_v1_${PROFILE}_${sid}_`,
+      JSON.stringify([
+        { id: 'u', role: 'user', content: 'ask', timestamp: 1 },
+        {
+          id: 'cjk',
+          role: 'assistant',
+          content: '答案是巴黎。',
+          reasoning: cjkReasoning,
+          timestamp: 2,
+        },
+        {
+          id: 'en',
+          role: 'assistant',
+          content: 'The answer is Paris.',
+          reasoning: englishReasoning,
+          timestamp: 3,
+        },
+      ]),
+    )
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.messages.find(m => m.id === 'cjk')?.reasoning).toBe(cjkReasoning)
+    expect(store.messages.find(m => m.id === 'en')?.reasoning).toBe(englishReasoning)
   })
 
   it('drops clobbered reasoning from fetched session history', async () => {

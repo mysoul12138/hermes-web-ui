@@ -1,6 +1,6 @@
 import * as hermesCli from '../../services/hermes/hermes-cli'
 import { listConversationSummaries, getConversationDetail } from '../../services/hermes/conversations'
-import { listConversationSummariesFromDb, getConversationDetailFromDb } from '../../db/hermes/conversations-db'
+import { listConversationSummariesFromDb, searchConversationSummariesFromDb, getConversationDetailFromDb } from '../../db/hermes/conversations-db'
 import { getSessionDetailFromDb, listSessionSummaries, searchSessionSummaries, getUsageStatsFromDb, type HermesSessionDetailRow } from '../../db/hermes/sessions-db'
 import { listSessionLineage, resolveCanonicalSessionId } from '../../db/hermes/session-lineage'
 import {
@@ -417,58 +417,14 @@ export async function search(ctx: any) {
     const effectiveLimit = limit && limit > 0 ? limit : 20
     const localResults = localSearchSessions(profile, q, effectiveLimit)
       .filter(session => session.source !== 'tui')
-    let tuiResults: Array<Awaited<ReturnType<typeof listSessionSummaries>>[number] & { matched_message_id: null, snippet: string, rank: number }> = []
+    let tuiResults: Awaited<ReturnType<typeof searchConversationSummariesFromDb>> = []
     if (!source || source === 'tui') {
       try {
-        const lowered = q.trim().toLowerCase()
-        const tuiSessions = await listSessionSummaries('tui', 2000)
-        const conversationSummaries = await listConversationSummariesFromDb({ source: 'tui', humanOnly: true, limit: 2000 })
-        // TODO(session-aggregation): move TUI search onto the canonical conversation
-        // graph/fact generator directly. Today search hydrates raw matches through
-        // canonical summaries, so summary/detail are unified but search is not yet
-        // a first-class graph consumer.
-        const representedToRoot = new Map<string, typeof conversationSummaries[number]>()
-        for (const summary of conversationSummaries) {
-          const represented = summary.represented_session_ids?.length ? summary.represented_session_ids : [summary.id]
-          for (const representedId of represented) representedToRoot.set(representedId, summary)
-        }
-        tuiResults = tuiSessions
-          .filter(session => {
-            if (!lowered) return true
-            const title = (session.title || '').toLowerCase()
-            const preview = (session.preview || '').toLowerCase()
-            return title.includes(lowered) || preview.includes(lowered)
-          })
-          .map(session => {
-            const root = representedToRoot.get(session.id)
-            return {
-              ...session,
-              id: root?.id || session.id,
-              source: root?.source || session.source,
-              model: root?.model || session.model,
-              title: root?.title || session.title,
-              preview: root?.preview || session.preview,
-              started_at: root?.started_at || session.started_at,
-              ended_at: root?.ended_at ?? session.ended_at,
-              last_active: root?.last_active || session.last_active,
-              message_count: root?.message_count || session.message_count,
-              tool_call_count: root?.tool_call_count || session.tool_call_count,
-              input_tokens: root?.input_tokens || session.input_tokens,
-              output_tokens: root?.output_tokens || session.output_tokens,
-              cache_read_tokens: root?.cache_read_tokens || session.cache_read_tokens,
-              cache_write_tokens: root?.cache_write_tokens || session.cache_write_tokens,
-              reasoning_tokens: root?.reasoning_tokens || session.reasoning_tokens,
-              billing_provider: root?.billing_provider ?? session.billing_provider,
-              billing_base_url: root?.billing_base_url ?? session.billing_base_url,
-              estimated_cost_usd: root?.estimated_cost_usd || session.estimated_cost_usd,
-              actual_cost_usd: root?.actual_cost_usd ?? session.actual_cost_usd,
-              cost_status: root?.cost_status || session.cost_status,
-              matched_message_id: null,
-              snippet: root?.preview || session.preview || '',
-              rank: 0,
-            }
-          })
-          .slice(0, effectiveLimit)
+        tuiResults = await searchConversationSummariesFromDb(q, {
+          source: 'tui',
+          humanOnly: true,
+          limit: effectiveLimit,
+        })
         tuiResults = dedupeTuiSessionsByLineage(tuiResults as any) as typeof tuiResults
         logger.info({
           route: 'search',

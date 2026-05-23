@@ -74,6 +74,7 @@ locale.sidebar = {
     contextEditSuccess: '上下文長度已更新',
     contextEditFailed: '更新失敗',
     emptyState: '開始與 Hermes Agent 對話',
+    updatingSessionContent: '正在更新工作階段內容',
     inputPlaceholder: '輸入訊息... (Enter 發送，Shift+Enter 換行)',
     slashCommandArgs: {
       message: '<訊息>',

@@ -9,6 +9,7 @@ import {
   type ConversationUiEventRow,
 } from './conversation-lineage'
 import { listSessionLineage, type SessionLineageRow } from './session-lineage'
+import { registerCanonicalConversationFactsInvalidator } from './canonical-facts-cache-invalidation'
 import type {
   ConversationBranch,
   ConversationContinuationEdge,
@@ -159,6 +160,12 @@ export interface CanonicalFactsCacheStats {
   entries: number
 }
 
+export interface ConversationSearchResult extends ConversationSummary {
+  matched_message_id: number | null
+  snippet: string
+  rank: number
+}
+
 let canonicalFactsNow = () => Date.now()
 let canonicalFactsStats = {
   builds: 0,
@@ -167,6 +174,7 @@ let canonicalFactsStats = {
   coalesced: 0,
 }
 const canonicalFactsCache = new Map<string, CanonicalFactsCacheEntry>()
+registerCanonicalConversationFactsInvalidator(clearCanonicalConversationFactsCache)
 
 interface ExplicitLineageFacts {
   threads: ConversationThreadRow[]
@@ -449,6 +457,38 @@ function sortByRecency<T extends { last_active: number; started_at: number; id: 
     if (b.started_at !== a.started_at) return b.started_at - a.started_at
     return a.id.localeCompare(b.id)
   })
+}
+
+function canonicalSearchRank(session: ConversationSessionRow, query: string): number | null {
+  const lowered = query.trim().toLowerCase()
+  if (!lowered) return 0
+  if ((session.title || '').toLowerCase().includes(lowered)) return 0
+  if ((session.preview || '').toLowerCase().includes(lowered)) return 1
+  if ((session.raw_visible_history || '').toLowerCase().includes(lowered)) return 2
+  if ((session.raw_context_anchor || '').toLowerCase().includes(lowered)) return 3
+  return null
+}
+
+function canonicalSearchSnippet(session: ConversationSessionRow, query: string): string {
+  const trimmed = query.trim()
+  if (!trimmed) return session.preview || ''
+  const lowered = trimmed.toLowerCase()
+  for (const value of [session.title, session.preview, session.raw_visible_history, session.raw_context_anchor]) {
+    const text = safeText(value)
+    if (!text) continue
+    const matchIndex = text.toLowerCase().indexOf(lowered)
+    if (matchIndex < 0) continue
+    const start = Math.max(0, matchIndex - 40)
+    return text.slice(start, start + 120)
+  }
+  return session.preview || ''
+}
+
+function compareConversationSearchResults(left: ConversationSearchResult, right: ConversationSearchResult): number {
+  if (left.rank !== right.rank) return left.rank - right.rank
+  if (right.last_active !== left.last_active) return right.last_active - left.last_active
+  if (right.started_at !== left.started_at) return right.started_at - left.started_at
+  return left.id.localeCompare(right.id)
 }
 
 function timingMatchesParent(parent: ConversationSessionRow | undefined, child: ConversationSessionRow | undefined): boolean {
@@ -3547,6 +3587,81 @@ export async function listConversationSummariesFromDb(options: ConversationListO
   } finally {
     db.close()
   }
+}
+
+export async function searchConversationSummariesFromDb(
+  query: string,
+  options: ConversationListOptions = {},
+): Promise<ConversationSearchResult[]> {
+  const humanOnly = options.humanOnly !== false
+  const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_CONVERSATION_LIMIT
+  const trimmed = query.trim()
+
+  if (!humanOnly) {
+    const summaries = await listConversationSummariesFromDb({ ...options, humanOnly: false, limit })
+    return summaries.map(summary => ({
+      ...summary,
+      matched_message_id: null,
+      snippet: summary.preview || '',
+      rank: trimmed ? 1 : 0,
+    }))
+  }
+
+  const facts = await buildCanonicalConversationFacts(options.source, true)
+  const summaries = await listConversationSummariesFromDb({
+    ...options,
+    humanOnly: true,
+    limit: Math.max(limit * 4, DEFAULT_CONVERSATION_LIMIT),
+  })
+  if (!trimmed) {
+    return summaries.slice(0, limit).map(summary => ({
+      ...summary,
+      matched_message_id: null,
+      snippet: summary.preview || '',
+      rank: 0,
+    }))
+  }
+
+  const bySummaryId = new Map(summaries.map(summary => [summary.id, summary]))
+  const rootMemo = new Map<string, string | null>()
+  const bestMatches = new Map<string, { rank: number, snippet: string, lastActive: number }>()
+
+  for (const session of facts.sessions) {
+    if (session.source === 'tool' || isSubagentSession(session)) continue
+    const rank = canonicalSearchRank(session, trimmed)
+    if (rank == null) continue
+
+    const graph = explicitGraphForSession(session.id, facts.explicitGraphs)
+    const summaryId = graph
+      ? graph.rootSessionId
+      : rootConversationIdForSession(session.id, facts.byId, facts.parentEvidence, facts.childrenByParent, rootMemo)
+    if (!summaryId || !bySummaryId.has(summaryId)) continue
+
+    const previous = bestMatches.get(summaryId)
+    if (
+      previous
+      && (previous.rank < rank || (previous.rank === rank && previous.lastActive >= session.last_active))
+    ) continue
+
+    bestMatches.set(summaryId, {
+      rank,
+      snippet: canonicalSearchSnippet(session, trimmed),
+      lastActive: session.last_active,
+    })
+  }
+
+  return [...bestMatches.entries()]
+    .map(([summaryId, match]) => {
+      const summary = bySummaryId.get(summaryId)!
+      return {
+        ...summary,
+        matched_message_id: null,
+        snippet: match.snippet || summary.preview || '',
+        rank: match.rank,
+      }
+    })
+    .sort(compareConversationSearchResults)
+    .slice(0, limit)
 }
 
 export async function getConversationDetailFromDb(sessionId: string, options: ConversationListOptions = {}): Promise<ConversationDetail | null> {

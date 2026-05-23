@@ -131,6 +131,7 @@ export default {
     contextEditSuccess: 'Context length updated',
     contextEditFailed: 'Update failed',
     emptyState: 'Start a conversation with Hermes Agent',
+    updatingSessionContent: 'Updating session content',
     inputPlaceholder: 'Type a message... (Enter to send, Shift+Enter for new line)',
     attachFiles: 'Attach files',
     autoPlaySpeech: 'Auto-play voice',

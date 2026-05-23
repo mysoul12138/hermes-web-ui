@@ -40,6 +40,7 @@ import {
   legacySessionsCacheKey as _legacySessionsCacheKey,
   legacyMsgsCacheKey as _legacyMsgsCacheKey,
   legacyInFlightKey as _legacyInFlightKey,
+  migrateSessionCacheSchema as _migrateSessionCacheSchema,
   loadJson as _loadJson,
   loadJsonWithFallback as _loadJsonWithFallback,
   saveJson as _saveJson,
@@ -368,6 +369,7 @@ function clearBridgeLocalSession(sid: string) { _clearBridgeLocalSession(getProf
 function readBridgePersistentSessionId(sid: string): string | null { return _readBridgePersistentSessionId(getProfileName(), sid) }
 function readBridgeBackingSessionId(sid: string): string | null { return _readBridgeBackingSessionId(getProfileName(), sid) }
 function shouldDefaultNewSessionToTui(): boolean { return _shouldDefaultNewSessionToTui(getProfileName()) }
+function migrateSessionCacheSchema() { _migrateSessionCacheSchema(getProfileName(), [branchSessionMetaKey()]) }
 
 interface ApprovalState {
   pending: PendingApproval | null
@@ -1769,6 +1771,7 @@ export const useChatStore = defineStore('chat', () => {
     isLoadingSessions.value = true
     const switchRequestIdAtLoadStart = latestSwitchRequestId
     try {
+      migrateSessionCacheSchema()
       // 从 profile 对应的缓存中恢复，实现 instant render
       const cachedSessions = (loadJsonWithFallback<Session[]>(sessionsCacheKey(), legacySessionsCacheKey()) || [])
         .filter(session => session.source !== 'subagent')
@@ -2522,8 +2525,7 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
 
-    const needsBlockingLoad = targetSession.messages.length === 0
-    if (needsBlockingLoad) isLoadingMessages.value = true
+    isLoadingMessages.value = true
 
     try {
       const detail = prefetchedDetail ?? await fetchResolvedSessionDetail(sessionId)
@@ -2638,7 +2640,9 @@ export const useChatStore = defineStore('chat', () => {
     } catch (err) {
       console.error('Failed to load session messages:', err)
     } finally {
-      isLoadingMessages.value = false
+      if (switchRequestId === latestSwitchRequestId && activeSessionId.value === sessionId && activeSession.value?.id === sessionId) {
+        isLoadingMessages.value = false
+      }
     }
 
     // tmux-like resume: if this session has a recent in-flight run and we're

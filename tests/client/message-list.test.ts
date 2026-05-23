@@ -19,10 +19,14 @@ vi.mock('@/components/hermes/chat/MessageItem.vue', () => ({
 
 import MessageList from '@/components/hermes/chat/MessageList.vue'
 import { useChatStore } from '@/stores/hermes/chat'
+import { useSettingsStore } from '@/stores/hermes/settings'
 
 describe('MessageList', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    const settingsStore = useSettingsStore()
+    settingsStore.loaded = true
+    settingsStore.display = { assistant_name: 'Hermes' }
   })
 
   it('renders tool messages in the conversation list', async () => {
@@ -82,6 +86,51 @@ describe('MessageList', () => {
 
     expect(wrapper.find('.message-list-stage').exists()).toBe(true)
     expect(wrapper.find('.message-list-stack').exists()).toBe(true)
+  })
+
+  it('shows a lightweight session-content loading indicator while messages stay visible', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'sess-loading'
+    store.activeSession = {
+      id: 'sess-loading',
+      title: 'Loading',
+      source: 'api_server',
+      messages: [
+        {
+          id: 'm1',
+          role: 'user',
+          content: 'cached message',
+          timestamp: Date.now(),
+        },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    store.isLoadingMessages = true
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.session-content-loading').text()).toContain('chat.updatingSessionContent')
+    expect(wrapper.find('.message-item-stub').text()).toContain('cached message')
+  })
+
+  it('does not add a session-content loading indicator for the empty state', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'sess-empty'
+    store.activeSession = {
+      id: 'sess-empty',
+      title: 'Empty',
+      source: 'api_server',
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    store.isLoadingMessages = true
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.session-content-loading').exists()).toBe(false)
+    expect(wrapper.find('.empty-state').exists()).toBe(true)
   })
 
   it('does not force historical branch sessions to the bottom on first switch', async () => {

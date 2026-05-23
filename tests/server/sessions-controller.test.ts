@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const listConversationSummariesFromDbMock = vi.fn()
+const searchConversationSummariesFromDbMock = vi.fn()
 const getConversationDetailFromDbMock = vi.fn()
 const listConversationSummariesMock = vi.fn()
 const getConversationDetailMock = vi.fn()
@@ -22,6 +23,7 @@ const resolveCanonicalSessionIdMock = vi.fn()
 
 vi.mock('../../packages/server/src/db/hermes/conversations-db', () => ({
   listConversationSummariesFromDb: listConversationSummariesFromDbMock,
+  searchConversationSummariesFromDb: searchConversationSummariesFromDbMock,
   getConversationDetailFromDb: getConversationDetailFromDbMock,
 }))
 
@@ -106,6 +108,7 @@ describe('session conversations controller', () => {
   beforeEach(() => {
     vi.resetModules()
     listConversationSummariesFromDbMock.mockReset()
+    searchConversationSummariesFromDbMock.mockReset()
     getConversationDetailFromDbMock.mockReset()
     listConversationSummariesMock.mockReset()
     getConversationDetailMock.mockReset()
@@ -653,33 +656,7 @@ describe('session conversations controller', () => {
         matched_message_id: null,
       },
     ] as any)
-    listSessionSummariesMock.mockResolvedValue([
-      {
-        id: 'tui-child',
-        source: 'tui',
-        model: 'gpt-5.4',
-        title: 'TUI match child',
-        started_at: 200,
-        ended_at: 210,
-        last_active: 210,
-        message_count: 1,
-        tool_call_count: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: 0,
-        billing_provider: null,
-        estimated_cost_usd: 0,
-        actual_cost_usd: null,
-        cost_status: '',
-        preview: 'tui match preview',
-        matched_message_id: null,
-        snippet: 'tui preview',
-        rank: 0,
-      },
-    ] as any)
-    listConversationSummariesFromDbMock.mockResolvedValue([
+    searchConversationSummariesFromDbMock.mockResolvedValue([
       {
         id: 'tui-root',
         source: 'tui',
@@ -705,6 +682,9 @@ describe('session conversations controller', () => {
         thread_session_count: 2,
         branch_session_count: 0,
         represented_session_ids: ['tui-root', 'tui-child'],
+        matched_message_id: null,
+        snippet: 'tui preview',
+        rank: 0,
       },
     ] as any)
 
@@ -712,42 +692,16 @@ describe('session conversations controller', () => {
     const ctx: any = { query: { q: 'match' }, body: null }
     await mod.search(ctx)
 
-    expect(listSessionSummariesMock).toHaveBeenCalledWith('tui', 2000)
-    expect(listConversationSummariesFromDbMock).toHaveBeenCalledWith({ source: 'tui', humanOnly: true, limit: 2000 })
+    expect(listSessionSummariesMock).not.toHaveBeenCalled()
+    expect(searchConversationSummariesFromDbMock).toHaveBeenCalledWith('match', { source: 'tui', humanOnly: true, limit: 20 })
     expect(ctx.body.results.map((item: any) => item.id)).toEqual(['tui-root', 'api-hit'])
   })
 
-  it('keeps search explicitly hydrated from canonical conversation summaries until search is a graph consumer', async () => {
+  it('uses canonical conversation search for TUI search projection', async () => {
     useLocalSessionStoreState.value = true
     getActiveProfileNameMock.mockReturnValue('default')
     localSearchSessionsMock.mockReturnValue([])
-    listSessionSummariesMock.mockResolvedValue([
-      {
-        id: '20260523_013807_f26c12',
-        source: 'tui',
-        model: 'gpt-5.4',
-        title: 'continuation raw hit',
-        started_at: 300,
-        ended_at: 310,
-        last_active: 310,
-        message_count: 2,
-        tool_call_count: 1,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: 0,
-        billing_provider: null,
-        estimated_cost_usd: 0,
-        actual_cost_usd: null,
-        cost_status: '',
-        preview: 'canonical graph fix',
-        matched_message_id: null,
-        snippet: 'canonical graph fix',
-        rank: 0,
-      },
-    ] as any)
-    listConversationSummariesFromDbMock.mockResolvedValue([
+    searchConversationSummariesFromDbMock.mockResolvedValue([
       {
         id: '20260523_012546_caf8ff',
         source: 'tui',
@@ -777,6 +731,9 @@ describe('session conversations controller', () => {
           '20260523_013431_50700a',
           '20260523_013807_f26c12',
         ],
+        matched_message_id: null,
+        snippet: 'canonical graph fix',
+        rank: 2,
       },
     ] as any)
 
@@ -784,12 +741,13 @@ describe('session conversations controller', () => {
     const ctx: any = { query: { q: 'canonical' }, body: null }
     await mod.search(ctx)
 
-    expect(listConversationSummariesFromDbMock).toHaveBeenCalledWith({ source: 'tui', humanOnly: true, limit: 2000 })
+    expect(searchConversationSummariesFromDbMock).toHaveBeenCalledWith('canonical', { source: 'tui', humanOnly: true, limit: 20 })
+    expect(listSessionSummariesMock).not.toHaveBeenCalled()
     expect(ctx.body.results).toHaveLength(1)
     expect(ctx.body.results[0]).toMatchObject({
       id: '20260523_012546_caf8ff',
       preview: 'canonical summary preview',
-      snippet: 'canonical summary preview',
+      snippet: 'canonical graph fix',
     })
   })
 

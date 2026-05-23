@@ -28,6 +28,9 @@ let customScrollbarRafId: number | null = null;
 let followLatestRafId: number | null = null;
 
 const displayMessages = computed(() => chatStore.displayMessages);
+const showSessionContentUpdating = computed(() =>
+  chatStore.isLoadingMessages && displayMessages.value.length > 0,
+);
 
 const assistantAvatarUrl = computed(() =>
   withAuthToken(settingsStore.display.assistant_avatar_url || "/logo.png"),
@@ -447,6 +450,15 @@ watch(
       </div>
     </div>
     <div
+      v-if="showSessionContentUpdating"
+      class="session-content-loading"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="session-content-loading-shimmer" aria-hidden="true"></span>
+      <span>{{ t("chat.updatingSessionContent") }}</span>
+    </div>
+    <div
       v-if="scrollbarThumbHeight > 0"
       class="message-scrollbar-thumb"
       :class="{ 'is-visible': showCustomScrollbar, 'is-dragging': isDraggingScrollbar }"
@@ -581,6 +593,63 @@ watch(
 
   .dark .message-list-shell:hover &.is-visible::before {
     background: rgba(255, 255, 255, 0.5);
+  }
+}
+
+.session-content-loading {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 56px);
+  padding: 6px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: $text-muted;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  pointer-events: none;
+  transform: translateX(-50%);
+  backdrop-filter: blur(10px);
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(42, 42, 42, 0.76);
+    color: #cdd1d6;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  }
+}
+
+.session-content-loading-shimmer {
+  position: relative;
+  width: 28px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.38), transparent);
+    animation: session-content-shimmer 1.15s ease-in-out infinite;
+    transform: translateX(-100%);
+  }
+
+  .dark & {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .dark &::after {
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.62), transparent);
   }
 }
 
@@ -880,6 +949,11 @@ watch(
     opacity: 1;
     transform: translateY(-3px);
   }
+}
+
+@keyframes session-content-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
 }
 
 @media (max-width: $breakpoint-mobile) {

@@ -444,6 +444,51 @@ describe('conversation DB service', () => {
     })
   })
 
+  it('invalidates canonical facts cache after a session lineage write', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db)
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 1,
+      misses: 1,
+      entries: 1,
+    })
+
+    const lineage = await import('../../packages/server/src/db/hermes/session-lineage')
+    lineage.upsertSessionLineage({
+      session_id: 'tui-root',
+      logical_conversation_id: 'tui-root',
+      source: 'tui',
+      authority: 'explicit',
+      relation_kind: 'root',
+      parent_session_id: null,
+      root_session_id: 'tui-root',
+      web_session_id: null,
+      bridge_session_id: null,
+      persistent_session_id: 'tui-root',
+    })
+
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      entries: 0,
+    })
+
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 2,
+      misses: 2,
+      entries: 1,
+    })
+  })
+
   it('folds parentless bridge context continuations back into the root conversation', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
@@ -3274,6 +3319,144 @@ describe('conversation DB service', () => {
         kind: 'fallback_inference',
       },
     ])
+  })
+
+  it('searches child content through canonical root projection for an empty pivot bridge continuation chain', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: '20260523_012546_caf8ff',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779470746,
+      ended_at: 1779471271,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260523_013431_50700a',
+      parent_session_id: '20260523_012546_caf8ff',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'native child',
+      started_at: 1779471271.5,
+      ended_at: 1779471480,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260523_013807_f26c12',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'bridge continuation',
+      started_at: 1779471487,
+      ended_at: 1779471600,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, {
+      id: 1,
+      session_id: '20260523_013431_50700a',
+      role: 'user',
+      content: 'search-only child content should still return the canonical root',
+      timestamp: 1779471272,
+    })
+    insertMessage(db, { id: 2, session_id: '20260523_013431_50700a', role: 'assistant', content: 'native child answer', timestamp: 1779471273 })
+    insertMessage(db, {
+      id: 3,
+      session_id: '20260523_013807_f26c12',
+      role: 'user',
+      content: 'Previous conversation context:\nassistant: native child answer\n\nCurrent user message:\n继续',
+      timestamp: 1779471488,
+    })
+    insertMessage(db, { id: 4, session_id: '20260523_013807_f26c12', role: 'assistant', content: 'bridge continuation answer', timestamp: 1779471489 })
+    db.close()
+
+    const webuiDbDir = process.env.HERMES_TEST_DB_DIR!
+    mkdirSync(webuiDbDir, { recursive: true })
+    const webuiDb = new DatabaseSync(join(webuiDbDir, 'hermes-web-ui.db'))
+    createLineageSchema(webuiDb)
+    createSessionLineageSchema(webuiDb)
+    insertConversationThread(webuiDb, { conversation_id: '20260523_012546_caf8ff', root_session_id: '20260523_012546_caf8ff' })
+    insertConversationEdge(webuiDb, { edge_id: 'pivot-root-edge', conversation_id: '20260523_012546_caf8ff', child_session_id: '20260523_012546_caf8ff', edge_type: 'root', created_at: 1 })
+    insertSessionLineage(webuiDb, {
+      session_id: '20260523_012546_caf8ff',
+      logical_conversation_id: '20260523_012546_caf8ff',
+      relation_kind: 'root',
+      parent_session_id: null,
+      root_session_id: '20260523_012546_caf8ff',
+      created_at: 1,
+      updated_at: 1,
+    })
+    insertSessionLineage(webuiDb, {
+      session_id: '20260523_013807_f26c12',
+      logical_conversation_id: '20260523_012546_caf8ff',
+      relation_kind: 'continuation',
+      parent_session_id: '20260523_012546_caf8ff',
+      root_session_id: '20260523_012546_caf8ff',
+      web_session_id: 'web-temp-20260523',
+      persistent_session_id: '20260523_013807_f26c12',
+      created_at: 2,
+      updated_at: 2,
+    })
+    webuiDb.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    const detail = await mod.getConversationDetailFromDb('20260523_012546_caf8ff', { source: 'tui', humanOnly: true })
+    const results = await mod.searchConversationSummariesFromDb('search-only child content', { source: 'tui', humanOnly: true, limit: 10 })
+
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({
+      id: '20260523_012546_caf8ff',
+      title: summaries[0]?.title,
+      preview: summaries[0]?.preview,
+      represented_session_ids: summaries[0]?.represented_session_ids,
+      thread_session_count: detail?.thread_session_count,
+    })
+    expect(results[0]?.represented_session_ids).toEqual([
+      '20260523_012546_caf8ff',
+      '20260523_013431_50700a',
+      '20260523_013807_f26c12',
+    ])
+    expect(results[0]?.snippet).toContain('search-only child content')
   })
 
   it('does not merge 20260521_150010 across an empty pivot without bridge or native compaction evidence', async () => {

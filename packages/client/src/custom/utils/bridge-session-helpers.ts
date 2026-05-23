@@ -12,6 +12,8 @@ export const BRIDGE_PERSISTENT_SESSION_KEY_PREFIX = 'hermes_bridge_persistent_se
 export const BRIDGE_SEEN_KEY_PREFIX = 'hermes_bridge_seen_v1_'
 export const SESSION_MODEL_OVERRIDE_KEY_PREFIX = 'hermes_session_model_override_v1_'
 export const STEER_HISTORY_KEY_PREFIX = 'hermes_steer_history_v1_'
+export const CACHE_SCHEMA_VERSION = '2'
+export const CACHE_SCHEMA_VERSION_KEY_PREFIX = 'hermes_session_cache_schema_v'
 export const IN_FLIGHT_TTL_MS = 15 * 60 * 1000 // 15 minutes
 
 const LEGACY_STORAGE_KEY = 'hermes_active_session'
@@ -103,6 +105,80 @@ export function saveJsonWithLegacy(key: string, value: unknown, legacyKey?: stri
 export function removeItemWithLegacy(key: string, legacyKey?: string | null) {
   removeItem(key)
   if (legacyKey) removeItem(legacyKey)
+}
+
+export function cacheSchemaVersionKey(profileName: string): string {
+  return `${CACHE_SCHEMA_VERSION_KEY_PREFIX}_${profileName}`
+}
+
+export function migrateSessionCacheSchema(profileName: string, extraSessionKeys: string[] = []) {
+  const markerKey = cacheSchemaVersionKey(profileName)
+  try {
+    if (localStorage.getItem(markerKey) === CACHE_SCHEMA_VERSION) return
+  } catch {
+    return
+  }
+
+  const prefixes = [
+    sessionsCacheKey(profileName),
+    `hermes_session_msgs_v1_${profileName}_`,
+    `hermes_in_flight_v1_${profileName}_`,
+    `${BRIDGE_LOCAL_SESSION_KEY_PREFIX}${profileName}_`,
+    `${BRIDGE_PERSISTENT_SESSION_KEY_PREFIX}${profileName}_`,
+    `${SESSION_MODEL_OVERRIDE_KEY_PREFIX}${profileName}_`,
+  ]
+  const exactKeys = [
+    storageKey(profileName),
+    ...extraSessionKeys,
+  ]
+  const legacySessions = legacySessionsCacheKey(profileName)
+  if (legacySessions) exactKeys.push(LEGACY_STORAGE_KEY, legacySessions)
+  if (profileName === 'default') {
+    for (const sid of readMigrationSessionIds(profileName)) {
+      exactKeys.push(`hermes_session_msgs_v1_${sid}`)
+      exactKeys.push(`hermes_in_flight_v1_${sid}`)
+    }
+  }
+
+  const keysToRemove: string[] = []
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (!key || key === markerKey) continue
+      if (exactKeys.includes(key) || prefixes.some(prefix => key.startsWith(prefix))) {
+        keysToRemove.push(key)
+      }
+    }
+  } catch {
+    return
+  }
+  keysToRemove.forEach(key => removeItem(key))
+  setItemBestEffort(markerKey, CACHE_SCHEMA_VERSION)
+}
+
+function readMigrationSessionIds(profileName: string): string[] {
+  const ids = new Set<string>()
+  for (const key of [storageKey(profileName), LEGACY_STORAGE_KEY]) {
+    try {
+      const id = localStorage.getItem(key)?.trim()
+      if (id) ids.add(id)
+    } catch {
+      // ignore
+    }
+  }
+  for (const key of [sessionsCacheKey(profileName), legacySessionsCacheKey(profileName)].filter((value): value is string => !!value)) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || '[]')
+      if (Array.isArray(parsed)) {
+        parsed.forEach(item => {
+          if (typeof item?.id === 'string' && item.id.trim()) ids.add(item.id)
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return Array.from(ids)
 }
 
 // ─── Key generators ───────────────────────────────────────────────────

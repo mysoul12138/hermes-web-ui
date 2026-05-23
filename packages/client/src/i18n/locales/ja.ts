@@ -118,6 +118,7 @@ export default {
     contextEditSuccess: 'コンテキスト長を更新しました',
     contextEditFailed: '更新に失敗しました',
     emptyState: 'Hermes Agent と会話を開始しましょう',
+    updatingSessionContent: 'セッション内容を更新中',
     inputPlaceholder: 'メッセージを入力... (Enter で送信、Shift+Enter で改行)',
     attachFiles: 'ファイルを添付',
     messageQueue: 'メッセージキュー',

@@ -118,6 +118,7 @@ export default {
     contextEditSuccess: '컨텍스트 길이가 업데이트되었습니다',
     contextEditFailed: '업데이트 실패',
     emptyState: 'Hermes Agent와 대화를 시작하세요',
+    updatingSessionContent: '세션 내용을 업데이트하는 중',
     inputPlaceholder: '메시지를 입력하세요... (Enter로 전송, Shift+Enter로 줄바꿈)',
     attachFiles: '파일 첨부',
     messageQueue: '메시지 대기열',

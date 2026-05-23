@@ -91,6 +91,7 @@ async function flushPromises() {
 }
 
 const PROFILE = 'default'
+const CACHE_SCHEMA_VERSION_KEY = `hermes_session_cache_schema_v_${PROFILE}`
 const ACTIVE_SESSION_KEY = `hermes_active_session_${PROFILE}`
 const SESSIONS_CACHE_KEY = `hermes_sessions_cache_v1_${PROFILE}`
 const LEGACY_ACTIVE_SESSION_KEY = 'hermes_active_session'
@@ -110,6 +111,7 @@ describe('Chat Store', () => {
     vi.clearAllMocks()
     vi.useRealTimers()
     window.localStorage.clear()
+    window.localStorage.setItem(CACHE_SCHEMA_VERSION_KEY, '2')
     mockSessionsApi.fetchSessions.mockResolvedValue([])
     mockSessionsApi.fetchHermesSessions.mockResolvedValue([])
     mockSessionsApi.fetchSession.mockResolvedValue(null)
@@ -167,6 +169,61 @@ describe('Chat Store', () => {
     expect(store.sessions.map(s => s.id)).toEqual(['local-1', 'remote-1'])
     expect(store.activeSession?.id).toBe('local-1')
     expect(store.messages.map(m => m.content)).toEqual(['draft'])
+  })
+
+  it('migrates stale session cache once while preserving non-session localStorage settings', async () => {
+    const staleSession = {
+      id: 'stale-session',
+      title: 'Stale',
+      source: 'api_server',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    }
+
+    window.localStorage.removeItem(CACHE_SCHEMA_VERSION_KEY)
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, staleSession.id)
+    window.localStorage.setItem(LEGACY_ACTIVE_SESSION_KEY, staleSession.id)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([staleSession]))
+    window.localStorage.setItem(LEGACY_SESSIONS_CACHE_KEY, JSON.stringify([staleSession]))
+    window.localStorage.setItem(sessionMessagesKey(staleSession.id), JSON.stringify([{ id: 'm1', role: 'assistant', content: 'old', reasoning: 'old', timestamp: 1 }]))
+    window.localStorage.setItem(legacySessionMessagesKey(staleSession.id), JSON.stringify([{ id: 'm2', role: 'assistant', content: 'old', reasoning: 'old', timestamp: 1 }]))
+    window.localStorage.setItem(inFlightKey(staleSession.id), JSON.stringify({ runId: 'run-old', startedAt: Date.now() }))
+    window.localStorage.setItem(`hermes_in_flight_v1_${staleSession.id}`, JSON.stringify({ runId: 'run-old-legacy', startedAt: Date.now() }))
+    window.localStorage.setItem(bridgeLocalSessionKey(staleSession.id), '1')
+    window.localStorage.setItem(bridgePersistentSessionKey(staleSession.id), '20260523_120000_abcdef')
+    window.localStorage.setItem(sessionModelOverrideKey(staleSession.id), JSON.stringify({ model: 'old-model', updatedAt: Date.now() }))
+    window.localStorage.setItem(branchSessionMetaKey, JSON.stringify({ [staleSession.id]: { rootSessionId: staleSession.id, parentSessionId: null } }))
+    window.localStorage.setItem('hermes_api_key', 'keep-key')
+    window.localStorage.setItem('hermes_active_profile_name', PROFILE)
+    window.localStorage.setItem('hermes_sidebar_collapsed', '1')
+    window.localStorage.setItem(`hermes_session_pins_v1_${PROFILE}`, JSON.stringify([staleSession.id]))
+    window.localStorage.setItem(`hermes_human_only_v1_${PROFILE}`, JSON.stringify(true))
+    window.localStorage.setItem(steerHistoryKey(staleSession.id), JSON.stringify([{ content: 'keep steer', timestamp: 1 }]))
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([makeSummary('fresh-session', 'Fresh')])
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(window.localStorage.getItem(CACHE_SCHEMA_VERSION_KEY)).toBe('2')
+    expect(window.localStorage.getItem(ACTIVE_SESSION_KEY)).toBe('fresh-session')
+    expect(window.localStorage.getItem(LEGACY_ACTIVE_SESSION_KEY)).toBeNull()
+    expect(window.localStorage.getItem(LEGACY_SESSIONS_CACHE_KEY)).toBeNull()
+    expect(window.localStorage.getItem(sessionMessagesKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(legacySessionMessagesKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(inFlightKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(`hermes_in_flight_v1_${staleSession.id}`)).toBeNull()
+    expect(window.localStorage.getItem(bridgeLocalSessionKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(bridgePersistentSessionKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(sessionModelOverrideKey(staleSession.id))).toBeNull()
+    expect(window.localStorage.getItem(branchSessionMetaKey)).toBeNull()
+    expect(window.localStorage.getItem('hermes_api_key')).toBe('keep-key')
+    expect(window.localStorage.getItem('hermes_active_profile_name')).toBe(PROFILE)
+    expect(window.localStorage.getItem('hermes_sidebar_collapsed')).toBe('1')
+    expect(JSON.parse(window.localStorage.getItem(`hermes_session_pins_v1_${PROFILE}`) || '[]')).toEqual([staleSession.id])
+    expect(JSON.parse(window.localStorage.getItem(`hermes_human_only_v1_${PROFILE}`) || 'false')).toBe(true)
+    expect(JSON.parse(window.localStorage.getItem(steerHistoryKey(staleSession.id)) || '[]')).toEqual([{ content: 'keep steer', timestamp: 1 }])
+    expect(store.sessions.map(s => s.id)).toEqual(['fresh-session'])
   })
 
   it('scrubs bogus cached assistant reasoning during active-session hydration', async () => {
@@ -2457,6 +2514,102 @@ describe('Chat Store', () => {
     expect(store.activeSessionId).toBe(fastId)
     expect(store.activeSession?.title).not.toBe('Slow Server')
     expect(store.activeSession?.messages.map(message => message.id)).toEqual(['u2'])
+  })
+
+  it('keeps cached messages visible while loading session detail without extra detail requests', async () => {
+    const sid = 'cached-loading-session'
+    const cachedMessages = [
+      { id: 'cached-u1', role: 'user', content: 'cached question', timestamp: 1 },
+      { id: 'cached-a1', role: 'assistant', content: 'cached answer', timestamp: 2 },
+    ]
+
+    let resolveDetail: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation((id: string) => {
+      if (id === sid) {
+        return new Promise(resolve => {
+          resolveDetail = resolve
+        }) as any
+      }
+      return Promise.resolve(null) as any
+    })
+
+    const store = useChatStore()
+    store.sessions.push({
+      id: sid,
+      title: 'Cached Loading',
+      source: 'tui',
+      messages: cachedMessages,
+      createdAt: 1,
+      updatedAt: 2,
+    } as any)
+
+    const loading = store.switchSession(sid)
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(true)
+    expect(store.messages.map(message => message.content)).toEqual(['cached question', 'cached answer'])
+    expect(mockSessionsApi.fetchSession).toHaveBeenCalledTimes(1)
+
+    resolveDetail?.(makeDetail(sid, [
+      { id: 'fresh-u1', role: 'user', content: 'fresh question', timestamp: 3 },
+    ]))
+    await loading
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(false)
+    expect(store.messages.map(message => message.content)).toEqual(['fresh question'])
+    expect(mockSessionsApi.fetchSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let a stale switch clear the current session loading state', async () => {
+    const oldId = 'old-loading-session'
+    const newId = 'new-loading-session'
+
+    let resolveOld: ((value: any) => void) | null = null
+    let resolveNew: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation((id: string) => {
+      if (id === oldId) {
+        return new Promise(resolve => {
+          resolveOld = resolve
+        }) as any
+      }
+      if (id === newId) {
+        return new Promise(resolve => {
+          resolveNew = resolve
+        }) as any
+      }
+      return Promise.resolve(null) as any
+    })
+
+    const store = useChatStore()
+    store.sessions.push(
+      { id: oldId, title: 'Old Loading', source: 'tui', messages: [], createdAt: 1, updatedAt: 1 } as any,
+      { id: newId, title: 'New Loading', source: 'tui', messages: [], createdAt: 2, updatedAt: 2 } as any,
+    )
+
+    const oldSwitch = store.switchSession(oldId)
+    await flushPromises()
+    const newSwitch = store.switchSession(newId)
+    await flushPromises()
+
+    resolveOld?.(makeDetail(oldId, [
+      { id: 'old-u1', role: 'user', content: 'old content', timestamp: 1 },
+    ]))
+    await oldSwitch
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(newId)
+    expect(store.isLoadingMessages).toBe(true)
+    expect(store.messages).toEqual([])
+
+    resolveNew?.(makeDetail(newId, [
+      { id: 'new-u1', role: 'user', content: 'new content', timestamp: 2 },
+    ]))
+    await newSwitch
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(false)
+    expect(store.messages.map(message => message.content)).toEqual(['new content'])
   })
 
   it('does not let an older switchSession detail response overwrite the current active title', async () => {
