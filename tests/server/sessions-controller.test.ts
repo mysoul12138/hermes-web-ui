@@ -18,6 +18,7 @@ const loggerInfoMock = vi.fn()
 const getCompressionSnapshotMock = vi.fn()
 const localDeleteSessionMock = vi.fn()
 const useLocalSessionStoreState = vi.hoisted(() => ({ value: false }))
+const resolveCanonicalSessionIdMock = vi.fn()
 
 vi.mock('../../packages/server/src/db/hermes/conversations-db', () => ({
   listConversationSummariesFromDb: listConversationSummariesFromDbMock,
@@ -49,6 +50,11 @@ vi.mock('../../packages/server/src/db/hermes/sessions-db', () => ({
   searchSessionSummaries: vi.fn(),
   getSessionDetailFromDb: getSessionDetailFromDbMock,
   getUsageStatsFromDb: getUsageStatsFromDbMock,
+}))
+
+vi.mock('../../packages/server/src/db/hermes/session-lineage', () => ({
+  listSessionLineage: vi.fn(() => []),
+  resolveCanonicalSessionId: resolveCanonicalSessionIdMock,
 }))
 
 // Mock useLocalSessionStore toggleable per-test
@@ -119,6 +125,8 @@ describe('session conversations controller', () => {
     loggerWarnMock.mockReset()
     loggerInfoMock.mockReset()
     getCompressionSnapshotMock.mockReset()
+    resolveCanonicalSessionIdMock.mockReset()
+    resolveCanonicalSessionIdMock.mockReturnValue(null)
   })
 
   it('prefers the DB-backed conversations summary path', async () => {
@@ -353,6 +361,129 @@ describe('session conversations controller', () => {
     expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['root prompt', 'continued answer'])
     expect(ctx.body.session.message_count).toBe(2)
     expect(ctx.body.session.thread_session_count).toBe(2)
+  })
+
+  it('does not canonical-redirect an existing persistent TUI detail request to a temporary web id', async () => {
+    resolveCanonicalSessionIdMock.mockImplementation((id: string) => id === '20260523_124225_b6d209' ? 'mphv3lt0mn8vlb' : null)
+    getSessionDetailFromDbMock.mockImplementation(async (id: string) => {
+      if (id === '20260523_124225_b6d209') {
+        return {
+          id,
+          source: 'tui',
+          model: 'deepseek-v4-flash',
+          title: 'Persistent TUI session',
+          started_at: 1,
+          ended_at: null,
+          last_active: 14,
+          message_count: 14,
+          tool_call_count: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          reasoning_tokens: 0,
+          billing_provider: null,
+          billing_base_url: null,
+          estimated_cost_usd: 0,
+          actual_cost_usd: null,
+          cost_status: '',
+          preview: 'real prompt 1',
+          messages: [
+            { id: 1, session_id: id, role: 'user', content: 'real prompt 1', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 1, token_count: null, finish_reason: null, reasoning: null },
+          ],
+          thread_session_count: 1,
+        }
+      }
+      return null
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: '20260523_124225_b6d209',
+      represented_session_ids: ['20260523_124225_b6d209'],
+      messages: Array.from({ length: 14 }, (_, index) => ({
+        id: index + 1,
+        session_id: '20260523_124225_b6d209',
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `real message ${index + 1}`,
+        timestamp: index + 1,
+      })),
+      visible_count: 14,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: '20260523_124225_b6d209' }, body: null }
+    await mod.get(ctx)
+
+    expect(getSessionDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209')
+    expect(getSessionDetailFromDbMock).not.toHaveBeenCalledWith('mphv3lt0mn8vlb')
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { source: 'tui', humanOnly: true })
+    expect(ctx.body.session).toMatchObject({
+      id: '20260523_124225_b6d209',
+      source: 'tui',
+      message_count: 14,
+      thread_session_count: 1,
+    })
+    expect(ctx.body.session.messages).toHaveLength(14)
+    expect(ctx.body.session.messages[0].content).toBe('real message 1')
+  })
+
+  it('still maps a temporary web id request to its persistent TUI session when the temp id has no DB detail', async () => {
+    resolveCanonicalSessionIdMock.mockImplementation((id: string) => id === 'mphv3lt0mn8vlb' ? '20260523_124225_b6d209' : null)
+    getSessionDetailFromDbMock.mockImplementation(async (id: string) => {
+      if (id === '20260523_124225_b6d209') {
+        return {
+          id,
+          source: 'tui',
+          model: 'deepseek-v4-flash',
+          title: 'Persistent TUI session',
+          started_at: 1,
+          ended_at: null,
+          last_active: 2,
+          message_count: 2,
+          tool_call_count: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          reasoning_tokens: 0,
+          billing_provider: null,
+          billing_base_url: null,
+          estimated_cost_usd: 0,
+          actual_cost_usd: null,
+          cost_status: '',
+          preview: 'real prompt',
+          messages: [
+            { id: 1, session_id: id, role: 'user', content: 'real prompt', tool_call_id: null, tool_calls: null, tool_name: null, timestamp: 1, token_count: null, finish_reason: null, reasoning: null },
+          ],
+          thread_session_count: 1,
+        }
+      }
+      return null
+    })
+    getConversationDetailFromDbMock.mockResolvedValue({
+      session_id: '20260523_124225_b6d209',
+      represented_session_ids: ['20260523_124225_b6d209'],
+      messages: [
+        { id: 1, session_id: '20260523_124225_b6d209', role: 'user', content: 'real prompt', timestamp: 1 },
+        { id: 2, session_id: '20260523_124225_b6d209', role: 'assistant', content: 'real answer', timestamp: 2 },
+      ],
+      visible_count: 2,
+      thread_session_count: 1,
+      branch_session_count: 0,
+      branches: [],
+    })
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { params: { id: 'mphv3lt0mn8vlb' }, body: null }
+    await mod.get(ctx)
+
+    expect(getSessionDetailFromDbMock).toHaveBeenNthCalledWith(1, 'mphv3lt0mn8vlb')
+    expect(getSessionDetailFromDbMock).toHaveBeenNthCalledWith(2, '20260523_124225_b6d209')
+    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('20260523_124225_b6d209', { source: 'tui', humanOnly: true })
+    expect(ctx.body.session.id).toBe('20260523_124225_b6d209')
+    expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['real prompt', 'real answer'])
   })
 
   it('uses the conversation root title when merging TUI session detail', async () => {

@@ -51,11 +51,13 @@ function createBridgeSessionFallback(id: string) {
   return {
     id,
     source: 'webui-bridge',
+    user_id: null,
     model: '',
     title: null,
     preview: '',
     started_at: now,
     ended_at: null,
+    end_reason: null,
     last_active: now,
     message_count: 0,
     tool_call_count: 0,
@@ -65,10 +67,12 @@ function createBridgeSessionFallback(id: string) {
     cache_write_tokens: 0,
     reasoning_tokens: 0,
     billing_provider: null,
+    billing_base_url: null,
     estimated_cost_usd: 0,
     actual_cost_usd: null,
     cost_status: 'unknown',
     messages: [],
+    thread_session_count: 1,
   }
 }
 
@@ -156,6 +160,67 @@ function mergeConversationDetailIntoSession(
     branch_session_count: detail.branch_session_count,
     branches: detail.branches,
   }
+}
+
+async function getDbSessionDetailForRequest(
+  lookupSessionId: string,
+  requestedSessionId: string,
+  canonicalSessionId: string,
+): Promise<(HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'] }) | null> {
+  const session = await getSessionDetailFromDb(lookupSessionId)
+  if (!session) {
+    logger.info({
+      route: 'get',
+      sessionId: requestedSessionId,
+      canonicalSessionId,
+      lookupSessionId,
+    }, '[sessions-controller] get db-null')
+    return null
+  }
+  if (hasPendingDeletedSessionDetail(session)) {
+    return session
+  }
+  if (isBridgeContinuationWrapperOnlyDetail(session)) {
+    logger.info({
+      route: 'get',
+      sessionId: requestedSessionId,
+      canonicalSessionId,
+      lookupSessionId,
+      source: session.source,
+    }, '[sessions-controller] get db-wrapper-only-suppressed')
+    return {
+      ...createBridgeSessionFallback(requestedSessionId),
+    }
+  }
+  if (session.source === 'tui') {
+    try {
+      const conversationDetail = await getConversationDetailFromDb(lookupSessionId, { source: 'tui', humanOnly: true })
+      if (conversationDetail && !hasPendingDeletedConversation(conversationDetail)) {
+        const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
+        logger.info({
+          sessionId: requestedSessionId,
+          canonicalSessionId,
+          lookupSessionId,
+          source: session.source,
+          rawMessageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+          messageCount: mergedSession.messages.length,
+          rawThreadSessionCount: session.thread_session_count,
+          threadSessionCount: conversationDetail.thread_session_count,
+        }, '[sessions-controller] get conversation-db-hit')
+        return mergedSession
+      }
+    } catch (err) {
+      logger.warn(err, 'Hermes Conversation DB: session detail aggregation failed, falling back to raw session detail')
+    }
+  }
+  logger.info({
+    sessionId: requestedSessionId,
+    canonicalSessionId,
+    lookupSessionId,
+    source: session.source,
+    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+  }, '[sessions-controller] get db-hit')
+  return session
 }
 
 function getGroupChatStorage() {
@@ -471,12 +536,13 @@ export async function get(ctx: any) {
   }
 
   if (useLocalSessionStore()) {
-    const session = localGetSessionDetail(canonicalSessionId)
+    const session = localGetSessionDetail(requestedSessionId)
     if (session && session.source !== 'tui' && !hasPendingDeletedSessionDetail(session)) {
       logger.info({
         route: 'get',
         sessionId: requestedSessionId,
         canonicalSessionId,
+        lookupSessionId: requestedSessionId,
         source: session.source,
       }, '[sessions-controller] get local-hit')
       ctx.body = { session }
@@ -487,6 +553,7 @@ export async function get(ctx: any) {
         route: 'get',
         sessionId: requestedSessionId,
         canonicalSessionId,
+        lookupSessionId: requestedSessionId,
         source: session.source,
         messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
       }, '[sessions-controller] get local-bypassed')
@@ -494,58 +561,17 @@ export async function get(ctx: any) {
   }
 
   try {
-    const session = await getSessionDetailFromDb(canonicalSessionId)
-    if (session) {
-      if (hasPendingDeletedSessionDetail(session)) {
+    for (const lookupSessionId of Array.from(new Set([requestedSessionId, canonicalSessionId]))) {
+      const result = await getDbSessionDetailForRequest(lookupSessionId, requestedSessionId, canonicalSessionId)
+      if (!result) continue
+      if (hasPendingDeletedSessionDetail(result)) {
         ctx.status = 404
         ctx.body = { error: 'Session not found' }
         return
       }
-      if (isBridgeContinuationWrapperOnlyDetail(session)) {
-        logger.info({
-          route: 'get',
-          sessionId: requestedSessionId,
-          canonicalSessionId,
-          source: session.source,
-        }, '[sessions-controller] get db-wrapper-only-suppressed')
-        ctx.body = { session: createBridgeSessionFallback(requestedSessionId) }
-        return
-      }
-      if (session.source === 'tui') {
-        try {
-          const conversationDetail = await getConversationDetailFromDb(canonicalSessionId, { source: 'tui', humanOnly: true })
-          if (conversationDetail && !hasPendingDeletedConversation(conversationDetail)) {
-            const mergedSession = mergeConversationDetailIntoSession(session, conversationDetail)
-            logger.info({
-              sessionId: requestedSessionId,
-              canonicalSessionId,
-              source: session.source,
-              rawMessageCount: Array.isArray(session.messages) ? session.messages.length : 0,
-              messageCount: mergedSession.messages.length,
-              rawThreadSessionCount: session.thread_session_count,
-              threadSessionCount: conversationDetail.thread_session_count,
-            }, '[sessions-controller] get conversation-db-hit')
-            ctx.body = { session: mergedSession }
-            return
-          }
-        } catch (err) {
-          logger.warn(err, 'Hermes Conversation DB: session detail aggregation failed, falling back to raw session detail')
-        }
-      }
-      logger.info({
-        sessionId: requestedSessionId,
-        canonicalSessionId,
-        source: session.source,
-        messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
-      }, '[sessions-controller] get db-hit')
-      ctx.body = { session }
+      ctx.body = { session: result }
       return
     }
-    logger.info({
-      route: 'get',
-      sessionId: requestedSessionId,
-      canonicalSessionId,
-    }, '[sessions-controller] get db-null')
   } catch (err) {
     logger.warn(err, 'Hermes Session DB: detail query failed, falling back to CLI')
   }
@@ -581,7 +607,11 @@ export async function get(ctx: any) {
     }
   }
 
-  const session = await hermesCli.getSession(canonicalSessionId)
+  let session: Awaited<ReturnType<typeof hermesCli.getSession>> | null = null
+  for (const lookupSessionId of Array.from(new Set([requestedSessionId, canonicalSessionId]))) {
+    session = await hermesCli.getSession(lookupSessionId)
+    if (session) break
+  }
   const wrapperOnlyCliSession = isBridgeContinuationWrapperOnlyDetail(session)
   if (!session || wrapperOnlyCliSession) {
     logger.info({
