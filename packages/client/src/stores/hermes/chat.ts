@@ -207,8 +207,6 @@ function applySessionDetail(session: Session | undefined | null, detail: Partial
   if (detail.message_count != null) session.messageCount = detail.message_count
   if (detail.ended_at !== undefined) session.endedAt = detail.ended_at != null ? Math.round(detail.ended_at * 1000) : null
   if (detail.last_active != null) session.lastActiveAt = Math.round(detail.last_active * 1000)
-  const represented = representedSessionIdsOf({ id: session.id, represented_session_ids: detail.represented_session_ids } as SessionSummary)
-  session.representedSessionIds = [...new Set([...(session.representedSessionIds || [session.id]), ...represented])]
   applySessionUsage(session, detail as { input_tokens: number; output_tokens: number }, { allowReset: true })
   applySessionModelOverride(session)
 }
@@ -1166,6 +1164,8 @@ export const useChatStore = defineStore('chat', () => {
     if (sid) persistSessionMessages(sid)
   }
 
+
+
   function getQueuedMessages(sid: string) {
     return getSessionMsgs(sid).filter(message => message.role === 'user' && message.queued)
   }
@@ -1909,19 +1909,6 @@ export const useChatStore = defineStore('chat', () => {
       const freshIds = new Set(visibleFresh.map(s => s.id))
       for (const s of visibleFresh) {
         const previousSession = sessions.value.find(session => session.id === s.id) || null
-        const previousRepresentedIds = new Set(s.representedSessionIds?.length ? s.representedSessionIds : [s.id])
-        const representedLocalSessions = sessions.value.filter(session => {
-          const localIds = session.representedSessionIds?.length ? session.representedSessionIds : [session.id]
-          return localIds.some(id => previousRepresentedIds.has(id)) || previousRepresentedIds.has(session.id)
-        })
-        if (representedLocalSessions.length) {
-          const mergedIds = new Set(s.representedSessionIds?.length ? s.representedSessionIds : [s.id])
-          for (const session of representedLocalSessions) {
-            mergedIds.add(session.id)
-            for (const id of session.representedSessionIds || []) mergedIds.add(id)
-          }
-          s.representedSessionIds = Array.from(mergedIds)
-        }
         if (previousSession && previousSession.title !== s.title) {
           logTitleSnapshot('loadSessions.pre-hydrate-existing', {
             id: s.id,

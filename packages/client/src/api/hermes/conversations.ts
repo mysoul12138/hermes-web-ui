@@ -66,7 +66,6 @@ export interface ConversationDetail {
   thread_session_count: number
   branch_session_count?: number
   branches?: ConversationBranch[]
-  represented_session_ids?: string[]
 }
 
 export async function fetchConversationSummaries(params: { humanOnly?: boolean; source?: string; limit?: number } = {}): Promise<ConversationSummary[]> {
