@@ -51,6 +51,11 @@ const router = createRouter({
       component: () => import('@/views/hermes/UsageView.vue'),
     },
     {
+      path: '/hermes/runtime',
+      name: 'hermes.runtime',
+      component: () => import('@/views/hermes/RuntimeView.vue'),
+    },
+    {
       path: '/hermes/skills-usage',
       name: 'hermes.skillsUsage',
       component: () => import('@/views/hermes/SkillsUsageView.vue'),

@@ -564,6 +564,61 @@ export class TuiBridgeService {
     return this.persistentSessionsByWebSession.get(webSessionId) || null
   }
 
+  getRuntimeSnapshot() {
+    const now = Date.now()
+    const runs = Array.from(this.runs.values()).map(state => {
+      const lastEvent = state.events.length > 0 ? state.events[state.events.length - 1]?.event || null : null
+      const startedAtBase36 = state.runId.match(/^bridge_run_([0-9a-z]+)/)?.[1]
+      const startedAt = startedAtBase36 ? parseInt(startedAtBase36, 36) : now
+      const status: 'running' | 'awaiting_approval' | 'awaiting_clarify' | 'cancelling' | 'closed' = state.closed
+        ? 'closed'
+        : state.cancelRequestedAt
+          ? 'cancelling'
+          : state.pendingApproval
+            ? 'awaiting_approval'
+            : state.pendingClarify
+              ? 'awaiting_clarify'
+              : 'running'
+      return {
+        runId: state.runId,
+        webSessionId: state.webSessionId,
+        bridgeSessionId: state.bridgeSessionId,
+        persistentSessionId: this.persistentSessionsByWebSession.get(state.webSessionId) || null,
+        status,
+        eventCount: state.events.length,
+        lastEvent,
+        lastActivityAt: state.lastActivityAt ?? null,
+        ageMs: Math.max(0, now - startedAt),
+        idleMs: state.lastActivityAt ? Math.max(0, now - state.lastActivityAt) : null,
+        pendingApproval: !!state.pendingApproval,
+        pendingClarify: !!state.pendingClarify,
+        cancelRequestedAt: state.cancelRequestedAt ?? null,
+        contextInputTokens: state.contextInputTokens ?? null,
+      }
+    })
+    const sessions = Array.from(this.bridgeSessionsByWebSession.entries())
+      .map(([webSessionId, bridgeSessionId]) => ({
+        webSessionId,
+        bridgeSessionId,
+        persistentSessionId: this.persistentSessionsByWebSession.get(webSessionId) || null,
+        activeRunId: this.activeRunsByBridgeSession.get(bridgeSessionId) || null,
+      }))
+      .sort((a, b) => a.webSessionId.localeCompare(b.webSessionId))
+    return {
+      bridge: {
+        enabled: this.isEnabled(),
+        activeRuns: this.activeRunsByBridgeSession.size,
+        trackedRuns: this.runs.size,
+        trackedWebSessions: this.bridgeSessionsByWebSession.size,
+        persistentSessions: this.persistentSessionsByWebSession.size,
+        pendingPersistentResolutions: this.pendingPersistentResolutions.size,
+      },
+      runs: runs.sort((a, b) => b.ageMs - a.ageMs),
+      sessions,
+      capturedAt: now,
+    }
+  }
+
   private resolveWebSessionId(sessionId: string): string {
     return this.bridgeSessionsByWebSession.has(sessionId)
       ? sessionId
