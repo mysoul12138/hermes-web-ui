@@ -125,6 +125,17 @@ interface CanonicalGraphFacts {
   sessionLineage: SessionLineageRow[]
 }
 
+interface CanonicalConversationFacts extends CanonicalGraphFacts {
+  sessions: ConversationSessionRow[]
+  byId: Map<string, ConversationSessionRow>
+  explicitLineageFacts: ExplicitLineageFacts
+  canonicalExplicitFacts: ExplicitLineageFacts
+  inferredChildren: Map<string, string[]>
+  mainlineByRoot: Map<string, ConversationSessionRow[]>
+  explicitGraphs: ExplicitConversationGraph[]
+  explicitSessionIds: Set<string>
+}
+
 interface ExplicitLineageFacts {
   threads: ConversationThreadRow[]
   edges: ConversationSessionEdgeRow[]
@@ -3258,60 +3269,97 @@ async function loadRawConversationSessions(source?: string, includeTool = false)
   }
 }
 
+async function buildCanonicalConversationFacts(
+  source: string | undefined,
+  includeTool: boolean,
+  startedAt?: number,
+): Promise<CanonicalConversationFacts> {
+  const sessions = await loadConversationSessions(source, includeTool)
+  if (startedAt != null) traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
+
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  const db = await openConversationDb()
+  let explicitLineageFacts: ExplicitLineageFacts
+  try {
+    explicitLineageFacts = loadExplicitLineageFacts(db)
+  } finally {
+    db.close()
+  }
+
+  const explicitLineageFactsWithoutParentEvidence = augmentExplicitLineageFacts(explicitLineageFacts, byId)
+  const protectedExplicitSessionIds = explicitFactSessionIds(explicitLineageFactsWithoutParentEvidence)
+  const parentEvidence = buildParentEvidenceMap(sessions, protectedExplicitSessionIds)
+  if (startedAt != null) {
+    traceAggregationTiming('built-parent-evidence', startedAt, {
+      parentEvidenceCount: parentEvidence.size,
+      explicitBridgeLinkCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'explicit_bridge_link').length,
+      fallbackInferenceCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'fallback_inference').length,
+    })
+  }
+
+  const canonicalExplicitFacts = augmentExplicitLineageFacts(explicitLineageFactsWithoutParentEvidence, byId, parentEvidence)
+  const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
+  const directChildrenByParent = buildDirectChildrenByParent(sessions)
+  const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
+  const mainlineByRoot = buildMainlineByRoot(sessions, byId, childrenByParent, parentEvidence, inferredChildren)
+  if (startedAt != null) traceAggregationTiming('built-mainlines', startedAt, { rootCount: mainlineByRoot.size })
+
+  const explicitGraphs = buildExplicitConversationGraphs(
+    canonicalExplicitFacts.threads,
+    canonicalExplicitFacts.edges,
+    byId,
+    {
+      parentEvidence,
+      childrenByParent,
+      sessionLineage: explicitLineageFacts.sessionLineage,
+    },
+  )
+  const explicitSessionIds = new Set(explicitGraphs.flatMap(graph => [
+    ...graph.mainline.map(session => session.id),
+    ...graph.branchEdges.map(edge => edge.child_session_id),
+  ]))
+
+  return {
+    sessions,
+    byId,
+    explicitLineageFacts,
+    canonicalExplicitFacts,
+    parentEvidence,
+    inferredChildren,
+    childrenByParent,
+    mainlineByRoot,
+    explicitGraphs,
+    explicitSessionIds,
+    sessionLineage: explicitLineageFacts.sessionLineage,
+  }
+}
+
 export async function listConversationSummariesFromDb(options: ConversationListOptions = {}): Promise<ConversationSummary[]> {
   const startedAt = Date.now()
   const humanOnly = options.humanOnly !== false
   const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_CONVERSATION_LIMIT
-  let explicitSummaries: ConversationSummary[] = []
-  let explicitSessionIds = new Set<string>()
-  const sessions = await loadConversationSessions(options.source)
-  traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
-  const byId = new Map(sessions.map(session => [session.id, session]))
-  let explicitFacts: ExplicitLineageFacts = { threads: [], edges: [], sessionLineage: [] }
-  if (humanOnly) {
-    const db = await openConversationDb()
-    try {
-      explicitFacts = augmentExplicitLineageFacts(loadExplicitLineageFacts(db), byId)
-      explicitSessionIds = explicitFactSessionIds(explicitFacts)
-    } finally {
-      db.close()
-    }
-  }
-  const parentEvidence = buildParentEvidenceMap(sessions, explicitSessionIds)
-  traceAggregationTiming('built-parent-evidence', startedAt, {
-    parentEvidenceCount: parentEvidence.size,
-    explicitBridgeLinkCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'explicit_bridge_link').length,
-    fallbackInferenceCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'fallback_inference').length,
-  })
-  const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
-  const directChildrenByParent = buildDirectChildrenByParent(sessions)
-  const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
-  const rootMemo = new Map<string, string | null>()
-  const mainlineByRoot = buildMainlineByRoot(sessions, byId, childrenByParent, parentEvidence, inferredChildren)
-  traceAggregationTiming('built-mainlines', startedAt, { rootCount: mainlineByRoot.size })
 
   if (!humanOnly) {
+    const sessions = await loadConversationSessions(options.source)
+    traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
     return sortByRecency(sessions.map(toSummary)).slice(0, limit)
   }
 
-  const canonicalExplicitFacts = augmentExplicitLineageFacts(explicitFacts, byId, parentEvidence)
+  const facts = await buildCanonicalConversationFacts(options.source, false, startedAt)
+  const {
+    sessions,
+    byId,
+    parentEvidence,
+    inferredChildren,
+    childrenByParent,
+    mainlineByRoot,
+    explicitGraphs,
+    explicitSessionIds,
+  } = facts
+  const rootMemo = new Map<string, string | null>()
   const db = await openConversationDb()
   try {
-    const graphs = buildExplicitConversationGraphs(
-      canonicalExplicitFacts.threads,
-      canonicalExplicitFacts.edges,
-      byId,
-      {
-        parentEvidence,
-        childrenByParent,
-        sessionLineage: explicitFacts.sessionLineage,
-      },
-    )
-    explicitSessionIds = new Set(graphs.flatMap(graph => [
-      ...graph.mainline.map(session => session.id),
-      ...graph.branchEdges.map(edge => edge.child_session_id),
-    ]))
-    explicitSummaries = graphs
+    const explicitSummaries = explicitGraphs
       .map(graph => explicitSummaryForGraph(graph, db, byId))
       .filter((summary): summary is ConversationSummary => !!summary)
 
@@ -3348,45 +3396,21 @@ export async function listConversationSummariesFromDb(options: ConversationListO
 
 export async function getConversationDetailFromDb(sessionId: string, options: ConversationListOptions = {}): Promise<ConversationDetail | null> {
   const humanOnly = options.humanOnly !== false
-  let protectedExplicitSessionIds = new Set<string>()
-  const sessions = await loadConversationSessions(options.source, true)
-  const byId = new Map(sessions.map(session => [session.id, session]))
-  let explicitFacts: ExplicitLineageFacts = { threads: [], edges: [], sessionLineage: [] }
-  if (humanOnly) {
-    const db = await openConversationDb()
-    try {
-      explicitFacts = augmentExplicitLineageFacts(loadExplicitLineageFacts(db), byId)
-      protectedExplicitSessionIds = explicitFactSessionIds(explicitFacts)
-    } finally {
-      db.close()
-    }
-  }
-  const parentEvidence = buildParentEvidenceMap(sessions, protectedExplicitSessionIds)
-  const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
-  const directChildrenByParent = buildDirectChildrenByParent(sessions)
-  const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
+  const facts = humanOnly
+    ? await buildCanonicalConversationFacts(options.source, true)
+    : null
+  const sessions = facts?.sessions ?? await loadConversationSessions(options.source, true)
+  const byId = facts?.byId ?? new Map(sessions.map(session => [session.id, session]))
+  const parentEvidence = facts?.parentEvidence ?? new Map<string, ParentEvidence>()
+  const inferredChildren = facts?.inferredChildren ?? new Map<string, string[]>()
+  const childrenByParent = facts?.childrenByParent ?? buildDirectChildrenByParent(sessions)
   const rootMemo = new Map<string, string | null>()
 
   if (humanOnly) {
-    const canonicalExplicitFacts = augmentExplicitLineageFacts(explicitFacts, byId, parentEvidence)
     const db = await openConversationDb()
     try {
-      const graphs = buildExplicitConversationGraphs(
-        canonicalExplicitFacts.threads,
-        canonicalExplicitFacts.edges,
-        byId,
-        {
-          parentEvidence,
-          childrenByParent,
-          sessionLineage: explicitFacts.sessionLineage,
-        },
-      )
-      const graph = explicitGraphForSession(sessionId, graphs)
+      const graph = explicitGraphForSession(sessionId, facts?.explicitGraphs ?? [])
       if (graph) return explicitDetailForGraph(sessionId, graph, db, byId)
-      protectedExplicitSessionIds = new Set(graphs.flatMap(explicitGraph => [
-        ...explicitGraph.mainline.map(session => session.id),
-        ...explicitGraph.branchEdges.map(edge => edge.child_session_id),
-      ]))
     } finally {
       db.close()
     }

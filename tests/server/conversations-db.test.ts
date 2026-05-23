@@ -3123,6 +3123,101 @@ describe('conversation DB service', () => {
     ])
   })
 
+  it('does not merge 20260521_150010 across an empty pivot without bridge or native compaction evidence', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: '20260520_093333_3c3fc9',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'long chain root',
+      started_at: 1779240000,
+      ended_at: 1779240300,
+      end_reason: 'compression',
+      message_count: 2,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'empty-pivot-20260521',
+      parent_session_id: '20260520_093333_3c3fc9',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1779340000,
+      ended_at: 1779340060,
+      end_reason: 'compression',
+      message_count: 0,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: '20260521_150010_89fc80',
+      parent_session_id: 'empty-pivot-20260521',
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'separate chain',
+      started_at: 1779346810,
+      ended_at: 1779347000,
+      end_reason: 'tui_shutdown',
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: '20260520_093333_3c3fc9', role: 'user', content: '旧三锚点根会话', timestamp: 1779240010 })
+    insertMessage(db, { id: 2, session_id: '20260520_093333_3c3fc9', role: 'assistant', content: '这是旧链内容。', timestamp: 1779240020 })
+    insertMessage(db, { id: 3, session_id: '20260521_150010_89fc80', role: 'user', content: '新会话没有 Previous conversation context', timestamp: 1779346811 })
+    insertMessage(db, { id: 4, session_id: '20260521_150010_89fc80', role: 'assistant', content: '应保持独立。', timestamp: 1779346812 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    const oldRoot = summaries.find((summary: any) => summary.id === '20260520_093333_3c3fc9')
+    const separate = summaries.find((summary: any) => summary.id === '20260521_150010_89fc80')
+    expect(oldRoot?.represented_session_ids).toEqual(['20260520_093333_3c3fc9'])
+    expect(separate?.represented_session_ids).toEqual(['20260521_150010_89fc80'])
+
+    const oldDetail = await mod.getConversationDetailFromDb('20260520_093333_3c3fc9', { humanOnly: true })
+    const separateDetail = await mod.getConversationDetailFromDb('20260521_150010_89fc80', { humanOnly: true })
+    expect(oldDetail?.messages.map((message: any) => message.session_id)).toEqual([
+      '20260520_093333_3c3fc9',
+      '20260520_093333_3c3fc9',
+    ])
+    expect(separateDetail?.messages.map((message: any) => message.session_id)).toEqual([
+      '20260521_150010_89fc80',
+      '20260521_150010_89fc80',
+    ])
+  })
+
   it('merges the 20260520_093333 long bridge/native continuation chain into one conversation', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
