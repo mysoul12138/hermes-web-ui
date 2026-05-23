@@ -586,6 +586,82 @@ describe('session conversations controller', () => {
     expect(ctx.body.results.map((item: any) => item.id)).toEqual(['tui-root', 'api-hit'])
   })
 
+  it('keeps search explicitly hydrated from canonical conversation summaries until search is a graph consumer', async () => {
+    useLocalSessionStoreState.value = true
+    getActiveProfileNameMock.mockReturnValue('default')
+    localSearchSessionsMock.mockReturnValue([])
+    listSessionSummariesMock.mockResolvedValue([
+      {
+        id: '20260523_013807_f26c12',
+        source: 'tui',
+        model: 'gpt-5.4',
+        title: 'continuation raw hit',
+        started_at: 300,
+        ended_at: 310,
+        last_active: 310,
+        message_count: 2,
+        tool_call_count: 1,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: null,
+        estimated_cost_usd: 0,
+        actual_cost_usd: null,
+        cost_status: '',
+        preview: 'canonical graph fix',
+        matched_message_id: null,
+        snippet: 'canonical graph fix',
+        rank: 0,
+      },
+    ] as any)
+    listConversationSummariesFromDbMock.mockResolvedValue([
+      {
+        id: '20260523_012546_caf8ff',
+        source: 'tui',
+        model: 'gpt-5.4',
+        title: 'canonical root',
+        started_at: 100,
+        ended_at: 310,
+        last_active: 310,
+        message_count: 4,
+        tool_call_count: 2,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        billing_provider: null,
+        billing_base_url: null,
+        estimated_cost_usd: 0,
+        actual_cost_usd: null,
+        cost_status: '',
+        preview: 'canonical summary preview',
+        is_active: false,
+        thread_session_count: 3,
+        branch_session_count: 0,
+        represented_session_ids: [
+          '20260523_012546_caf8ff',
+          '20260523_013431_50700a',
+          '20260523_013807_f26c12',
+        ],
+      },
+    ] as any)
+
+    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
+    const ctx: any = { query: { q: 'canonical' }, body: null }
+    await mod.search(ctx)
+
+    expect(listConversationSummariesFromDbMock).toHaveBeenCalledWith({ source: 'tui', humanOnly: true, limit: 2000 })
+    expect(ctx.body.results).toHaveLength(1)
+    expect(ctx.body.results[0]).toMatchObject({
+      id: '20260523_012546_caf8ff',
+      preview: 'canonical summary preview',
+      snippet: 'canonical summary preview',
+    })
+  })
+
   it('merges native state.db usage analytics with local Web UI usage for the requested period', async () => {
     const today = new Date().toISOString().slice(0, 10)
     getLocalUsageStatsMock.mockReturnValue({

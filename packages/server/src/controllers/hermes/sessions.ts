@@ -358,6 +358,10 @@ export async function search(ctx: any) {
         const lowered = q.trim().toLowerCase()
         const tuiSessions = await listSessionSummaries('tui', 2000)
         const conversationSummaries = await listConversationSummariesFromDb({ source: 'tui', humanOnly: true, limit: 2000 })
+        // TODO(session-aggregation): move TUI search onto the canonical conversation
+        // graph/fact generator directly. Today search hydrates raw matches through
+        // canonical summaries, so summary/detail are unified but search is not yet
+        // a first-class graph consumer.
         const representedToRoot = new Map<string, typeof conversationSummaries[number]>()
         for (const summary of conversationSummaries) {
           const represented = summary.represented_session_ids?.length ? summary.represented_session_ids : [summary.id]

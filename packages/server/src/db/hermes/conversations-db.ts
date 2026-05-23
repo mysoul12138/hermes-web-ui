@@ -8,6 +8,7 @@ import {
   type ConversationThreadRow,
   type ConversationUiEventRow,
 } from './conversation-lineage'
+import { listSessionLineage, type SessionLineageRow } from './session-lineage'
 import type {
   ConversationBranch,
   ConversationContinuationEdge,
@@ -18,6 +19,7 @@ import type {
 } from '../../services/hermes/conversations'
 import { logger } from '../../services/logger'
 import { listLiveTuiSessionKeys } from '../../services/hermes/tui-live'
+import { getDb } from '../index'
 
 const SQLITE_AVAILABLE = (() => {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -115,6 +117,18 @@ interface ExplicitConversationGraph {
   mainline: ConversationSessionRow[]
   branchEdges: ConversationSessionEdgeRow[]
   continuationEdges: ConversationContinuationEdge[]
+}
+
+interface CanonicalGraphFacts {
+  parentEvidence: Map<string, ParentEvidence>
+  childrenByParent: Map<string | null, string[]>
+  sessionLineage: SessionLineageRow[]
+}
+
+interface ExplicitLineageFacts {
+  threads: ConversationThreadRow[]
+  edges: ConversationSessionEdgeRow[]
+  sessionLineage: SessionLineageRow[]
 }
 
 function conversationDbPath(): string {
@@ -552,7 +566,22 @@ function linkOrphanCompressionContinuations(sessions: ConversationSessionRow[]) 
   }
 }
 
-function linkParentlessEmptyCompressionPivots(sessions: ConversationSessionRow[]) {
+function sessionHasExplicitLineageRoot(
+  sessionId: string,
+  lineageRows: SessionLineageRow[],
+): boolean {
+  return lineageRows.some(row => (
+    row.session_id === sessionId
+    && row.authority === 'explicit'
+    && (
+      row.relation_kind === 'root'
+      || row.root_session_id === sessionId
+      || row.logical_conversation_id === sessionId
+    )
+  ))
+}
+
+function linkParentlessEmptyCompressionPivots(sessions: ConversationSessionRow[], lineageRows: SessionLineageRow[] = []) {
   const byId = new Map(sessions.map(session => [session.id, session]))
   const children = new Map<string, ConversationSessionRow[]>()
   const childIdsByParent = new Map<string | null, string[]>()
@@ -570,6 +599,7 @@ function linkParentlessEmptyCompressionPivots(sessions: ConversationSessionRow[]
 
   for (const pivot of sessions) {
     if (!isEmptyCompressionPivot(pivot)) continue
+    if (sessionHasExplicitLineageRoot(pivot.id, lineageRows)) continue
     const descendants = children.get(pivot.id) || []
     if (descendants.length !== 1) continue
     const firstChild = descendants[0]
@@ -779,6 +809,43 @@ function isTrustedEmptyCompressionPivotLink(
   if (!path?.some(session => session.id === child.id)) return false
   if (parent.id === anchor.id) return path[0]?.id === child.id
   return path.some((session, index) => index > 0 && path[index - 1]?.id === parent.id && session.id === child.id)
+}
+
+function isExplicitRootEmptyCompressionPivotLink(
+  parent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+  lineageRows: SessionLineageRow[],
+): boolean {
+  if (!isOutputEmptyCompressionSession(parent)) return false
+  if (!sessionHasExplicitLineageRoot(parent.id, lineageRows)) return false
+  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
+  if (child.parent_session_id !== parent.id) return false
+  if (isAgentLikeBranchSession(child, byId)) return false
+  if (Number(child.started_at || 0) < Number(parent.started_at || 0)) return false
+  const children = (childrenByParent.get(parent.id) || [])
+    .map(childId => byId.get(childId))
+    .filter((item): item is ConversationSessionRow => !!item && item.source === parent.source && item.source !== 'tool')
+  if (children.length !== 1) return false
+  return hasConversationContent(child)
+}
+
+function isExplicitBoundaryEmptyCompressionPivotLink(
+  parent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  childrenByParent: Map<string | null, string[]>,
+): boolean {
+  if (!isOutputEmptyCompressionSession(parent)) return false
+  if (child.id === parent.id || child.source !== parent.source || child.source !== 'tui') return false
+  if (child.parent_session_id !== parent.id) return false
+  if (isAgentLikeBranchSession(child, byId)) return false
+  if (Number(child.started_at || 0) < Number(parent.started_at || 0)) return false
+  const children = (childrenByParent.get(parent.id) || [])
+    .map(childId => byId.get(childId))
+    .filter((item): item is ConversationSessionRow => !!item && item.source === parent.source && item.source !== 'tool')
+  return children.length === 1 && hasConversationContent(child)
 }
 
 function hasBridgeContextPromptDescendantReferencing(
@@ -1170,9 +1237,63 @@ function shouldSuppressBridgePromptTopLevelConversation(
   return !!parentEvidence.get(session.id)
 }
 
+function sessionLineageAliases(row: SessionLineageRow): string[] {
+  return [
+    row.session_id,
+    row.web_session_id,
+    row.bridge_session_id,
+    row.persistent_session_id,
+  ]
+    .map(value => (value || '').trim())
+    .filter((value, index, values) => !!value && values.indexOf(value) === index)
+}
+
+function applySessionLineageParentEvidence(
+  map: Map<string, ParentEvidence>,
+  sessions: ConversationSessionRow[],
+  lineageRows: SessionLineageRow[],
+) {
+  if (!lineageRows.length) return
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  const lineageByLogical = new Map<string, SessionLineageRow[]>()
+  for (const row of lineageRows) {
+    const logical = (row.logical_conversation_id || '').trim()
+    if (!logical) continue
+    const group = lineageByLogical.get(logical) || []
+    group.push(row)
+    lineageByLogical.set(logical, group)
+  }
+
+  for (const row of lineageRows) {
+    if (row.authority !== 'explicit') continue
+    if (row.relation_kind !== 'continuation' && row.relation_kind !== 'wrapper') continue
+
+    const childId = sessionLineageAliases(row).find(id => !!byId.get(id))
+    if (!childId) continue
+
+    const parentCandidates = [
+      row.parent_session_id,
+      ...(lineageByLogical.get(row.logical_conversation_id || '') || []).flatMap(parentRow => {
+        if (parentRow.session_id === row.session_id) return []
+        if (parentRow.relation_kind !== 'root' && parentRow.session_id !== parentRow.root_session_id) return []
+        return sessionLineageAliases(parentRow)
+      }),
+      row.root_session_id,
+      row.logical_conversation_id,
+    ]
+      .map(value => (value || '').trim())
+      .filter(Boolean)
+
+    const parentId = parentCandidates.find(candidate => candidate !== childId && !!byId.get(candidate))
+    if (!parentId) continue
+    if (!map.has(childId)) map.set(childId, { parentId, kind: 'explicit_bridge_link' })
+  }
+}
+
 function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFallbackParentIds = new Set<string>()): Map<string, ParentEvidence> {
   const map = new Map<string, ParentEvidence>()
   const explicitLinks = readBridgeContinuationLinks()
+  const sessionLineage = listSessionLineage()
   const byId = new Map(sessions.map(session => [session.id, session]))
   const sortedCandidates = sessions
     .filter(candidate => candidate.source === 'tui')
@@ -1239,6 +1360,7 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFal
     const parent = findInferredBridgeContextParent(session, windowCandidates)
     if (parent && !protectedFallbackParentIds.has(parent.id)) map.set(session.id, { parentId: parent.id, kind: 'fallback_inference' })
   }
+  applySessionLineageParentEvidence(map, sessions, sessionLineage)
   return map
 }
 
@@ -1763,6 +1885,13 @@ function collectConversationChain(rootId: string, byId: Map<string, Conversation
 
 function representedSessionIds(chain: ConversationSessionRow[]): string[] {
   return [...new Set(chain.map(session => safeText(session.id)).filter(Boolean))]
+}
+
+function sessionsByStartedAt(byId: Map<string, ConversationSessionRow>): ConversationSessionRow[] {
+  return [...byId.values()].sort((left, right) => {
+    if (left.started_at !== right.started_at) return left.started_at - right.started_at
+    return left.id.localeCompare(right.id)
+  })
 }
 
 function continuationEdgesForChain(
@@ -2354,6 +2483,11 @@ function buildExplicitConversationGraph(
   thread: ConversationThreadRow,
   edges: ConversationSessionEdgeRow[],
   byId: Map<string, ConversationSessionRow>,
+  canonicalFacts: CanonicalGraphFacts = {
+    parentEvidence: new Map(),
+    childrenByParent: new Map(),
+    sessionLineage: [],
+  },
 ): ExplicitConversationGraph | null {
   const conversationEdges = activeExplicitEdgesForConversation(edges, thread.conversation_id)
   if (!conversationEdges.length) {
@@ -2368,7 +2502,7 @@ function buildExplicitConversationGraph(
   }
 
   const rootEdges = conversationEdges.filter(edge => edge.edge_type === 'root')
-  if (rootEdges.length !== 1 || rootEdges[0].child_session_id !== thread.root_session_id || rootEdges[0].parent_session_id != null) {
+  if (!rootEdges.length || rootEdges.some(edge => edge.child_session_id !== thread.root_session_id || edge.parent_session_id != null)) {
     logExplicitGraphSkip('invalid-root-edge', {
       conversationId: thread.conversation_id,
       rootSessionId: thread.root_session_id,
@@ -2379,6 +2513,7 @@ function buildExplicitConversationGraph(
 
   const byChildParent = new Map<string, string>()
   const nonRootParentByChild = new Map<string, string>()
+  const continuesKindByChild = new Map<string, ParentEvidenceKind>()
   const continuesByParent = new Map<string, ConversationSessionEdgeRow[]>()
   const edgeSessionIds = new Set<string>([thread.root_session_id])
 
@@ -2396,11 +2531,16 @@ function buildExplicitConversationGraph(
       logExplicitGraphSkip('missing-parent-id', { conversationId: thread.conversation_id, childSessionId: edge.child_session_id, edgeType: edge.edge_type })
       return null
     }
-    const parent = byId.get(parentId)
-    if (!parent || parent.source === 'tool') {
+    const edgeParent = byId.get(parentId)
+    if (!edgeParent || edgeParent.source === 'tool') {
       logExplicitGraphSkip('missing-parent-session', { conversationId: thread.conversation_id, childSessionId: edge.child_session_id, parentSessionId: parentId })
       return null
     }
+    const canonicalEvidence = canonicalFacts.parentEvidence.get(child.id)
+    const canonicalParent = canonicalEvidence ? byId.get(canonicalEvidence.parentId) : null
+    const parent = canonicalParent && canonicalParent.source !== 'tool' && canonicalParent.id !== child.id
+      ? canonicalParent
+      : edgeParent
     const existingNonRootParent = nonRootParentByChild.get(child.id)
     if (existingNonRootParent && existingNonRootParent !== parent.id) {
       logExplicitGraphSkip('multiple-active-parents', { conversationId: thread.conversation_id, childSessionId: child.id, parents: [existingNonRootParent, parent.id] })
@@ -2426,6 +2566,7 @@ function buildExplicitConversationGraph(
         return null
       }
       byChildParent.set(child.id, parent.id)
+      continuesKindByChild.set(child.id, canonicalParent ? (canonicalEvidence?.kind || 'explicit_bridge_link') : 'explicit_bridge_link')
       const siblings = continuesByParent.get(parent.id) || []
       siblings.push(edge)
       continuesByParent.set(parent.id, siblings)
@@ -2461,12 +2602,67 @@ function buildExplicitConversationGraph(
     continuationEdges.push({
       child_session_id: child.id,
       parent_session_id: current.id,
-      kind: 'explicit_bridge_link',
+      kind: continuesKindByChild.get(child.id) || 'explicit_bridge_link',
     })
     current = child
   }
 
-  const mainlineIds = new Set(mainline.map(session => session.id))
+  const explicitSessionIds = new Set(edgeSessionIds)
+  const explicitMainlineIds = new Set(mainline.map(session => session.id))
+  const canonicalMainline = [...mainline]
+  let appendedCanonicalChild = true
+  while (appendedCanonicalChild) {
+    appendedCanonicalChild = false
+    const canonicalIds = new Set(canonicalMainline.map(session => session.id))
+    const nextChildren = sessionsByStartedAt(byId)
+      .filter(session => !canonicalIds.has(session.id))
+      .filter(session => !isAgentLikeBranchSession(session, byId))
+      .filter(session => {
+        const evidence = effectiveParentEvidence(session, canonicalFacts.parentEvidence, byId, canonicalFacts.childrenByParent)
+        const parent = evidence ? byId.get(evidence.parentId) : null
+        const nativeParent = session.parent_session_id ? byId.get(session.parent_session_id) : null
+        if (
+          nativeParent
+          && canonicalIds.has(nativeParent.id)
+          && (
+            isExplicitRootEmptyCompressionPivotLink(nativeParent, session, byId, canonicalFacts.childrenByParent, canonicalFacts.sessionLineage)
+            || isExplicitBoundaryEmptyCompressionPivotLink(nativeParent, session, byId, canonicalFacts.childrenByParent)
+          )
+        ) return true
+        return !!evidence
+          && canonicalIds.has(evidence.parentId)
+          && (
+            explicitSessionIds.has(session.id)
+            || evidence.kind === 'native_parent'
+            || (!!parent && isExplicitRootEmptyCompressionPivotLink(parent, session, byId, canonicalFacts.childrenByParent, canonicalFacts.sessionLineage))
+          )
+      })
+      .sort((left, right) => {
+        if (left.started_at !== right.started_at) return left.started_at - right.started_at
+        return left.id.localeCompare(right.id)
+      })
+    if (nextChildren.length !== 1) continue
+    const child = nextChildren[0]
+    const nativeParent = child.parent_session_id ? byId.get(child.parent_session_id) : null
+    const evidence = nativeParent
+      && canonicalIds.has(nativeParent.id)
+      && (
+        isExplicitRootEmptyCompressionPivotLink(nativeParent, child, byId, canonicalFacts.childrenByParent, canonicalFacts.sessionLineage)
+        || isExplicitBoundaryEmptyCompressionPivotLink(nativeParent, child, byId, canonicalFacts.childrenByParent)
+      )
+      ? { parentId: nativeParent.id, kind: 'native_parent' as ParentEvidenceKind }
+      : effectiveParentEvidence(child, canonicalFacts.parentEvidence, byId, canonicalFacts.childrenByParent)
+    if (!evidence) continue
+    canonicalMainline.push(child)
+    continuationEdges.push({
+      child_session_id: child.id,
+      parent_session_id: evidence.parentId,
+      kind: evidence.kind,
+    })
+    appendedCanonicalChild = true
+  }
+
+  const mainlineIds = new Set(canonicalMainline.map(session => session.id))
   for (const [childId] of byChildParent) {
     if (!mainlineIds.has(childId)) {
       logExplicitGraphSkip('continues-edge-outside-mainline', { conversationId: thread.conversation_id, childSessionId: childId })
@@ -2477,7 +2673,7 @@ function buildExplicitConversationGraph(
   return {
     conversationId: thread.conversation_id,
     rootSessionId: thread.root_session_id,
-    mainline,
+    mainline: canonicalMainline,
     branchEdges: conversationEdges.filter(edge => (
       (edge.edge_type === 'branches' || edge.edge_type === 'subagent')
       && !mainlineIds.has(edge.child_session_id)
@@ -2490,10 +2686,285 @@ function buildExplicitConversationGraphs(
   threads: ConversationThreadRow[],
   edges: ConversationSessionEdgeRow[],
   byId: Map<string, ConversationSessionRow>,
+  canonicalFacts?: CanonicalGraphFacts,
 ): ExplicitConversationGraph[] {
   return threads
-    .map(thread => buildExplicitConversationGraph(thread, edges, byId))
+    .map(thread => buildExplicitConversationGraph(thread, edges, byId, canonicalFacts))
     .filter((graph): graph is ExplicitConversationGraph => !!graph)
+}
+
+function listExplicitLineageFactsFromDb(
+  db: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+): ExplicitLineageFacts {
+  const threads = listConversationThreadsReadOnly(db as any)
+  const edges = listActiveExplicitConversationSessionEdges(db as any)
+  return {
+    threads,
+    edges,
+    sessionLineage: [],
+  }
+}
+
+function mergeExplicitLineageFacts(...factsList: ExplicitLineageFacts[]): ExplicitLineageFacts {
+  const threads = new Map<string, ConversationThreadRow>()
+  const edges = new Map<string, ConversationSessionEdgeRow>()
+  const sessionLineage = new Map<string, SessionLineageRow>()
+
+  for (const facts of factsList) {
+    for (const thread of facts.threads) threads.set(thread.conversation_id, thread)
+    for (const edge of facts.edges) edges.set(edge.edge_id, edge)
+    for (const row of facts.sessionLineage) sessionLineage.set(row.session_id, row)
+  }
+
+  return {
+    threads: [...threads.values()].sort((left, right) => {
+      if (right.updated_at !== left.updated_at) return right.updated_at - left.updated_at
+      return left.conversation_id.localeCompare(right.conversation_id)
+    }),
+    edges: [...edges.values()].sort((left, right) => {
+      if (left.conversation_id !== right.conversation_id) return left.conversation_id.localeCompare(right.conversation_id)
+      if (left.created_at !== right.created_at) return left.created_at - right.created_at
+      return left.edge_id.localeCompare(right.edge_id)
+    }),
+    sessionLineage: [...sessionLineage.values()].sort((left, right) => {
+      if (right.updated_at !== left.updated_at) return right.updated_at - left.updated_at
+      if (right.created_at !== left.created_at) return right.created_at - left.created_at
+      return right.session_id.localeCompare(left.session_id)
+    }),
+  }
+}
+
+function loadExplicitLineageFacts(
+  hermesDb: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
+): ExplicitLineageFacts {
+  const webuiDb = getDb()
+  const webuiFacts = webuiDb && webuiDb !== hermesDb
+    ? listExplicitLineageFactsFromDb(webuiDb)
+    : { threads: [], edges: [], sessionLineage: [] }
+  return mergeExplicitLineageFacts(
+    listExplicitLineageFactsFromDb(hermesDb),
+    {
+      ...webuiFacts,
+      sessionLineage: listSessionLineage(),
+    },
+  )
+}
+
+function synthesizeConversationThreadsFromSessionLineage(
+  lineageRows: SessionLineageRow[],
+  byId: Map<string, ConversationSessionRow>,
+): ConversationThreadRow[] {
+  const byConversationId = new Map<string, ConversationThreadRow>()
+  for (const row of lineageRows) {
+    if (row.authority !== 'explicit') continue
+    const conversationId = (row.logical_conversation_id || row.root_session_id || row.session_id || '').trim()
+    if (!conversationId || byConversationId.has(conversationId)) continue
+    const rootId = [
+      row.root_session_id,
+      row.logical_conversation_id,
+      ...sessionLineageAliases(row),
+    ]
+      .map(value => (value || '').trim())
+      .find(value => !!value && !!byId.get(value))
+    if (!rootId) continue
+    byConversationId.set(conversationId, {
+      conversation_id: conversationId,
+      root_session_id: rootId,
+      title: null,
+      status: 'active',
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      schema_version: 1,
+    })
+  }
+  return [...byConversationId.values()]
+}
+
+function synthesizeConversationEdgesFromSessionLineage(
+  lineageRows: SessionLineageRow[],
+  byId: Map<string, ConversationSessionRow>,
+): ConversationSessionEdgeRow[] {
+  const edges = new Map<string, ConversationSessionEdgeRow>()
+  const addEdge = (
+    conversationId: string,
+    childSessionId: string,
+    parentSessionId: string | null,
+    edgeType: ConversationSessionEdgeRow['edge_type'],
+    createdAt: number,
+  ) => {
+    const edgeId = `session-lineage:${conversationId}:${edgeType}:${childSessionId}`
+    if (edges.has(edgeId)) return
+    edges.set(edgeId, {
+      edge_id: edgeId,
+      conversation_id: conversationId,
+      parent_session_id: parentSessionId,
+      child_session_id: childSessionId,
+      edge_type: edgeType,
+      confidence: 'explicit',
+      created_by: 'migration',
+      created_at: createdAt,
+      superseded_at: null,
+    })
+  }
+
+  for (const row of lineageRows) {
+    if (row.authority !== 'explicit') continue
+    const conversationId = (row.logical_conversation_id || row.root_session_id || row.session_id || '').trim()
+    if (!conversationId) continue
+    const childId = sessionLineageAliases(row).find(id => !!byId.get(id))
+    if (!childId) continue
+    if (row.relation_kind === 'root' || childId === row.root_session_id || childId === row.logical_conversation_id) {
+      addEdge(conversationId, childId, null, 'root', row.created_at)
+      continue
+    }
+    if (row.relation_kind !== 'continuation' && row.relation_kind !== 'wrapper') continue
+    const parentId = [row.parent_session_id, row.root_session_id, row.logical_conversation_id]
+      .map(value => (value || '').trim())
+      .find(value => !!value && value !== childId && !!byId.get(value))
+    if (!parentId) continue
+    addEdge(conversationId, childId, parentId, 'continues', row.created_at)
+  }
+
+  return [...edges.values()]
+}
+
+function synthesizeConversationThreadsFromBridgeLinks(
+  byId: Map<string, ConversationSessionRow>,
+  canonicalParentEvidence: Map<string, ParentEvidence>,
+): ConversationThreadRow[] {
+  const links = readBridgeContinuationLinks()
+  const threads = new Map<string, ConversationThreadRow>()
+  for (const [childId, parentId] of Object.entries(links)) {
+    const child = byId.get(childId)
+    const parent = byId.get(parentId)
+    if (!child || !parent || child.source === 'tool' || parent.source === 'tool') continue
+    const edgeParent = bridgeLinkCanonicalParent(parent, child, byId, canonicalParentEvidence)
+    if (!edgeParent) continue
+    const rootId = rootSessionIdForBridgeLinkBoundary(parent, byId)
+    if (!rootId || threads.has(rootId)) continue
+    const root = byId.get(rootId)
+    if (!root || root.source === 'tool') continue
+    threads.set(rootId, {
+      conversation_id: rootId,
+      root_session_id: rootId,
+      title: null,
+      status: 'active',
+      created_at: Number(root.started_at || parent.started_at || child.started_at || 0),
+      updated_at: Math.max(Number(root.last_active || 0), Number(parent.last_active || 0), Number(child.last_active || 0)),
+      schema_version: 1,
+    })
+  }
+  return [...threads.values()]
+}
+
+function rootSessionIdForBridgeLinkBoundary(
+  session: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+): string | null {
+  let current: ConversationSessionRow | undefined = session
+  const seen = new Set<string>()
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    const parent: ConversationSessionRow | null = current.parent_session_id ? (byId.get(current.parent_session_id) || null) : null
+    if (!parent || parent.source !== current.source || parent.source === 'tool') return current.id
+    current = parent
+  }
+  return current?.id || session.id
+}
+
+function synthesizeConversationEdgesFromBridgeLinks(
+  byId: Map<string, ConversationSessionRow>,
+  canonicalParentEvidence: Map<string, ParentEvidence>,
+): ConversationSessionEdgeRow[] {
+  const links = readBridgeContinuationLinks()
+  const edges = new Map<string, ConversationSessionEdgeRow>()
+  const addEdge = (
+    conversationId: string,
+    childSessionId: string,
+    parentSessionId: string | null,
+    edgeType: ConversationSessionEdgeRow['edge_type'],
+    createdAt: number,
+  ) => {
+    const edgeId = `bridge-link:${conversationId}:${edgeType}:${childSessionId}`
+    if (edges.has(edgeId)) return
+    edges.set(edgeId, {
+      edge_id: edgeId,
+      conversation_id: conversationId,
+      parent_session_id: parentSessionId,
+      child_session_id: childSessionId,
+      edge_type: edgeType,
+      confidence: 'explicit',
+      created_by: 'migration',
+      created_at: createdAt,
+      superseded_at: null,
+    })
+  }
+
+  for (const [childId, parentId] of Object.entries(links)) {
+    const child = byId.get(childId)
+    const parent = byId.get(parentId)
+    if (!child || !parent || child.source === 'tool' || parent.source === 'tool') continue
+    const canonicalParent = bridgeLinkCanonicalParent(parent, child, byId, canonicalParentEvidence)
+    if (!canonicalParent) continue
+    const rootId = rootSessionIdForBridgeLinkBoundary(parent, byId)
+    if (!rootId || !byId.get(rootId)) continue
+    addEdge(rootId, rootId, null, 'root', Number(byId.get(rootId)?.started_at || 0))
+    addEdge(rootId, child.id, canonicalParent.id, 'continues', Number(child.started_at || 0))
+  }
+
+  return [...edges.values()]
+}
+
+function bridgeLinkCanonicalParent(
+  linkedParent: ConversationSessionRow,
+  child: ConversationSessionRow,
+  byId: Map<string, ConversationSessionRow>,
+  canonicalParentEvidence: Map<string, ParentEvidence>,
+): ConversationSessionRow | null {
+  const evidence = canonicalParentEvidence.get(child.id)
+  const evidenceParent = evidence ? byId.get(evidence.parentId) : null
+  if (evidenceParent && evidenceParent.source !== 'tool') return evidenceParent
+
+  if (!isOutputEmptyCompressionSession(linkedParent)) return null
+  if (!isBridgeContextPrompt(child.raw_preview || child.preview || child.title)) return null
+  const nativeChildren = [...byId.values()]
+    .filter(session => session.parent_session_id === linkedParent.id)
+    .filter(session => session.source === linkedParent.source && session.source !== 'tool')
+    .filter(session => hasConversationContent(session))
+    .filter(session => !isAgentLikeBranchSession(session, byId))
+  if (nativeChildren.length !== 1) return null
+  const nativeChild = nativeChildren[0]
+  if (contextReferencesParent(nativeChild, child)) return nativeChild
+  if (Number(child.started_at || 0) >= Number(nativeChild.started_at || 0)) return nativeChild
+  return null
+}
+
+function augmentExplicitLineageFacts(
+  facts: ExplicitLineageFacts,
+  byId: Map<string, ConversationSessionRow>,
+  canonicalParentEvidence: Map<string, ParentEvidence> = new Map(),
+): ExplicitLineageFacts {
+  return mergeExplicitLineageFacts(facts, {
+    threads: synthesizeConversationThreadsFromSessionLineage(facts.sessionLineage, byId),
+    edges: synthesizeConversationEdgesFromSessionLineage(facts.sessionLineage, byId),
+    sessionLineage: facts.sessionLineage,
+  }, {
+    threads: synthesizeConversationThreadsFromBridgeLinks(byId, canonicalParentEvidence),
+    edges: synthesizeConversationEdgesFromBridgeLinks(byId, canonicalParentEvidence),
+    sessionLineage: [],
+  })
+}
+
+function explicitFactSessionIds(facts: ExplicitLineageFacts): Set<string> {
+  const ids = new Set<string>()
+  for (const thread of facts.threads) {
+    if (thread.root_session_id) ids.add(thread.root_session_id)
+  }
+  for (const edge of facts.edges) {
+    if (edge.parent_session_id) ids.add(edge.parent_session_id)
+    if (edge.child_session_id) ids.add(edge.child_session_id)
+  }
+  return ids
 }
 
 function explicitGraphForSession(
@@ -2518,6 +2989,17 @@ function buildExplicitChildrenByParent(graph: ExplicitConversationGraph): Map<st
     const siblings = children.get(parentId) || []
     if (!siblings.includes(edge.child_session_id)) siblings.push(edge.child_session_id)
     children.set(parentId, siblings)
+  }
+  return children
+}
+
+function buildDirectChildrenByParent(sessions: ConversationSessionRow[]): Map<string | null, string[]> {
+  const children = new Map<string | null, string[]>()
+  for (const session of sessions) {
+    const key = session.parent_session_id ?? null
+    const siblings = children.get(key) || []
+    siblings.push(session.id)
+    children.set(key, siblings)
   }
   return children
 }
@@ -2726,7 +3208,7 @@ async function loadConversationSessions(source?: string, includeTool = false): P
     const nowSeconds = Date.now() / 1000
     const sessions = rows.map(row => mapSessionRow(row, nowSeconds, liveTuiSessionKeys))
     linkOrphanCompressionContinuations(sessions)
-    linkParentlessEmptyCompressionPivots(sessions)
+    linkParentlessEmptyCompressionPivots(sessions, listSessionLineage())
     linkOrphanBridgeContextRootContinuations(sessions)
     linkOrphanBridgeContextBranchContinuations(sessions)
     if (shouldTraceConversationAggregation()) {
@@ -2780,32 +3262,21 @@ export async function listConversationSummariesFromDb(options: ConversationListO
   const startedAt = Date.now()
   const humanOnly = options.humanOnly !== false
   const limit = options.limit && options.limit > 0 ? options.limit : DEFAULT_CONVERSATION_LIMIT
-  const explicitSessions = humanOnly ? await loadRawConversationSessions(options.source) : []
-  const explicitById = new Map(explicitSessions.map(session => [session.id, session]))
   let explicitSummaries: ConversationSummary[] = []
   let explicitSessionIds = new Set<string>()
+  const sessions = await loadConversationSessions(options.source)
+  traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  let explicitFacts: ExplicitLineageFacts = { threads: [], edges: [], sessionLineage: [] }
   if (humanOnly) {
     const db = await openConversationDb()
     try {
-      const graphs = buildExplicitConversationGraphs(
-        listConversationThreadsReadOnly(db),
-        listActiveExplicitConversationSessionEdges(db),
-        explicitById,
-      )
-      explicitSessionIds = new Set(graphs.flatMap(graph => [
-        ...graph.mainline.map(session => session.id),
-        ...graph.branchEdges.map(edge => edge.child_session_id),
-      ]))
-      explicitSummaries = graphs
-        .map(graph => explicitSummaryForGraph(graph, db, explicitById))
-        .filter((summary): summary is ConversationSummary => !!summary)
+      explicitFacts = augmentExplicitLineageFacts(loadExplicitLineageFacts(db), byId)
+      explicitSessionIds = explicitFactSessionIds(explicitFacts)
     } finally {
       db.close()
     }
   }
-  const sessions = await loadConversationSessions(options.source)
-  traceAggregationTiming('loaded-sessions', startedAt, { sessionCount: sessions.length })
-  const byId = new Map(sessions.map(session => [session.id, session]))
   const parentEvidence = buildParentEvidenceMap(sessions, explicitSessionIds)
   traceAggregationTiming('built-parent-evidence', startedAt, {
     parentEvidenceCount: parentEvidence.size,
@@ -2813,13 +3284,7 @@ export async function listConversationSummariesFromDb(options: ConversationListO
     fallbackInferenceCount: [...parentEvidence.values()].filter(evidence => evidence.kind === 'fallback_inference').length,
   })
   const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
-  const directChildrenByParent = new Map<string | null, string[]>()
-  for (const session of sessions) {
-    const key = session.parent_session_id ?? null
-    const siblings = directChildrenByParent.get(key) || []
-    siblings.push(session.id)
-    directChildrenByParent.set(key, siblings)
-  }
+  const directChildrenByParent = buildDirectChildrenByParent(sessions)
   const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
   const rootMemo = new Map<string, string | null>()
   const mainlineByRoot = buildMainlineByRoot(sessions, byId, childrenByParent, parentEvidence, inferredChildren)
@@ -2827,10 +3292,29 @@ export async function listConversationSummariesFromDb(options: ConversationListO
 
   if (!humanOnly) {
     return sortByRecency(sessions.map(toSummary)).slice(0, limit)
-    }
+  }
 
+  const canonicalExplicitFacts = augmentExplicitLineageFacts(explicitFacts, byId, parentEvidence)
   const db = await openConversationDb()
   try {
+    const graphs = buildExplicitConversationGraphs(
+      canonicalExplicitFacts.threads,
+      canonicalExplicitFacts.edges,
+      byId,
+      {
+        parentEvidence,
+        childrenByParent,
+        sessionLineage: explicitFacts.sessionLineage,
+      },
+    )
+    explicitSessionIds = new Set(graphs.flatMap(graph => [
+      ...graph.mainline.map(session => session.id),
+      ...graph.branchEdges.map(edge => edge.child_session_id),
+    ]))
+    explicitSummaries = graphs
+      .map(graph => explicitSummaryForGraph(graph, db, byId))
+      .filter((summary): summary is ConversationSummary => !!summary)
+
     const rootIds = sessions
       .filter(session => session.source !== 'tool')
       .filter(session => !explicitSessionIds.has(session.id))
@@ -2865,18 +3349,40 @@ export async function listConversationSummariesFromDb(options: ConversationListO
 export async function getConversationDetailFromDb(sessionId: string, options: ConversationListOptions = {}): Promise<ConversationDetail | null> {
   const humanOnly = options.humanOnly !== false
   let protectedExplicitSessionIds = new Set<string>()
+  const sessions = await loadConversationSessions(options.source, true)
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  let explicitFacts: ExplicitLineageFacts = { threads: [], edges: [], sessionLineage: [] }
   if (humanOnly) {
-    const explicitSessions = await loadRawConversationSessions(options.source, true)
-    const explicitById = new Map(explicitSessions.map(session => [session.id, session]))
+    const db = await openConversationDb()
+    try {
+      explicitFacts = augmentExplicitLineageFacts(loadExplicitLineageFacts(db), byId)
+      protectedExplicitSessionIds = explicitFactSessionIds(explicitFacts)
+    } finally {
+      db.close()
+    }
+  }
+  const parentEvidence = buildParentEvidenceMap(sessions, protectedExplicitSessionIds)
+  const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
+  const directChildrenByParent = buildDirectChildrenByParent(sessions)
+  const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
+  const rootMemo = new Map<string, string | null>()
+
+  if (humanOnly) {
+    const canonicalExplicitFacts = augmentExplicitLineageFacts(explicitFacts, byId, parentEvidence)
     const db = await openConversationDb()
     try {
       const graphs = buildExplicitConversationGraphs(
-          listConversationThreadsReadOnly(db),
-          listActiveExplicitConversationSessionEdges(db),
-          explicitById,
+        canonicalExplicitFacts.threads,
+        canonicalExplicitFacts.edges,
+        byId,
+        {
+          parentEvidence,
+          childrenByParent,
+          sessionLineage: explicitFacts.sessionLineage,
+        },
       )
       const graph = explicitGraphForSession(sessionId, graphs)
-      if (graph) return explicitDetailForGraph(sessionId, graph, db, explicitById)
+      if (graph) return explicitDetailForGraph(sessionId, graph, db, byId)
       protectedExplicitSessionIds = new Set(graphs.flatMap(explicitGraph => [
         ...explicitGraph.mainline.map(session => session.id),
         ...explicitGraph.branchEdges.map(edge => edge.child_session_id),
@@ -2885,20 +3391,6 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       db.close()
     }
   }
-
-  const sessions = await loadConversationSessions(options.source, true)
-  const byId = new Map(sessions.map(session => [session.id, session]))
-  const parentEvidence = buildParentEvidenceMap(sessions, protectedExplicitSessionIds)
-  const inferredChildren = buildInferredBridgeContextChildrenMap(parentEvidence)
-  const directChildrenByParent = new Map<string | null, string[]>()
-  for (const session of sessions) {
-    const key = session.parent_session_id ?? null
-    const siblings = directChildrenByParent.get(key) || []
-    siblings.push(session.id)
-    directChildrenByParent.set(key, siblings)
-  }
-  const childrenByParent = mergeChildrenByParent(directChildrenByParent, inferredChildren)
-  const rootMemo = new Map<string, string | null>()
 
   let chain: ConversationSessionRow[] = []
   if (!humanOnly) {
