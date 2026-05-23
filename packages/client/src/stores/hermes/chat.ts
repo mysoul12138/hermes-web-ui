@@ -83,6 +83,7 @@ import {
   isStaleBridgeRunError,
   sanitizeForCache,
   scrubBuggyReasoningInCache,
+  scrubBuggyReasoningInMessages,
 } from '@/custom/utils/message-helpers'
 import {
   countBranchTree,
@@ -698,7 +699,7 @@ export const useChatStore = defineStore('chat', () => {
         })
       }
       if (!messagesEquivalent(existing.messages, mergedMessages)) {
-        existing.messages = mergedMessages
+        existing.messages = scrubBuggyReasoningInMessages(mergedMessages)
       }
     }
     existing.createdAt = nextSession.createdAt
@@ -878,7 +879,7 @@ export const useChatStore = defineStore('chat', () => {
         existing.source = nextSession.source
         existing.model = nextSession.model
         if (!messagesEquivalent(existing.messages, nextMessages)) {
-          existing.messages = nextMessages
+          existing.messages = scrubBuggyReasoningInMessages(nextMessages)
         }
         existing.createdAt = nextSession.createdAt
         existing.updatedAt = nextSession.updatedAt
@@ -1921,10 +1922,10 @@ export const useChatStore = defineStore('chat', () => {
         const localBridge = bridgeLocalByPersistent.get(s.id)
         const localBridgeMessages = localBridge ? msgsByIdBefore.get(localBridge.id) || localBridge.messages : null
         if (prev && prev.length) {
-          s.messages = prev
+          s.messages = scrubBuggyReasoningInMessages(prev)
         } else if (localBridgeMessages?.length) {
-          s.messages = localBridgeMessages
-          saveJsonWithLegacy(msgsCacheKey(s.id), sanitizeForCache(localBridgeMessages), legacyMsgsCacheKey(s.id))
+          s.messages = scrubBuggyReasoningInMessages(localBridgeMessages)
+          saveJsonWithLegacy(msgsCacheKey(s.id), sanitizeForCache(s.messages), legacyMsgsCacheKey(s.id))
         }
         const branchMeta = branchMetaByIdBefore.get(s.id)
           || branchMetaIndex[s.id]
@@ -2738,7 +2739,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!s) return
     const idx = s.messages.findIndex(m => m.id === id)
     if (idx !== -1) {
-      s.messages[idx] = { ...s.messages[idx], ...update }
+      s.messages[idx] = scrubBuggyReasoningInMessages([{ ...s.messages[idx], ...update }])[0]
     }
   }
 

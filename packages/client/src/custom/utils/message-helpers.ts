@@ -264,7 +264,7 @@ export function serverHasBetterToolDetails(local: Message[], server: Message[]):
 }
 
 export function mergeToolMessageDetails(local: Message, server: Message): Message {
-  return {
+  return scrubBuggyReasoning({
     ...local,
     toolName: local.toolName && local.toolName !== 'tool' ? local.toolName : server.toolName,
     toolPreview: betterToolText(local.toolPreview, server.toolPreview),
@@ -273,16 +273,16 @@ export function mergeToolMessageDetails(local: Message, server: Message): Messag
     toolInlineDiff: betterToolText(local.toolInlineDiff, server.toolInlineDiff),
     toolCallId: local.toolCallId || server.toolCallId,
     toolStatus: server.toolResult ? (server.toolStatus || 'done') : (local.toolStatus || server.toolStatus),
-  }
+  })
 }
 
 export function mergeServerToolDetails(local: Message[], server: Message[]): Message[] {
   const serverTools = server.filter(m => m.role === 'tool')
-  if (!serverTools.length) return local
+  if (!serverTools.length) return scrubBuggyReasoningInMessages(local)
 
   const usedServerIndexes = new Set<number>()
   const next = local.map((message) => {
-    if (message.role !== 'tool') return message
+    if (message.role !== 'tool') return scrubBuggyReasoning(message)
     const byId = serverTools.findIndex((tool, idx) =>
       !usedServerIndexes.has(idx)
       && (
@@ -293,16 +293,16 @@ export function mergeServerToolDetails(local: Message[], server: Message[]): Mes
     const fallback = byId >= 0
       ? byId
       : serverTools.findIndex((_, idx) => !usedServerIndexes.has(idx))
-    if (fallback < 0) return message
+    if (fallback < 0) return scrubBuggyReasoning(message)
     usedServerIndexes.add(fallback)
     return mergeToolMessageDetails(message, serverTools[fallback])
   })
 
   for (const [idx, tool] of serverTools.entries()) {
-    if (!usedServerIndexes.has(idx)) next.push(tool)
+    if (!usedServerIndexes.has(idx)) next.push(scrubBuggyReasoning(tool))
   }
 
-  return next
+  return scrubBuggyReasoningInMessages(next)
 }
 
 export function messagesEquivalent(a: Message[], b: Message[]): boolean {
@@ -420,7 +420,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     if (matchesServerPersistedSteer(message, serverPersistedSteers)) return false
     return !matchedLocalSteeredIds.has(message.id)
   })
-  if (!localPreserved.length) return reorderedMerged
+  if (!localPreserved.length) return scrubBuggyReasoningInMessages(reorderedMerged)
   const result = [...reorderedMerged]
   const anchorIds = new Set(result.map(message => message.id))
   const currentIndexById = new Map(current.map((message, index) => [message.id, index] as const))
@@ -482,7 +482,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     if (!inserted) result.push(msg)
     anchorIds.add(msg.id)
   }
-  return result
+  return scrubBuggyReasoningInMessages(result)
 }
 
 function matchesServerPersistedSteer(local: Message, serverSteers: Message[]): boolean {
@@ -650,7 +650,7 @@ export function isStaleBridgeRunError(error: unknown): boolean {
 }
 
 export function sanitizeForCache(msgs: Message[]): Message[] {
-  return msgs.map(m => {
+  return scrubBuggyReasoningInMessages(msgs).map(m => {
     const { isStreaming: _isStreaming, ...rest } = m
     if (!m.attachments?.length) return rest
     return {
@@ -661,6 +661,10 @@ export function sanitizeForCache(msgs: Message[]): Message[] {
 }
 
 export function scrubBuggyReasoningInCache(msgs: Message[] | null | undefined): Message[] {
+  return scrubBuggyReasoningInMessages(msgs)
+}
+
+export function scrubBuggyReasoningInMessages(msgs: Message[] | null | undefined): Message[] {
   if (!msgs) return []
   return msgs.map(scrubBuggyReasoning)
 }

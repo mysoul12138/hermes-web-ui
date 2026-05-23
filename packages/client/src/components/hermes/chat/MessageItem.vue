@@ -17,6 +17,7 @@ import {
 import { useGlobalSpeech } from "@/composables/useSpeech";
 import { isDiffLikeContent } from "@/custom/utils/diff-detector";
 import { withAuthToken } from "@/custom/utils/auth-url";
+import { isBuggyReasoningPreview } from "@/custom/utils/display-helpers";
 import { useVoiceSettings } from "@/composables/useVoiceSettings";
 
 const TOOL_PAYLOAD_DISPLAY_LIMIT = 2000;
@@ -95,7 +96,7 @@ const displayReasoning = computed(() => {
   const reasoning = props.message.reasoning?.trim() || "";
   const content = props.message.content?.trim() || "";
   if (!reasoning || isPlaceholderThinkingText(reasoning)) return "";
-  if (content && (content === reasoning || content.startsWith(reasoning) || reasoning.startsWith(content))) return "";
+  if (content && isBuggyReasoningPreview(reasoning, content)) return "";
   return reasoning;
 });
 

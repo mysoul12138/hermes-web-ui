@@ -10,6 +10,18 @@ vi.mock('vue-i18n', () => ({
 }))
 
 vi.mock('naive-ui', () => ({
+  NDrawer: {
+    name: 'NDrawer',
+    template: '<div><slot /></div>',
+  },
+  NDrawerContent: {
+    name: 'NDrawerContent',
+    template: '<div><slot /></div>',
+  },
+  NSpin: {
+    name: 'NSpin',
+    template: '<div><slot /></div>',
+  },
   useMessage: () => ({
     error: vi.fn(),
     success: vi.fn(),
@@ -19,6 +31,7 @@ vi.mock('naive-ui', () => ({
 }))
 
 import MessageItem from '@/components/hermes/chat/MessageItem.vue'
+import { useSettingsStore } from '@/stores/hermes/settings'
 import type { Message } from '@/stores/hermes/chat'
 
 describe('MessageItem tool details', () => {
@@ -223,6 +236,42 @@ describe('MessageItem tool details', () => {
 
     expect(wrapper.find('.thinking-block').exists()).toBe(false)
     expect(wrapper.find('.msg-content').text()).toContain('release-notes-monitor')
+  })
+
+  it('does not render a thinking block when reasoning is a near-duplicate answer preview', () => {
+    const content = '修复会放在前端 hydration/live merge 边界：当 assistant reasoning 与最终正文高度相同，就丢弃 bogus reasoning，只保留正文显示。'
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-near-duplicate-reasoning',
+          role: 'assistant',
+          content,
+          reasoning: '修复放在前端 hydration live merge 边界，当 assistant 的 reasoning 和最终正文高度相同，会丢弃 bogus reasoning 并只保留正文。',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(wrapper.find('.thinking-block').exists()).toBe(false)
+    expect(wrapper.find('.msg-content').text()).toContain('hydration/live merge')
+  })
+
+  it('still renders distinct assistant reasoning that is not an answer preview', async () => {
+    useSettingsStore().display.show_reasoning = true
+    const wrapper = mount(MessageItem, {
+      props: {
+        message: {
+          id: 'assistant-distinct-reasoning',
+          role: 'assistant',
+          content: '最终结论：只清洗 bogus reasoning，不隐藏真实思考过程。',
+          reasoning: '先比较缓存与服务端快照的消息字段，再确认 merge 边界是否会把旧 reasoning 继续带入。',
+          timestamp: Date.now(),
+        } satisfies Message,
+      },
+    })
+
+    expect(wrapper.find('.thinking-block').exists()).toBe(true)
+    expect(wrapper.find('.thinking-body').text()).toContain('缓存与服务端快照')
   })
 
   it('expands preview-only tool messages', async () => {

@@ -169,6 +169,127 @@ describe('Chat Store', () => {
     expect(store.messages.map(m => m.content)).toEqual(['draft'])
   })
 
+  it('scrubs bogus cached assistant reasoning during active-session hydration', async () => {
+    const answer = '这次修复会放在前端 hydration 和 live merge 边界，避免旧缓存把最终回答当成思考过程再次展示。'
+    const cachedSession = {
+      id: 'cached-bogus-reasoning',
+      title: 'Cached bogus reasoning',
+      source: 'api_server',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 2,
+    }
+
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, cachedSession.id)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([cachedSession]))
+    window.localStorage.setItem(sessionMessagesKey(cachedSession.id), JSON.stringify([
+      { id: 'u1', role: 'user', content: 'ask', timestamp: 1 },
+      {
+        id: 'a-bogus',
+        role: 'assistant',
+        content: answer,
+        reasoning: `${answer}。`,
+        timestamp: 2,
+      },
+      {
+        id: 'a-real',
+        role: 'assistant',
+        content: '最终答案：保留独立思考。',
+        reasoning: '我需要先检查 hydration，再确认 live merge 是否会保留旧缓存字段。',
+        timestamp: 3,
+      },
+    ]))
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([makeSummary(cachedSession.id, 'Cached bogus reasoning')])
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail(cachedSession.id, [
+      {
+        id: 'u1',
+        session_id: cachedSession.id,
+        role: 'user',
+        content: 'ask',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 'a-bogus',
+        session_id: cachedSession.id,
+        role: 'assistant',
+        content: answer,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 2,
+        token_count: null,
+        finish_reason: 'stop',
+        reasoning: null,
+      },
+    ]))
+
+    const store = useChatStore()
+    await store.loadSessions()
+
+    expect(store.messages.find(message => message.id === 'a-bogus')?.reasoning).toBeUndefined()
+    expect(store.messages.find(message => message.id === 'a-real')?.reasoning).toContain('hydration')
+  })
+
+  it('scrubs bogus local reasoning when switchSession keeps local messages during an active run', async () => {
+    const answer = 'Live snapshot 已经有同一段最终回答，旧缓存里的 reasoning 不应继续作为 thinking 展示。'
+    window.localStorage.setItem(inFlightKey('live-bogus-reasoning'), JSON.stringify({ runId: 'run-active', startedAt: Date.now() }))
+
+    mockSessionsApi.fetchSessions.mockResolvedValue([makeSummary('live-bogus-reasoning', 'Live bogus reasoning')])
+    mockSessionsApi.fetchSession.mockResolvedValue(makeDetail('live-bogus-reasoning', [
+      {
+        id: 'u1',
+        session_id: 'live-bogus-reasoning',
+        role: 'user',
+        content: 'ask',
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 1,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      },
+      {
+        id: 'a1',
+        session_id: 'live-bogus-reasoning',
+        role: 'assistant',
+        content: answer,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 2,
+        token_count: null,
+        finish_reason: 'stop',
+        reasoning: null,
+      },
+    ]))
+
+    const store = useChatStore()
+    await store.loadSessions()
+    store.activeSession!.messages = [
+      { id: 'u1', role: 'user', content: 'ask', timestamp: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: answer,
+        reasoning: answer,
+        timestamp: 2,
+      },
+    ]
+
+    await store.switchSession('live-bogus-reasoning')
+
+    expect(store.messages.find(message => message.id === 'a1')?.content).toBe(answer)
+    expect(store.messages.find(message => message.id === 'a1')?.reasoning).toBeUndefined()
+  })
+
   it('does not let a stale server refresh erase a newer local assistant reply', async () => {
     const cachedMessages = [
       { id: 'u1', role: 'user', content: 'expensive task', timestamp: 1 },

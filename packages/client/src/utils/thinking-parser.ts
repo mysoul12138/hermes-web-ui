@@ -100,6 +100,7 @@ export function isPlaceholderThinkingText(text: string): boolean {
 
   if (!cleaned) return true
   if (/^[.\s…]+$/.test(cleaned)) return true
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(cleaned) && cleaned.length > 8) return false
 
   const words = (cleaned.match(/[a-z]+/gi) || [])
     .map(word => word.replace(/[.]+$/g, ''))
