@@ -408,6 +408,8 @@ export const useChatStore = defineStore('chat', () => {
   const isLoadingSessions = ref(false)
   const sessionsLoaded = ref(false)
   const isLoadingMessages = ref(false)
+  const loadingMessagesSessionId = ref<string | null>(null)
+  const loadedMessageSessionIds = ref<Set<string>>(new Set())
   // tmux-like resume state: true when we recovered an in-flight run from
   // localStorage after a refresh and are polling fetchSession for progress.
   // UI shows the thinking indicator while this is set.
@@ -444,6 +446,15 @@ export const useChatStore = defineStore('chat', () => {
 
   const activeSession = ref<Session | null>(null)
   const messages = computed<Message[]>(() => activeSession.value?.messages || [])
+  const isActiveSessionInitialMessageLoad = computed(() => {
+    const sid = activeSessionId.value
+    const session = activeSession.value
+    if (!sid || !session) return false
+    return isLoadingMessages.value
+      && loadingMessagesSessionId.value === sid
+      && session.messages.length === 0
+      && !loadedMessageSessionIds.value.has(sid)
+  })
   const activeBranches = computed<ConversationBranch[]>(() => {
     const sid = activeSessionId.value
     if (!sid) return []
@@ -2475,6 +2486,7 @@ export const useChatStore = defineStore('chat', () => {
       updatedAt: Date.now(),
     }
     sessions.value.unshift(session)
+    loadedMessageSessionIds.value = new Set([...loadedMessageSessionIds.value, session.id])
     // Persist immediately so a refresh before run.completed can still find
     // this session in the cache.
     persistSessionsList()
@@ -2526,6 +2538,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     isLoadingMessages.value = true
+    loadingMessagesSessionId.value = sessionId
 
     try {
       const detail = prefetchedDetail ?? await fetchResolvedSessionDetail(sessionId)
@@ -2637,11 +2650,13 @@ export const useChatStore = defineStore('chat', () => {
         })
         persistActiveMessages()
       }
+      loadedMessageSessionIds.value = new Set([...loadedMessageSessionIds.value, sessionId])
     } catch (err) {
       console.error('Failed to load session messages:', err)
     } finally {
       if (switchRequestId === latestSwitchRequestId && activeSessionId.value === sessionId && activeSession.value?.id === sessionId) {
         isLoadingMessages.value = false
+        loadingMessagesSessionId.value = null
       }
     }
 
@@ -3372,6 +3387,7 @@ export const useChatStore = defineStore('chat', () => {
     focusMessageId,
     messages,
     displayMessages,
+    isActiveSessionInitialMessageLoad,
     activeCompression,
     activeBranches,
     isStreaming,
@@ -3384,6 +3400,7 @@ export const useChatStore = defineStore('chat', () => {
     isLoadingSessions,
     sessionsLoaded,
     isLoadingMessages,
+    loadingMessagesSessionId,
 
     newChat,
     switchSession,

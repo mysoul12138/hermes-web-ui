@@ -2612,6 +2612,144 @@ describe('Chat Store', () => {
     expect(store.messages.map(message => message.content)).toEqual(['new content'])
   })
 
+  it('does not treat a new empty session as an initial historical detail load', async () => {
+    let resolveDetail: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation(() => new Promise(resolve => {
+      resolveDetail = resolve
+    }) as any)
+
+    const store = useChatStore()
+    store.newChat()
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(true)
+    expect(store.isActiveSessionInitialMessageLoad).toBe(false)
+    expect(store.messages).toEqual([])
+
+    resolveDetail?.(null)
+    await flushPromises()
+    expect(store.isLoadingMessages).toBe(false)
+  })
+
+  it('marks only the current empty historical session as initial detail loading', async () => {
+    const sid = 'historical-empty-loading'
+    let resolveDetail: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation((id: string) => {
+      if (id === sid) {
+        return new Promise(resolve => {
+          resolveDetail = resolve
+        }) as any
+      }
+      return Promise.resolve(null) as any
+    })
+
+    const store = useChatStore()
+    store.sessions.push({ id: sid, title: 'History', source: 'tui', messages: [], createdAt: 1, updatedAt: 1 } as any)
+
+    const loading = store.switchSession(sid)
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(true)
+    expect(store.loadingMessagesSessionId).toBe(sid)
+    expect(store.isActiveSessionInitialMessageLoad).toBe(true)
+
+    resolveDetail?.(makeDetail(sid, []))
+    await loading
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(false)
+    expect(store.isActiveSessionInitialMessageLoad).toBe(false)
+  })
+
+  it('keeps loaded messages visible without initial skeleton state during background refresh', async () => {
+    const sid = 'loaded-session-refresh'
+    let resolveDetail: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation((id: string) => {
+      if (id === sid) {
+        return new Promise(resolve => {
+          resolveDetail = resolve
+        }) as any
+      }
+      return Promise.resolve(null) as any
+    })
+
+    const store = useChatStore()
+    store.sessions.push({
+      id: sid,
+      title: 'Loaded',
+      source: 'tui',
+      messages: [{ id: 'cached-a1', role: 'assistant', content: 'cached answer', timestamp: 1 }],
+      createdAt: 1,
+      updatedAt: 1,
+    } as any)
+
+    const loading = store.switchSession(sid)
+    await flushPromises()
+
+    expect(store.isLoadingMessages).toBe(true)
+    expect(store.isActiveSessionInitialMessageLoad).toBe(false)
+    expect(store.messages.map(message => message.content)).toEqual(['cached answer'])
+
+    resolveDetail?.(makeDetail(sid, [
+      { id: 'fresh-a1', role: 'assistant', content: 'fresh answer', timestamp: 2 },
+    ]))
+    await loading
+    await flushPromises()
+
+    expect(store.messages.map(message => message.content)).toEqual(['fresh answer'])
+  })
+
+  it('does not let a slow previous request keep the wrong session in initial loading state', async () => {
+    const oldId = 'slow-initial-loading'
+    const newId = 'new-empty-loaded-session'
+
+    let resolveOld: ((value: any) => void) | null = null
+    let resolveNew: ((value: any) => void) | null = null
+    mockSessionsApi.fetchSession.mockImplementation((id: string) => {
+      if (id === oldId) {
+        return new Promise(resolve => {
+          resolveOld = resolve
+        }) as any
+      }
+      if (id === newId) {
+        return new Promise(resolve => {
+          resolveNew = resolve
+        }) as any
+      }
+      return Promise.resolve(null) as any
+    })
+
+    const store = useChatStore()
+    store.sessions.push(
+      { id: oldId, title: 'Old', source: 'tui', messages: [], createdAt: 1, updatedAt: 1 } as any,
+      { id: newId, title: 'New', source: 'tui', messages: [], createdAt: 2, updatedAt: 2 } as any,
+    )
+
+    const oldSwitch = store.switchSession(oldId)
+    await flushPromises()
+    const newSwitch = store.switchSession(newId)
+    await flushPromises()
+
+    resolveNew?.(makeDetail(newId, []))
+    await newSwitch
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(newId)
+    expect(store.isLoadingMessages).toBe(false)
+    expect(store.isActiveSessionInitialMessageLoad).toBe(false)
+
+    resolveOld?.(makeDetail(oldId, [
+      { id: 'old-u1', role: 'user', content: 'old content', timestamp: 1 },
+    ]))
+    await oldSwitch
+    await flushPromises()
+
+    expect(store.activeSessionId).toBe(newId)
+    expect(store.isLoadingMessages).toBe(false)
+    expect(store.loadingMessagesSessionId).toBeNull()
+    expect(store.isActiveSessionInitialMessageLoad).toBe(false)
+  })
+
   it('does not let an older switchSession detail response overwrite the current active title', async () => {
     const sessionA = 'race-a'
     const sessionB = 'race-b'

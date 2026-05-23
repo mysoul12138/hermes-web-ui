@@ -114,7 +114,7 @@ describe('MessageList', () => {
     expect(wrapper.find('.message-item-stub').text()).toContain('cached message')
   })
 
-  it('does not add a session-content loading indicator for the empty state', () => {
+  it('shows a session-content loading skeleton during the first empty historical detail load', () => {
     const store = useChatStore()
     store.activeSessionId = 'sess-empty'
     store.activeSession = {
@@ -126,9 +126,78 @@ describe('MessageList', () => {
       updatedAt: Date.now(),
     }
     store.isLoadingMessages = true
+    store.loadingMessagesSessionId = 'sess-empty'
 
     const wrapper = mount(MessageList)
 
+    expect(wrapper.find('.session-content-loading-skeleton').text()).toContain('chat.updatingSessionContent')
+    expect(wrapper.find('.session-content-loading-lines').exists()).toBe(true)
+    expect(wrapper.find('.empty-state').exists()).toBe(false)
+  })
+
+  it('shows the empty state for a new empty session even when a message load flag is still true', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'new-empty-session'
+    store.activeSession = {
+      id: 'new-empty-session',
+      title: '',
+      source: 'tui',
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    store.isLoadingMessages = true
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.session-content-loading-skeleton').exists()).toBe(false)
+    expect(wrapper.find('.session-content-loading').exists()).toBe(false)
+    expect(wrapper.find('.empty-state').exists()).toBe(true)
+  })
+
+  it('keeps cached messages visible without a skeleton during background refresh', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'sess-loaded-refresh'
+    store.activeSession = {
+      id: 'sess-loaded-refresh',
+      title: 'Loaded Refresh',
+      source: 'tui',
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: 'still visible',
+          timestamp: Date.now(),
+        },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    store.isLoadingMessages = true
+    store.loadingMessagesSessionId = 'sess-loaded-refresh'
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.session-content-loading-skeleton').exists()).toBe(false)
+    expect(wrapper.find('.message-item-stub').text()).toContain('still visible')
+  })
+
+  it('shows the empty state only after empty messages finish loading', () => {
+    const store = useChatStore()
+    store.activeSessionId = 'sess-empty-loaded'
+    store.activeSession = {
+      id: 'sess-empty-loaded',
+      title: 'Empty Loaded',
+      source: 'api_server',
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    store.isLoadingMessages = false
+
+    const wrapper = mount(MessageList)
+
+    expect(wrapper.find('.session-content-loading-skeleton').exists()).toBe(false)
     expect(wrapper.find('.session-content-loading').exists()).toBe(false)
     expect(wrapper.find('.empty-state').exists()).toBe(true)
   })

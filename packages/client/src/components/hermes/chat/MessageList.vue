@@ -28,8 +28,15 @@ let customScrollbarRafId: number | null = null;
 let followLatestRafId: number | null = null;
 
 const displayMessages = computed(() => chatStore.displayMessages);
+const hasDisplayMessages = computed(() => displayMessages.value.length > 0);
+const showSessionContentLoadingSkeleton = computed(() =>
+  chatStore.isActiveSessionInitialMessageLoad,
+);
 const showSessionContentUpdating = computed(() =>
-  chatStore.isLoadingMessages && displayMessages.value.length > 0,
+  chatStore.isLoadingMessages && hasDisplayMessages.value,
+);
+const showEmptyState = computed(() =>
+  !showSessionContentLoadingSkeleton.value && !hasDisplayMessages.value,
 );
 
 const assistantAvatarUrl = computed(() =>
@@ -385,12 +392,26 @@ watch(
 <template>
   <div class="message-list-shell">
     <div ref="listRef" class="message-list" @scroll="handleScroll">
-      <div class="message-list-stage" :class="{ 'is-empty': displayMessages.length === 0 }">
+      <div class="message-list-stage" :class="{ 'is-empty': !hasDisplayMessages }">
         <div v-if="chatStore.activeSession?.isBranchSession" class="branch-view-banner">
           <span class="branch-view-title">{{ chatStore.activeSession.title || chatStore.activeSession.id }}</span>
           <span class="branch-view-meta">{{ t("chat.branchActiveHint") }}</span>
         </div>
-        <div v-if="displayMessages.length === 0" class="empty-state">
+        <div
+          v-if="showSessionContentLoadingSkeleton"
+          class="session-content-loading-skeleton"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="session-content-loading-shimmer" aria-hidden="true"></span>
+          <span class="session-content-loading-title">{{ t("chat.updatingSessionContent") }}</span>
+          <span class="session-content-loading-lines" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+        </div>
+        <div v-else-if="showEmptyState" class="empty-state">
           <img src="/logo.png" :alt="assistantName" class="empty-logo" />
           <p>{{ t("chat.emptyState") }}</p>
         </div>
@@ -697,6 +718,74 @@ watch(
 
   p {
     font-size: 14px;
+  }
+}
+
+.session-content-loading-skeleton {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.28));
+  color: $text-muted;
+  pointer-events: none;
+
+  .dark & {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+  }
+}
+
+.session-content-loading-title {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.session-content-loading-lines {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(280px, 70%);
+
+  span {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.08);
+
+    &::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.16), transparent);
+      animation: session-content-shimmer 1.15s ease-in-out infinite;
+      transform: translateX(-100%);
+    }
+
+    &:nth-child(2) {
+      width: 84%;
+    }
+
+    &:nth-child(3) {
+      width: 64%;
+    }
+  }
+
+  .dark & span {
+    background: rgba(255, 255, 255, 0.1);
+
+    &::after {
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.24), transparent);
+    }
   }
 }
 
