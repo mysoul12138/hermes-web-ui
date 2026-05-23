@@ -105,7 +105,6 @@ export interface ConversationDetail {
   thread_session_count: number
   branch_session_count?: number
   branches?: ConversationBranch[]
-  represented_session_ids?: string[]
   continuation_edges?: ConversationContinuationEdge[]
 }
 

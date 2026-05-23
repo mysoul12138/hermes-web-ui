@@ -16,7 +16,6 @@ const getActiveProfileNameMock = vi.fn()
 const loggerWarnMock = vi.fn()
 const loggerInfoMock = vi.fn()
 const getCompressionSnapshotMock = vi.fn()
-const getPersistentSessionIdMock = vi.fn()
 const localDeleteSessionMock = vi.fn()
 const useLocalSessionStoreState = vi.hoisted(() => ({ value: false }))
 
@@ -97,12 +96,6 @@ vi.mock('../../packages/server/src/services/gateway-bootstrap', () => ({
   getGatewayManagerInstance: () => null,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/tui-bridge', () => ({
-  tuiBridge: {
-    getPersistentSessionId: getPersistentSessionIdMock,
-  },
-}))
-
 describe('session conversations controller', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -126,7 +119,6 @@ describe('session conversations controller', () => {
     loggerWarnMock.mockReset()
     loggerInfoMock.mockReset()
     getCompressionSnapshotMock.mockReset()
-    getPersistentSessionIdMock.mockReset()
   })
 
   it('prefers the DB-backed conversations summary path', async () => {
@@ -498,116 +490,6 @@ describe('session conversations controller', () => {
     expect(getConversationDetailFromDbMock).not.toHaveBeenCalled()
     expect(ctx.body.session.id).toBe('api-session')
     expect(ctx.body.session.source).toBe('api_server')
-  })
-
-  it('uses aggregated child detail when opening an empty compression pivot directly', async () => {
-    getSessionDetailFromDbMock.mockResolvedValue({
-      id: 'pivot-session',
-      source: 'tui',
-      model: 'deepseek-v4-flash',
-      title: 'Compaction pivot',
-      started_at: 1,
-      ended_at: 2,
-      last_active: 2,
-      end_reason: 'compression',
-      message_count: 0,
-      tool_call_count: 0,
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      reasoning_tokens: 0,
-      billing_provider: null,
-      billing_base_url: null,
-      estimated_cost_usd: 0,
-      actual_cost_usd: null,
-      cost_status: '',
-      preview: '',
-      messages: [],
-      thread_session_count: 1,
-    })
-    getConversationDetailFromDbMock.mockResolvedValue({
-      session_id: 'pivot-session',
-      title: 'Child conversation',
-      messages: [
-        { id: 10, session_id: 'pivot-child', role: 'user', content: '继续', timestamp: 3 },
-        { id: 11, session_id: 'pivot-child', role: 'assistant', content: 'child answer', timestamp: 4 },
-      ],
-      visible_count: 2,
-      thread_session_count: 2,
-      branch_session_count: 0,
-      represented_session_ids: ['pivot-session', 'pivot-child'],
-      branches: [],
-    })
-
-    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
-    const ctx: any = { params: { id: 'pivot-session' }, body: null }
-    await mod.get(ctx)
-
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('pivot-session', { source: 'tui', humanOnly: true })
-    expect(ctx.body.session.id).toBe('pivot-session')
-    expect(ctx.body.session.messages.map((message: any) => message.session_id)).toEqual(['pivot-child', 'pivot-child'])
-    expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['继续', 'child answer'])
-    expect(ctx.body.session.message_count).toBe(2)
-    expect(ctx.body.session.thread_session_count).toBe(2)
-    expect(ctx.body.session.represented_session_ids).toEqual(['pivot-session', 'pivot-child'])
-  })
-
-  it('uses aggregated detail for a temp web session mapped to an empty compression pivot', async () => {
-    getSessionDetailFromDbMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: 'pivot-session',
-        source: 'tui',
-        model: 'deepseek-v4-flash',
-        title: 'Compaction pivot',
-        started_at: 1,
-        ended_at: 2,
-        last_active: 2,
-        end_reason: 'compression',
-        message_count: 0,
-        tool_call_count: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: 0,
-        billing_provider: null,
-        billing_base_url: null,
-        estimated_cost_usd: 0,
-        actual_cost_usd: null,
-        cost_status: '',
-        preview: '',
-        messages: [],
-        thread_session_count: 1,
-      })
-    getPersistentSessionIdMock.mockReturnValue('pivot-session')
-    getConversationDetailFromDbMock.mockResolvedValue({
-      session_id: 'pivot-session',
-      title: 'Child conversation',
-      messages: [
-        { id: 10, session_id: 'pivot-child', role: 'user', content: '继续', timestamp: 3 },
-        { id: 11, session_id: 'pivot-child', role: 'assistant', content: 'child answer', timestamp: 4 },
-      ],
-      visible_count: 2,
-      thread_session_count: 2,
-      branch_session_count: 0,
-      represented_session_ids: ['pivot-session', 'pivot-child'],
-      branches: [],
-    })
-
-    const mod = await import('../../packages/server/src/controllers/hermes/sessions')
-    const ctx: any = { params: { id: 'web-temp-session' }, body: null }
-    await mod.get(ctx)
-
-    expect(getPersistentSessionIdMock).toHaveBeenCalledWith('web-temp-session')
-    expect(getConversationDetailFromDbMock).toHaveBeenCalledWith('pivot-session', { source: 'tui', humanOnly: true })
-    expect(ctx.body.session.id).toBe('pivot-session')
-    expect(ctx.body.session.messages.map((message: any) => message.session_id)).toEqual(['pivot-child', 'pivot-child'])
-    expect(ctx.body.session.messages.map((message: any) => message.content)).toEqual(['继续', 'child answer'])
-    expect(ctx.body.session.message_count).toBe(2)
-    expect(ctx.body.session.thread_session_count).toBe(2)
-    expect(ctx.body.session.represented_session_ids).toEqual(['pivot-session', 'pivot-child'])
   })
 
   it('supplements local session-store search results with tui sessions from state.db', async () => {

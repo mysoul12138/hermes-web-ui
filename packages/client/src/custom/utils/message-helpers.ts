@@ -302,54 +302,7 @@ export function mergeServerToolDetails(local: Message[], server: Message[]): Mes
     if (!usedServerIndexes.has(idx)) next.push(tool)
   }
 
-  return dedupeAdjacentDuplicateAssistantMessages(next)
-}
-
-export function dedupeAdjacentDuplicateAssistantMessages(messages: Message[]): Message[] {
-  if (messages.length < 2) return messages
-  const next: Message[] = []
-  let changed = false
-  for (const message of messages) {
-    const previous = next[next.length - 1]
-    if (previous && isDuplicateAssistantMessage(previous, message)) {
-      changed = true
-      next[next.length - 1] = mergeDuplicateAssistantMessage(previous, message)
-      continue
-    }
-    next.push(message)
-  }
-  return changed ? next : messages
-}
-
-function isDuplicateAssistantMessage(left: Message, right: Message): boolean {
-  if (left.role !== 'assistant' || right.role !== 'assistant') return false
-  if (left.queued || right.queued) return false
-  if (left.steered || right.steered) return false
-  const leftContent = (left.content || '').trim()
-  const rightContent = (right.content || '').trim()
-  if (!leftContent || leftContent !== rightContent) return false
-  if ((left.toolCallId || '') !== (right.toolCallId || '')) return false
-  if ((left.toolName || '') !== (right.toolName || '')) return false
-  if ((left.toolResult || '') !== (right.toolResult || '')) return false
-  if ((left.toolArgs || '') !== (right.toolArgs || '')) return false
-  return true
-}
-
-function mergeDuplicateAssistantMessage(left: Message, right: Message): Message {
-  const preferRight = isPersistedMessageId(right.id) && !isPersistedMessageId(left.id)
-  const base = preferRight ? right : left
-  const other = preferRight ? left : right
-  return {
-    ...base,
-    content: base.content || other.content,
-    reasoning: base.reasoning || other.reasoning,
-    isStreaming: base.isStreaming || other.isStreaming,
-    timestamp: Math.max(base.timestamp || 0, other.timestamp || 0),
-  }
-}
-
-function isPersistedMessageId(id: unknown): boolean {
-  return typeof id === 'string' && /^\d+$/.test(id)
+  return next
 }
 
 export function messagesEquivalent(a: Message[], b: Message[]): boolean {
@@ -467,7 +420,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     if (matchesServerPersistedSteer(message, serverPersistedSteers)) return false
     return !matchedLocalSteeredIds.has(message.id)
   })
-  if (!localPreserved.length) return dedupeAdjacentDuplicateAssistantMessages(reorderedMerged)
+  if (!localPreserved.length) return reorderedMerged
   const result = [...reorderedMerged]
   const anchorIds = new Set(result.map(message => message.id))
   const currentIndexById = new Map(current.map((message, index) => [message.id, index] as const))
@@ -529,7 +482,7 @@ export function withLocalSteeredMessages(mapped: Message[], current: Message[]):
     if (!inserted) result.push(msg)
     anchorIds.add(msg.id)
   }
-  return dedupeAdjacentDuplicateAssistantMessages(result)
+  return result
 }
 
 function matchesServerPersistedSteer(local: Message, serverSteers: Message[]): boolean {

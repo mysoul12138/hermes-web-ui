@@ -457,52 +457,6 @@ describe('Chat Store', () => {
     ])
   })
 
-  it('dedupes adjacent assistant messages after a temp bridge session resolves and the server snapshot catches up', async () => {
-    const persistentSessionId = '20260523_012546_caf8ff'
-    const answer = 'same streamed answer'
-
-    mockChatApi.startRun.mockResolvedValueOnce({
-      run_id: 'bridge-run-duplicate-assistant',
-      status: 'queued',
-      bridge: true,
-      session_id: undefined,
-    })
-    mockSessionsApi.fetchSession.mockImplementation(async (id: string) => {
-      if (id !== persistentSessionId) return null
-      return makeDetail(persistentSessionId, [
-        { id: 1, session_id: persistentSessionId, role: 'user', content: 'hello from bridge', timestamp: 1710000010 },
-        { id: 2, session_id: persistentSessionId, role: 'assistant', content: answer, timestamp: 1710000011 },
-        { id: 3, session_id: persistentSessionId, role: 'assistant', content: answer, timestamp: 1710000012 },
-      ])
-    })
-
-    const store = useChatStore()
-    store.newChat()
-    const webSessionId = store.activeSessionId!
-    await store.sendMessage('hello from bridge')
-    await flushPromises()
-
-    const onEvent = mockChatApi.streamRunEvents.mock.calls[0]?.[1] as ((event: Record<string, unknown>) => void)
-    onEvent({
-      event: 'session.resolved',
-      web_session_id: webSessionId,
-      persistent_session_id: persistentSessionId,
-      session_id: persistentSessionId,
-    })
-    onEvent({ event: 'message.delta', delta: answer })
-    await flushPromises()
-    const onDone = mockChatApi.streamRunEvents.mock.calls[0]?.[2] as (() => void)
-    onDone()
-    await flushPromises()
-
-    await store.switchSession(persistentSessionId)
-    await flushPromises()
-
-    expect(store.activeSessionId).toBe(persistentSessionId)
-    expect(store.messages.filter(message => message.role === 'assistant' && message.content === answer)).toHaveLength(1)
-    expect(store.messages.map(message => message.content)).toEqual(['hello from bridge', answer])
-  })
-
   it('keeps an existing TUI conversation root when a persistent session resolves', async () => {
     const webSessionId = '20260520_093333_3c3fc9'
     const persistentSessionId = '20260521_092252_fb9174'
