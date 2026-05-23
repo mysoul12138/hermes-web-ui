@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton } from 'naive-ui'
+import { NButton, useMessage } from 'naive-ui'
 import {
   fetchSkillUsageStats,
   type SkillUsageDailyRow,
@@ -10,6 +10,7 @@ import {
 } from '@/api/hermes/skills'
 
 const { t } = useI18n()
+const message = useMessage()
 const periodOptions = [7, 30, 90, 365]
 const maxVisibleChartSkills = 6
 const skillPalette = [
@@ -123,7 +124,7 @@ function hideTooltip(day: SkillUsageDailyRow) {
   }
 }
 
-async function loadStats(days = selectedDays.value, force = false) {
+async function loadStats(days = selectedDays.value, force = false, notify = false) {
   selectedDays.value = days
   const seq = ++requestSeq
   latestRequestByPeriod[days] = seq
@@ -137,6 +138,7 @@ async function loadStats(days = selectedDays.value, force = false) {
         ...statsByPeriod.value,
         [days]: next,
       }
+      if (notify) message.success(t('skillsUsage.refreshSuccess'))
     }
     if (seq === requestSeq) error.value = ''
   } catch (err: any) {
@@ -173,7 +175,7 @@ onMounted(() => {
             {{ t('skillsUsage.periodLabel', { days }) }}
           </NButton>
         </div>
-        <NButton size="small" quaternary :loading="loading" @click="loadStats(selectedDays, true)">
+        <NButton size="small" quaternary :loading="loading" @click="loadStats(selectedDays, true, true)">
           {{ t('skillsUsage.refresh') }}
         </NButton>
       </div>

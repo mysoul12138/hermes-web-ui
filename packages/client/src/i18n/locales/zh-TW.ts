@@ -1002,6 +1002,7 @@ locale.sidebar = {
     title: '技能用量',
     subtitle: '追蹤 Hermes 工作階段中的技能載入與編輯',
     refresh: '重新整理',
+    refreshSuccess: '技能用量已重新整理',
     periodSelector: '技能用量期間',
     periodLabel: '{days}天',
     summary: '總覽',

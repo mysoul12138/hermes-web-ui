@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NButton } from 'naive-ui'
+import { NButton, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { fetchRuntimeStatus, type RuntimeRunSnapshot, type RuntimeStatusSnapshot } from '@/api/hermes/runtime'
 
 const { t } = useI18n()
+const message = useMessage()
 const snapshot = ref<RuntimeStatusSnapshot | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -36,11 +37,12 @@ function statusLabel(run: RuntimeRunSnapshot) {
   return t(`runtime.runStatus.${run.status}`)
 }
 
-async function loadStatus() {
+async function loadStatus(options: { notify?: boolean } = {}) {
   loading.value = true
   error.value = ''
   try {
     snapshot.value = await fetchRuntimeStatus()
+    if (options.notify) message.success(t('runtime.refreshSuccess'))
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -65,7 +67,7 @@ onBeforeUnmount(() => {
         <h2 class="header-title">{{ t('runtime.title') }}</h2>
         <p class="header-subtitle">{{ t('runtime.subtitle') }}</p>
       </div>
-      <NButton size="small" quaternary :loading="loading" @click="loadStatus">
+      <NButton size="small" quaternary :loading="loading" @click="loadStatus({ notify: true })">
         {{ t('runtime.refresh') }}
       </NButton>
     </header>

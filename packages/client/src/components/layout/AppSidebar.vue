@@ -224,7 +224,10 @@ function changelogLabel(key: string) {
           </button>
           <button class="nav-item" :class="{ active: selectedKey === 'hermes.runtime' }" @click="handleNav('hermes.runtime')">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M7 14l3-3 2 2 5-5" />
+              <path d="M8 20v2" />
+              <path d="M16 20v2" />
             </svg>
             <span>{{ t("sidebar.runtime") }}</span>
           </button>
