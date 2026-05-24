@@ -297,6 +297,7 @@ jobTriggered: 'Job ausgelost',
       builtin: 'Integriert',
       hub: 'Hub',
       local: 'Lokal',
+      external: 'Extern',
     },
   },
 

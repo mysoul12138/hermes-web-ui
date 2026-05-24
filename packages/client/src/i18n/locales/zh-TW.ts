@@ -371,6 +371,7 @@ locale.sidebar = {
       builtin: '內建',
       hub: 'Hub 安裝',
       local: '本地安裝',
+      external: '外部目錄',
     },
   },
 

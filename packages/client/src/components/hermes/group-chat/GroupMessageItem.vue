@@ -61,6 +61,8 @@ const mentionNames = computed(() => ['all', ...props.agents.map(a => a.name).fil
     display: flex;
     gap: 10px;
     padding: 2px 0;
+    min-width: 0;
+    max-width: 100%;
 
     &.agent,
     &.self {

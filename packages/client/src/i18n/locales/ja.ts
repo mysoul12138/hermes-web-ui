@@ -297,6 +297,7 @@ export default {
       builtin: '組み込み',
       hub: 'Hub',
       local: 'ローカル',
+      external: '外部',
     },
   },
 

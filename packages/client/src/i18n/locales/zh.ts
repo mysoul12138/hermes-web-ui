@@ -439,6 +439,7 @@ export default {
       builtin: '内置',
       hub: 'Hub 安装',
       local: '本地安装',
+      external: '外部目录',
     },
   },
 

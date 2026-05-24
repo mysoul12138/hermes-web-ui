@@ -878,6 +878,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   position: relative;
+  min-width: 0;
+  max-width: 100%;
 
   &.user {
     align-items: flex-end;
@@ -1488,6 +1490,9 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: $text-muted;
   padding: 10px 12px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 
   &.expandable {
     cursor: pointer;
@@ -1512,8 +1517,12 @@ onBeforeUnmount(() => {
 
 .tool-name {
   font-family: $font-code;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
   color: $text-secondary;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
   .dark & {
     color: #e5e7eb;
@@ -1521,9 +1530,13 @@ onBeforeUnmount(() => {
 }
 
 .tool-preview {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: min(400px, 100%);
   color: $text-muted;
 }
 

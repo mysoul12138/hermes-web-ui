@@ -297,6 +297,7 @@ jobTriggered: 'Job acionado',
       builtin: 'Integrado',
       hub: 'Hub',
       local: 'Local',
+      external: 'Externo',
     },
   },
 
