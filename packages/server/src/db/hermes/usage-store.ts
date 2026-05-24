@@ -1,5 +1,5 @@
 import { isSqliteAvailable, getDb, jsonSet, jsonGet, jsonGetAll, jsonDelete } from '../index'
-import { USAGE_TABLE as TABLE } from './schemas'
+import { ensureUsageTableSchema, USAGE_TABLE as TABLE } from './schemas'
 
 export interface UsageRecord {
   input_tokens: number
@@ -10,6 +10,7 @@ export interface UsageRecord {
   model: string
   profile: string
   created_at: number
+  updated_at: number
 }
 
 export function updateUsage(
@@ -31,11 +32,12 @@ export function updateUsage(
   const model = data.model || ''
   const profile = data.profile || 'default'
   if (isSqliteAvailable()) {
+    ensureUsageTableSchema()
     const db = getDb()!
     db.prepare(
-      `INSERT INTO ${TABLE} (session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, data.inputTokens, data.outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens, model, profile, now)
+      `INSERT INTO ${TABLE} (session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, data.inputTokens, data.outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens, model, profile, now, now)
   } else {
     jsonSet(TABLE, sessionId, {
       input_tokens: data.inputTokens,
@@ -46,14 +48,16 @@ export function updateUsage(
       model,
       profile,
       created_at: now,
+      updated_at: now,
     })
   }
 }
 
 export function getUsage(sessionId: string): UsageRecord | undefined {
   if (isSqliteAvailable()) {
+    ensureUsageTableSchema()
     return getDb()!.prepare(
-      `SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at FROM ${TABLE} WHERE session_id = ? ORDER BY id DESC LIMIT 1`,
+      `SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at, updated_at FROM ${TABLE} WHERE session_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(sessionId) as UsageRecord | undefined
   }
   const row = jsonGet(TABLE, sessionId)
@@ -67,16 +71,18 @@ export function getUsage(sessionId: string): UsageRecord | undefined {
     model: row.model ?? '',
     profile: row.profile ?? 'default',
     created_at: row.created_at ?? 0,
+    updated_at: row.updated_at ?? row.created_at ?? 0,
   }
 }
 
 export function getUsageBatch(sessionIds: string[]): Record<string, UsageRecord> {
   if (sessionIds.length === 0) return {}
   if (isSqliteAvailable()) {
+    ensureUsageTableSchema()
     const db = getDb()!
     const placeholders = sessionIds.map(() => '?').join(',')
     const rows = db.prepare(
-      `SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at
+      `SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, model, profile, created_at, updated_at
        FROM ${TABLE}
        WHERE id IN (SELECT MAX(id) FROM ${TABLE} WHERE session_id IN (${placeholders}) GROUP BY session_id)`,
     ).all(...sessionIds) as unknown as Array<UsageRecord & { session_id: string }>
@@ -91,6 +97,7 @@ export function getUsageBatch(sessionIds: string[]): Record<string, UsageRecord>
         model: r.model,
         profile: r.profile,
         created_at: r.created_at,
+        updated_at: r.updated_at,
       }
     }
     return map
@@ -109,6 +116,7 @@ export function getUsageBatch(sessionIds: string[]): Record<string, UsageRecord>
         model: row.model ?? '',
         profile: row.profile ?? 'default',
         created_at: row.created_at ?? 0,
+        updated_at: row.updated_at ?? row.created_at ?? 0,
       }
     }
   }
@@ -117,6 +125,7 @@ export function getUsageBatch(sessionIds: string[]): Record<string, UsageRecord>
 
 export function deleteUsage(sessionId: string): void {
   if (isSqliteAvailable()) {
+    ensureUsageTableSchema()
     getDb()!.prepare(`DELETE FROM ${TABLE} WHERE session_id = ?`).run(sessionId)
   } else {
     jsonDelete(TABLE, sessionId)
@@ -165,6 +174,7 @@ export function getLocalUsageStats(profile?: string, days = 30): LocalUsageStats
   }
   if (!isSqliteAvailable()) return empty
 
+  ensureUsageTableSchema()
   const db = getDb()!
   const safeDays = Math.max(1, Math.floor(Number.isFinite(days) ? days : 30))
   const cutoffMs = Date.now() - safeDays * 24 * 60 * 60 * 1000

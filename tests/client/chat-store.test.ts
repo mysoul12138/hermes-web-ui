@@ -1018,6 +1018,42 @@ describe('Chat Store', () => {
     expect(store.isRunActive).toBe(true)
   })
 
+  it('stops a represented candidate run even when the active session has no in-flight record', async () => {
+    const rootId = 'visible-root-stop'
+    const childId = 'represented-child-stop'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: rootId,
+      title: 'Visible aggregate',
+      source: 'tui',
+      representedSessionIds: [rootId, childId],
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(inFlightKey(childId), JSON.stringify({ runId: 'bridge_run_child_stop', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      ...makeSummary(rootId, 'Visible aggregate'),
+      source: 'tui',
+      ended_at: null,
+      is_active: true,
+      represented_session_ids: [rootId, childId],
+    } as any])
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await flushPromises()
+
+    expect(store.isRunActive).toBe(true)
+    expect(window.localStorage.getItem(inFlightKey(rootId))).toBeNull()
+
+    await store.stopStreaming()
+
+    expect(mockChatApi.cancelRun).toHaveBeenCalledWith('bridge_run_child_stop')
+    expect(window.localStorage.getItem(inFlightKey(childId))).toBeNull()
+    expect(store.isRunActive).toBe(false)
+  })
+
   it('ignores repeated stop clicks while a cancel is already in progress', async () => {
     let resolveCancel: (() => void) | null = null
     mockChatApi.cancelRun.mockImplementationOnce(() => new Promise(resolve => {
@@ -1534,6 +1570,97 @@ describe('Chat Store', () => {
     })
 
     expect(store.activeSession?.contextTokens).toBe(4321)
+  })
+
+  it('clears in-flight state for all represented candidates when a bridge run completes', async () => {
+    let onEvent!: (event: any) => void
+    mockChatApi.startRun.mockResolvedValue({
+      run_id: 'bridge_run_candidates_done',
+      status: 'queued',
+      bridge: true,
+      session_id: '20260524_101010_abcd12',
+    })
+    mockChatApi.streamRunEvents.mockImplementation((_runId: string, cb: (event: any) => void) => {
+      onEvent = cb
+      return { abort: vi.fn() }
+    })
+
+    const store = useChatStore()
+    await store.sendMessage('complete candidates')
+    await flushPromises()
+
+    const localId = store.activeSessionId!
+    const persistentId = '20260524_101010_abcd12'
+    window.localStorage.setItem(inFlightKey(persistentId), JSON.stringify({ runId: 'bridge_run_candidates_done', startedAt: Date.now() }))
+    expect(store.isRunActive).toBe(true)
+
+    onEvent({ event: 'run.completed', output: 'done' })
+    await flushPromises()
+
+    expect(window.localStorage.getItem(inFlightKey(localId))).toBeNull()
+    expect(window.localStorage.getItem(inFlightKey(persistentId))).toBeNull()
+    expect(store.isRunActive).toBe(false)
+  })
+
+  it('does not restore a fake active run after completed candidate state is reloaded', async () => {
+    vi.useFakeTimers()
+    const rootId = 'visible-root-done'
+    const childId = 'represented-child-done'
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, rootId)
+    window.localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify([{
+      id: rootId,
+      title: 'Completed aggregate',
+      source: 'tui',
+      representedSessionIds: [rootId, childId],
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      endedAt: Date.now(),
+    }]))
+    window.localStorage.setItem(inFlightKey(childId), JSON.stringify({ runId: 'bridge_run_done_residual', startedAt: Date.now() }))
+    mockConversationsApi.fetchConversationSummaries.mockResolvedValue([{
+      id: rootId,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: 'Completed aggregate',
+      started_at: Date.now() / 1000,
+      ended_at: Date.now() / 1000,
+      last_active: Date.now() / 1000,
+      message_count: 2,
+      tool_call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      billing_base_url: null,
+      estimated_cost_usd: 0,
+      actual_cost_usd: null,
+      cost_status: 'estimated',
+      preview: 'done',
+      is_active: false,
+      thread_session_count: 2,
+      branch_session_count: 0,
+      represented_session_ids: [rootId, childId],
+    } as any])
+    mockSessionsApi.fetchSession.mockResolvedValue({
+      ...makeDetail(rootId, []),
+      ended_at: Date.now() / 1000,
+      represented_session_ids: [rootId, childId],
+    })
+
+    const store = useChatStore()
+    await store.loadSessions()
+    await store.switchSession(rootId)
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(3000)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+
+    expect(window.localStorage.getItem(inFlightKey(childId))).toBeNull()
+    expect(store.isRunActive).toBe(false)
+    expect(mockChatApi.streamRunEvents).not.toHaveBeenCalled()
   })
 
   it('sends the currently selected model instead of the model captured at session creation', async () => {

@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
 
 // Mock the db index module so we can test usage-store in isolation
 const { mockEnsureTable, mockJsonSet, mockJsonGet, mockJsonGetAll, mockJsonDelete } = vi.hoisted(() => ({
@@ -45,6 +46,7 @@ describe('Usage Store (JSON fallback)', () => {
         model: '',
         profile: 'default',
         created_at: expect.any(Number),
+        updated_at: expect.any(Number),
       }),
     )
   })
@@ -61,6 +63,7 @@ describe('Usage Store (JSON fallback)', () => {
       model: '',
       profile: 'default',
       created_at: 0,
+      updated_at: 0,
     })
     expect(mockJsonGet).toHaveBeenCalledWith('session_usage', 'session-1')
   })
@@ -94,6 +97,7 @@ describe('Usage Store (JSON fallback)', () => {
         model: '',
         profile: 'default',
         created_at: 0,
+        updated_at: 0,
       },
       'session-3': {
         input_tokens: 300,
@@ -104,6 +108,7 @@ describe('Usage Store (JSON fallback)', () => {
         model: '',
         profile: 'default',
         created_at: 0,
+        updated_at: 0,
       },
     })
   })
@@ -128,12 +133,28 @@ describe('Usage Store (SQLite path)', () => {
     getMock = vi.fn()
     allMock = vi.fn()
     deleteMock = vi.fn()
+    const usageColumns = [
+      'id',
+      'session_id',
+      'input_tokens',
+      'output_tokens',
+      'cache_read_tokens',
+      'cache_write_tokens',
+      'reasoning_tokens',
+      'model',
+      'profile',
+      'created_at',
+      'updated_at',
+    ].map(name => ({ name }))
 
     vi.doMock('../../packages/server/src/db/index', () => ({
       isSqliteAvailable: () => true,
       ensureTable: vi.fn(),
       getDb: () => ({
+        exec: vi.fn(),
         prepare: vi.fn((sql: string) => {
+          if (sql.includes('sqlite_master')) return { get: vi.fn(() => ({ name: 'session_usage' })) }
+          if (sql.includes('PRAGMA table_info')) return { all: vi.fn(() => usageColumns) }
           if (sql.includes('INSERT') || sql.includes('UPDATE')) return { run: runMock }
           if (sql.includes('SELECT') && sql.includes('WHERE session_id = ?')) return { get: getMock }
           if (sql.includes('SELECT') && sql.includes('IN')) return { all: allMock }
@@ -161,6 +182,7 @@ describe('Usage Store (SQLite path)', () => {
       '', // model
       'default', // profile
       expect.any(Number), // created_at
+      expect.any(Number), // updated_at
     )
   })
 
@@ -174,6 +196,7 @@ describe('Usage Store (SQLite path)', () => {
       model: '',
       profile: 'default',
       created_at: 0,
+      updated_at: 0,
     })
     const { getUsage } = await import('../../packages/server/src/db/hermes/usage-store')
     const result = getUsage('s1')
@@ -187,20 +210,21 @@ describe('Usage Store (SQLite path)', () => {
       model: '',
       profile: 'default',
       created_at: 0,
+      updated_at: 0,
     })
   })
 
   it('getUsageBatch queries with IN clause', async () => {
     allMock.mockReturnValue([
-      { session_id: 'a', input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0 },
-      { session_id: 'b', input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0 },
+      { session_id: 'a', input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0, updated_at: 0 },
+      { session_id: 'b', input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0, updated_at: 0 },
     ])
     const { getUsageBatch } = await import('../../packages/server/src/db/hermes/usage-store')
     const result = getUsageBatch(['a', 'b', 'c'])
     expect(allMock).toHaveBeenCalledWith('a', 'b', 'c')
     expect(result).toEqual({
-      a: { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0 },
-      b: { input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0 },
+      a: { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0, updated_at: 0 },
+      b: { input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, model: '', profile: 'default', created_at: 0, updated_at: 0 },
     })
   })
 
@@ -208,5 +232,75 @@ describe('Usage Store (SQLite path)', () => {
     const { deleteUsage } = await import('../../packages/server/src/db/hermes/usage-store')
     deleteUsage('s1')
     expect(deleteMock).toHaveBeenCalledWith('s1')
+  })
+})
+
+describe('Usage Store legacy SQLite schema compatibility', () => {
+  let db: DatabaseSync | null = null
+
+  beforeEach(() => {
+    vi.resetModules()
+    db = new DatabaseSync(':memory:')
+    vi.doMock('../../packages/server/src/db/index', () => ({
+      isSqliteAvailable: () => true,
+      getDb: () => db,
+      getStoragePath: () => ':memory:',
+      jsonSet: vi.fn(),
+      jsonGet: vi.fn(),
+      jsonGetAll: vi.fn(),
+      jsonDelete: vi.fn(),
+    }))
+  })
+
+  afterEach(() => {
+    db?.close()
+    db = null
+    vi.doUnmock('../../packages/server/src/db/index')
+    vi.resetModules()
+  })
+
+  it('updates legacy session_usage tables missing id', async () => {
+    db!.exec('CREATE TABLE session_usage (session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0)')
+    db!.prepare('INSERT INTO session_usage (session_id, input_tokens, output_tokens) VALUES (?, ?, ?)').run('legacy', 1, 2)
+
+    const { updateUsage, getUsage } = await import('../../packages/server/src/db/hermes/usage-store')
+    expect(() => updateUsage('legacy', { inputTokens: 3, outputTokens: 4 })).not.toThrow()
+
+    const columns = db!.prepare('PRAGMA table_info("session_usage")').all() as Array<{ name: string; pk: number }>
+    expect(columns.find(c => c.name === 'id')?.pk).toBe(1)
+    expect(getUsage('legacy')).toEqual(expect.objectContaining({
+      input_tokens: 3,
+      output_tokens: 4,
+      created_at: expect.any(Number),
+      updated_at: expect.any(Number),
+    }))
+  })
+
+  it('updates legacy session_usage tables missing created_at', async () => {
+    db!.exec('CREATE TABLE session_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)')
+
+    const { updateUsage, getUsage } = await import('../../packages/server/src/db/hermes/usage-store')
+    expect(() => updateUsage('legacy-created', { inputTokens: 5, outputTokens: 6 })).not.toThrow()
+
+    expect(getUsage('legacy-created')).toEqual(expect.objectContaining({
+      input_tokens: 5,
+      output_tokens: 6,
+      created_at: expect.any(Number),
+      updated_at: expect.any(Number),
+    }))
+  })
+
+  it('updates legacy session_usage tables missing updated_at', async () => {
+    db!.exec('CREATE TABLE session_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)')
+
+    const { updateUsage, getUsage } = await import('../../packages/server/src/db/hermes/usage-store')
+    expect(() => updateUsage('legacy-updated', { inputTokens: 7, outputTokens: 8 })).not.toThrow()
+
+    expect(getUsage('legacy-updated')).toEqual(expect.objectContaining({
+      input_tokens: 7,
+      output_tokens: 8,
+      created_at: expect.any(Number),
+      updated_at: expect.any(Number),
+    }))
   })
 })

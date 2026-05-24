@@ -19,7 +19,8 @@ export const USAGE_SCHEMA: Record<string, string> = {
   reasoning_tokens: 'INTEGER NOT NULL DEFAULT 0',
   model: "TEXT NOT NULL DEFAULT ''",
   profile: "TEXT NOT NULL DEFAULT 'default'",
-  created_at: 'INTEGER NOT NULL',
+  created_at: 'INTEGER NOT NULL DEFAULT 0',
+  updated_at: 'INTEGER NOT NULL DEFAULT 0',
 }
 
 // ============================================================================
@@ -329,12 +330,20 @@ function canAddColumnToExistingTable(schemaDef: string): boolean {
   return true
 }
 
+function getTableColumns(
+  db: NonNullable<ReturnType<typeof getDb>>,
+  tableName: string,
+): Array<{ name: string; type: string; pk: number; notnull: number; dflt_value: unknown }> {
+  const columns = db.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`).all() as Array<{ name: string }>
+  return columns as Array<{ name: string; type: string; pk: number; notnull: number; dflt_value: unknown }>
+}
+
 function addMissingSafeColumns(
   db: NonNullable<ReturnType<typeof getDb>>,
   tableName: string,
   schema: Record<string, string>,
 ): void {
-  const columns = db.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`).all() as Array<{ name: string }>
+  const columns = getTableColumns(db, tableName)
   const existingColumns = new Set(columns.map(col => col.name))
 
   for (const [columnName, columnDef] of Object.entries(schema)) {
@@ -344,6 +353,51 @@ function addMissingSafeColumns(
       continue
     }
     db.exec(`ALTER TABLE ${quoteIdentifier(tableName)} ADD COLUMN ${quoteIdentifier(columnName)} ${columnDef}`)
+  }
+}
+
+export function ensureUsageTableSchema(): void {
+  const db = getDb()
+  if (!db) return
+
+  if (!tableExists(db, USAGE_TABLE)) {
+    createTable(db, USAGE_TABLE, USAGE_SCHEMA, 'id')
+    return
+  }
+
+  const columns = getTableColumns(db, USAGE_TABLE)
+  const columnMap = new Map(columns.map(col => [col.name, col]))
+  const idColumn = columnMap.get('id')
+  const mustRebuild = !idColumn || idColumn.pk !== 1
+
+  if (!mustRebuild) {
+    addMissingSafeColumns(db, USAGE_TABLE, USAGE_SCHEMA)
+    return
+  }
+
+  const tempTable = `${USAGE_TABLE}_schema_migration_${Date.now()}`
+  const sourceColumns = new Set(columns.map(col => col.name))
+  const insertColumns = Object.keys(USAGE_SCHEMA).filter(column => column !== 'id')
+  const selectColumns = insertColumns.map((column) => {
+    if (sourceColumns.has(column)) return quoteIdentifier(column)
+    if (column === 'profile') return `'default'`
+    if (column === 'model') return `''`
+    return '0'
+  })
+
+  db.exec('BEGIN')
+  try {
+    createTable(db, tempTable, USAGE_SCHEMA, 'id')
+    db.exec(
+      `INSERT INTO ${quoteIdentifier(tempTable)} (${insertColumns.map(quoteIdentifier).join(', ')})
+       SELECT ${selectColumns.join(', ')} FROM ${quoteIdentifier(USAGE_TABLE)}`
+    )
+    db.exec(`DROP TABLE ${quoteIdentifier(USAGE_TABLE)}`)
+    db.exec(`ALTER TABLE ${quoteIdentifier(tempTable)} RENAME TO ${quoteIdentifier(USAGE_TABLE)}`)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
 }
 
@@ -394,7 +448,7 @@ export function initAllHermesTables(): void {
 
   try {
     // Usage store
-    syncTable(USAGE_TABLE, USAGE_SCHEMA, { primaryKey: 'id' })
+    ensureUsageTableSchema()
 
     // Session store
     syncTable(SESSIONS_TABLE, SESSIONS_SCHEMA)

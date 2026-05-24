@@ -585,6 +585,53 @@ export const useChatStore = defineStore('chat', () => {
     return null
   }
 
+  function runIdForCandidateSession(sessionId: string, expectedRunId?: string | null): { sessionId: string, runId: string } | null {
+    for (const candidateId of candidateSessionIdsForRun(sessionId)) {
+      const inFlight = readInFlight(candidateId)
+      if (inFlight?.runId && (!expectedRunId || inFlight.runId === expectedRunId)) {
+        return { sessionId: candidateId, runId: inFlight.runId }
+      }
+    }
+    if (expectedRunId && streamRunSessions.value.has(expectedRunId)) {
+      const owner = streamRunSessions.value.get(expectedRunId)!
+      if (candidateSessionIdsForRun(sessionId).includes(owner)) return { sessionId: owner, runId: expectedRunId }
+    }
+    return null
+  }
+
+  function cleanupRunStateForCandidates(sessionId: string, expectedRunId?: string | null) {
+    const candidates = new Set(candidateSessionIdsForRun(sessionId))
+    let touchedResuming = false
+    for (const candidateId of candidates) {
+      const inFlight = readInFlight(candidateId)
+      const hasMatchingRun = !expectedRunId || inFlight?.runId === expectedRunId || streamRunSessions.value.get(expectedRunId) === candidateId
+      if (!hasMatchingRun) continue
+      clearInFlight(candidateId)
+      clearPendingRunStart(candidateId)
+      stopPolling(candidateId)
+      stopApprovalPolling(candidateId)
+      stopClarifyPolling(candidateId)
+      clearApproval(candidateId)
+      clearClarify(candidateId)
+      const ctrl = streamStates.value.get(candidateId)
+      if (ctrl) {
+        ctrl.abort()
+        streamStates.value.delete(candidateId)
+      }
+      if (resumingRuns.value.has(candidateId)) touchedResuming = true
+      resumingRuns.value.delete(candidateId)
+    }
+    if (touchedResuming) resumingRuns.value = new Set(resumingRuns.value)
+    if (expectedRunId) {
+      const owner = streamRunSessions.value.get(expectedRunId)
+      if (!owner || candidates.has(owner)) streamRunSessions.value.delete(expectedRunId)
+    } else {
+      for (const [runId, owner] of streamRunSessions.value) {
+        if (candidates.has(owner)) streamRunSessions.value.delete(runId)
+      }
+    }
+  }
+
   function loadBranchSessionMetaIndex(): Record<string, BranchSessionMeta> {
     return loadJson<Record<string, BranchSessionMeta>>(branchSessionMetaKey()) || {}
   }
@@ -2426,13 +2473,8 @@ export const useChatStore = defineStore('chat', () => {
           updateSessionTitle(targetSid)
           persistSessionMessages(targetSid)
           persistSessionsList()
-          clearInFlight(sid)
-          if (targetSid !== sid) clearInFlight(targetSid)
-          stopPolling(sid)
-          stopApprovalPolling(sid)
-          stopClarifyPolling(sid)
-          clearApproval(sid)
-          clearClarify(sid)
+          cleanupRunStateForCandidates(targetSid, runId)
+          if (targetSid !== sid) cleanupRunStateForCandidates(sid, runId)
           void refreshSessionAfterRunSettled(targetSid)
           return
         }
@@ -2467,13 +2509,8 @@ export const useChatStore = defineStore('chat', () => {
           cleanup()
           persistSessionMessages(targetSid)
           persistSessionsList()
-          clearInFlight(sid)
-          if (targetSid !== sid) clearInFlight(targetSid)
-          stopPolling(sid)
-          stopApprovalPolling(sid)
-          stopClarifyPolling(sid)
-          clearApproval(sid)
-          clearClarify(sid)
+          cleanupRunStateForCandidates(targetSid, runId)
+          if (targetSid !== sid) cleanupRunStateForCandidates(sid, runId)
           return
         }
 
@@ -2490,13 +2527,8 @@ export const useChatStore = defineStore('chat', () => {
         finishLiveSubagentBranches(sid, 'complete')
         cleanup()
         updateSessionTitle(targetSid)
-        clearInFlight(sid)
-        if (targetSid !== sid) clearInFlight(targetSid)
-        stopPolling(sid)
-        stopApprovalPolling(sid)
-        stopClarifyPolling(sid)
-        clearApproval(sid)
-        clearClarify(sid)
+        cleanupRunStateForCandidates(targetSid, runId)
+        if (targetSid !== sid) cleanupRunStateForCandidates(sid, runId)
         persistSessionMessages(targetSid)
         persistSessionsList()
         void submitNextQueuedMessage(targetSid)
@@ -2715,17 +2747,18 @@ export const useChatStore = defineStore('chat', () => {
     // not currently streaming, start polling fetchSession to pick up progress
     // that happened while we were gone. Exits automatically on stability.
     if (switchRequestId !== latestSwitchRequestId || activeSessionId.value !== sessionId || activeSession.value?.id !== sessionId) return
-    if (readInFlight(sessionId) && !hasActiveStreamForSession(sessionId)) {
+    const candidateRun = runIdForCandidateSession(sessionId)
+    if (candidateRun && !hasActiveStreamForSession(sessionId)) {
       // If the server already shows this session as ended, the in-flight
       // record is stale — clear it and skip resume to avoid blocking the UI.
       if (activeSession.value?.endedAt != null) {
-        clearInFlight(sessionId)
+        cleanupRunStateForCandidates(sessionId, candidateRun.runId)
       } else {
-        resumeInFlightRun(sessionId)
-        void pollApprovalOnce(sessionId)
-        startApprovalPolling(sessionId)
-        void pollClarifyOnce(sessionId)
-        startClarifyPolling(sessionId)
+        resumeInFlightRun(candidateRun.sessionId)
+        void pollApprovalOnce(candidateRun.sessionId)
+        startApprovalPolling(candidateRun.sessionId)
+        void pollClarifyOnce(candidateRun.sessionId)
+        startClarifyPolling(candidateRun.sessionId)
       }
     }
 
@@ -3246,11 +3279,13 @@ export const useChatStore = defineStore('chat', () => {
     const sid = activeSessionId.value
     if (!sid) return
     if (abortingSessions.value.has(sid)) return
-    const inFlight = readInFlight(sid)
-    const ctrl = streamStates.value.get(sid)
+    const runTarget = runIdForCandidateSession(sid)
+    const inFlight = runTarget ? readInFlight(runTarget.sessionId) : readInFlight(sid)
+    const ctrl = streamStates.value.get(runTarget?.sessionId || sid)
     setAbortingSession(sid, true)
-    const stoppedBeforeRunId = pendingRunStarts.value.has(sid) && !inFlight?.runId && !ctrl
-    clearPendingRunStart(sid)
+    const candidateIds = candidateSessionIdsForRun(sid)
+    const stoppedBeforeRunId = candidateIds.some(candidateId => pendingRunStarts.value.has(candidateId)) && !inFlight?.runId && !ctrl
+    for (const candidateId of candidateIds) clearPendingRunStart(candidateId)
     if (stoppedBeforeRunId) cancelledPendingStarts.value.add(sid)
     try {
       let cancelResult: Awaited<ReturnType<typeof cancelRun>> | null = null
@@ -3259,12 +3294,15 @@ export const useChatStore = defineStore('chat', () => {
       }
       const cancelPending = !!inFlight?.runId && cancelResult?.status === 'interrupt_sent'
       if (cancelPending) {
-        stopPolling(sid)
-        stopApprovalPolling(sid)
-        stopClarifyPolling(sid)
-        if (ctrl) {
-          ctrl.abort()
-          streamStates.value.delete(sid)
+        for (const candidateId of candidateIds) {
+          stopPolling(candidateId)
+          stopApprovalPolling(candidateId)
+          stopClarifyPolling(candidateId)
+          const candidateCtrl = streamStates.value.get(candidateId)
+          if (candidateCtrl) {
+            candidateCtrl.abort()
+            streamStates.value.delete(candidateId)
+          }
         }
         if (sid === activeSessionId.value) persistActiveMessages()
         persistSessionsList()
@@ -3277,14 +3315,10 @@ export const useChatStore = defineStore('chat', () => {
         if (lastMsg?.isStreaming) {
           updateMessage(sid, lastMsg.id, { isStreaming: false })
         }
-        streamStates.value.delete(sid)
+        streamStates.value.delete(runTarget?.sessionId || sid)
       }
-      stopPolling(sid)
-      stopApprovalPolling(sid)
-      stopClarifyPolling(sid)
-      clearApproval(sid)
-      clearClarify(sid)
-      clearInFlight(sid)
+      cleanupRunStateForCandidates(sid, inFlight?.runId)
+      if (stoppedBeforeRunId) cancelledPendingStarts.value.add(sid)
       clearCompressionForSession(sid)
       const persistentSid = readBridgePersistentSessionId(sid)
       if (persistentSid && persistentSid !== sid) clearCompressionForSession(persistentSid)
@@ -3303,17 +3337,18 @@ export const useChatStore = defineStore('chat', () => {
     document.addEventListener('visibilitychange', async () => {
       if (document.visibilityState === 'visible' && activeSessionId.value && !isStreaming.value) {
         await refreshActiveSession()
-        if (readInFlight(activeSessionId.value)) {
+        const candidateRun = runIdForCandidateSession(activeSessionId.value)
+        if (candidateRun) {
           // If the server already shows this session as ended, the in-flight
           // record is stale — clear it and skip resume.
           if (activeSession.value?.endedAt != null) {
-            clearInFlight(activeSessionId.value)
+            cleanupRunStateForCandidates(activeSessionId.value, candidateRun.runId)
           } else {
-            resumeInFlightRun(activeSessionId.value)
-            void pollApprovalOnce(activeSessionId.value)
-            startApprovalPolling(activeSessionId.value)
-            void pollClarifyOnce(activeSessionId.value)
-            startClarifyPolling(activeSessionId.value)
+            resumeInFlightRun(candidateRun.sessionId)
+            void pollApprovalOnce(candidateRun.sessionId)
+            startApprovalPolling(candidateRun.sessionId)
+            void pollClarifyOnce(candidateRun.sessionId)
+            startClarifyPolling(candidateRun.sessionId)
           }
         }
       }

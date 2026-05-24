@@ -18,7 +18,7 @@ import { shouldHideFromPromptHistory } from './injected-message-rules'
 import { writeBridgeContinuationLink } from './bridge-continuation-links'
 import { getActiveConfigPath } from './hermes-profile'
 import { recordBridgeConversationLineage } from '../../db/hermes/conversation-lineage'
-import { isSessionCompressionEnded } from '../../db/hermes/sessions-db'
+import { getSessionMessagesFromDb, isSessionCompressionEnded } from '../../db/hermes/sessions-db'
 import { resolveLineageSeed, upsertSessionLineage } from '../../db/hermes/session-lineage'
 import { updateUsage } from '../../db/hermes/usage-store'
 import { countTokens } from '../../lib/context-compressor'
@@ -122,6 +122,7 @@ interface RunState {
   runId: string
   webSessionId: string
   bridgeSessionId: string
+  persistentSessionId?: string
   events: BridgeRunEvent[]
   waiters: Array<(event: BridgeRunEvent | null) => void>
   closed: boolean
@@ -758,6 +759,7 @@ export class TuiBridgeService {
       runId,
       webSessionId,
       bridgeSessionId,
+      persistentSessionId,
       events: [],
       waiters: [],
       closed: false,
@@ -868,6 +870,7 @@ export class TuiBridgeService {
       bridgeSessionId = recreated.id
       persistentSessionId = recreated.persistentSessionId
       state.bridgeSessionId = bridgeSessionId
+      state.persistentSessionId = persistentSessionId
       state.contextInputTokens = countTokens(this.buildPrompt(input, conversationHistory))
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
       this.updateLineageReconciliation(webSessionId, {
@@ -1281,6 +1284,7 @@ export class TuiBridgeService {
   private publishPersistentSessionResolution(webSessionId: string, persistentSessionId: string) {
     for (const state of this.runs.values()) {
       if (state.webSessionId !== webSessionId || state.closed) continue
+      state.persistentSessionId = persistentSessionId
       this.push(state.runId, {
         event: 'session.resolved',
         run_id: state.runId,
@@ -1600,20 +1604,72 @@ export class TuiBridgeService {
     return state.events.some(event => event.event === 'run.completed' || event.event === 'run.failed')
   }
 
-  private failStoppedRunWithoutTerminalEvent(state: RunState) {
+  private runHasStreamedAssistantOutput(state: RunState): boolean {
+    return state.events.some(event => {
+      if (event.event !== 'message.delta') return false
+      return Boolean((event.delta || event.output || event.text || event.content || event.message || '').trim())
+    })
+  }
+
+  private async sessionHasAssistantOutput(sessionId: string | undefined): Promise<boolean> {
+    const id = sessionId?.trim()
+    if (!id) return false
+    try {
+      const detail = await getSessionMessagesFromDb(id)
+      return Boolean(detail?.messages?.some(message => (
+        message.role === 'assistant'
+        && typeof message.content === 'string'
+        && message.content.trim().length > 0
+      )))
+    } catch (error) {
+      logger.warn({
+        sessionId: id,
+        error: error instanceof Error ? error.message : String(error),
+      }, '[tui-bridge] failed to reconcile stopped bridge session from persisted messages')
+      return false
+    }
+  }
+
+  private async stoppedRunHasRecoverableOutput(state: RunState): Promise<boolean> {
+    if (this.runHasStreamedAssistantOutput(state)) return true
+    const candidateSessionIds = [
+      state.persistentSessionId,
+      this.persistentSessionsByWebSession.get(state.webSessionId),
+      state.webSessionId,
+    ]
+    for (const sessionId of new Set(candidateSessionIds.filter(Boolean) as string[])) {
+      if (await this.sessionHasAssistantOutput(sessionId)) return true
+    }
+    return false
+  }
+
+  private async failStoppedRunWithoutTerminalEvent(state: RunState) {
     if (state.closed || this.runHasTerminalEvent(state)) return
     if (state.pendingApproval || state.pendingClarify || state.completeTimer) return
-    this.push(state.runId, {
-      event: 'run.failed',
-      run_id: state.runId,
-      timestamp: Date.now() / 1000,
-      error: 'Bridge session stopped before reporting completion. The underlying Hermes agent likely failed before emitting a final response; check hermes-agent logs for the provider/model error.',
-    })
-    this.closeRun(state.runId)
+    const recovered = await this.stoppedRunHasRecoverableOutput(state)
+    if (state.closed || this.runHasTerminalEvent(state)) return
+    if (recovered) {
+      this.completeRun(state.runId, {
+        event: 'run.completed',
+        run_id: state.runId,
+        timestamp: Date.now() / 1000,
+        output: '',
+      })
+    } else {
+      this.push(state.runId, {
+        event: 'run.failed',
+        run_id: state.runId,
+        timestamp: Date.now() / 1000,
+        error: 'Bridge session stopped before reporting completion. The underlying Hermes agent likely failed before emitting a final response; check hermes-agent logs for the provider/model error.',
+      })
+      this.closeRun(state.runId)
+    }
     logBridgeControl('run:stopped-without-terminal-event', {
       runId: state.runId,
       webSessionId: state.webSessionId,
       bridgeSessionId: state.bridgeSessionId,
+      persistentSessionId: state.persistentSessionId || this.persistentSessionsByWebSession.get(state.webSessionId) || null,
+      outcome: recovered ? 'recovered-completed' : 'failed-no-output',
     })
   }
 
@@ -1662,13 +1718,31 @@ export class TuiBridgeService {
   private persistCompletedUsage(state: RunState, event: BridgeRunEvent) {
     const usage = event.usage
     if (!usage || usage.input_tokens + usage.output_tokens <= 0) return
-    updateUsage(state.webSessionId, {
-      inputTokens: usage.input_tokens,
-      outputTokens: usage.output_tokens,
-      cacheReadTokens: usage.cache_read_tokens,
-      cacheWriteTokens: usage.cache_write_tokens,
-      reasoningTokens: usage.reasoning_tokens,
-    })
+    try {
+      updateUsage(state.webSessionId, {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadTokens: usage.cache_read_tokens,
+        cacheWriteTokens: usage.cache_write_tokens,
+        reasoningTokens: usage.reasoning_tokens,
+      })
+    } catch (error) {
+      logger.warn({
+        runId: state.runId,
+        webSessionId: state.webSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      }, '[tui-bridge] failed to persist completed usage; continuing run completion')
+    }
+  }
+
+  private completeRun(runId: string, event: BridgeRunEvent) {
+    const state = this.runs.get(runId)
+    if (!state || state.closed) return
+    const completedEvent = this.completedEventWithUsage(state, event)
+    this.persistCompletedUsage(state, completedEvent)
+    this.reconcileBridgeConversationLineage(state.webSessionId, 'run-completion')
+    this.push(runId, completedEvent)
+    this.closeRun(runId)
   }
 
   private scheduleRunCompleted(runId: string, event: BridgeRunEvent) {
@@ -1684,11 +1758,7 @@ export class TuiBridgeService {
         this.scheduleRunCompleted(runId, event)
         return
       }
-      const completedEvent = this.completedEventWithUsage(current, event)
-      this.persistCompletedUsage(current, completedEvent)
-      this.reconcileBridgeConversationLineage(current.webSessionId, 'run-completion')
-      this.push(runId, completedEvent)
-      this.closeRun(runId)
+      this.completeRun(runId, event)
     }, COMPLETE_GRACE_MS)
   }
 
@@ -1701,7 +1771,7 @@ export class TuiBridgeService {
       if (!current || current.closed) return
       const running = await this.readBridgeSessionRunning(current.bridgeSessionId)
       if (running === false) {
-        this.failStoppedRunWithoutTerminalEvent(current)
+        await this.failStoppedRunWithoutTerminalEvent(current)
         return
       }
       this.push(runId, {

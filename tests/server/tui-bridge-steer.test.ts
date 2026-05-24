@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockUpdateUsage = vi.hoisted(() => vi.fn())
 const mockIsSessionCompressionEnded = vi.hoisted(() => vi.fn())
+const mockGetSessionMessagesFromDb = vi.hoisted(() => vi.fn())
 const mockWriteBridgeContinuationLink = vi.hoisted(() => vi.fn())
 
 vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
@@ -10,6 +11,7 @@ vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({
 }))
 
 vi.mock('../../packages/server/src/db/hermes/sessions-db', () => ({
+  getSessionMessagesFromDb: mockGetSessionMessagesFromDb,
   isSessionCompressionEnded: mockIsSessionCompressionEnded,
 }))
 
@@ -77,8 +79,10 @@ describe('TuiBridgeService steer compatibility', () => {
   beforeEach(() => {
     mockUpdateUsage.mockClear()
     mockIsSessionCompressionEnded.mockReset()
+    mockGetSessionMessagesFromDb.mockReset()
     mockWriteBridgeContinuationLink.mockClear()
     mockIsSessionCompressionEnded.mockResolvedValue(false)
+    mockGetSessionMessagesFromDb.mockResolvedValue({ messages: [] })
     delete process.env.HERMES_TUI_ROOT
     delete process.env.HERMES_PYTHON_SRC_ROOT
     delete process.env.HERMES_AGENT_ROOT
@@ -795,6 +799,108 @@ describe('TuiBridgeService steer compatibility', () => {
         error: expect.stringContaining('Bridge session stopped before reporting completion'),
       }),
     ]))
+    expect((bridge as any).runs.get(result.run_id).closed).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('completes a bridge run when the TUI session stops after streaming assistant output without message.complete', async () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = true
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    const result = await bridge.startRun('current question', 'web-session', [])
+    client.emit('event', {
+      type: 'message.delta',
+      session_id: 'tui-session-1',
+      timestamp: Date.now() / 1000,
+      payload: { delta: 'assistant answer already streamed' },
+    })
+    const stream = bridge.stream(result.run_id)
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({ event: 'run.started' }),
+    })
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({
+        event: 'message.delta',
+        delta: 'assistant answer already streamed',
+      }),
+    })
+    client.sessionRunning = false
+    await vi.advanceTimersByTimeAsync(16000)
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({ event: 'run.completed' }),
+    })
+    await expect(stream.next()).resolves.toMatchObject({ done: true })
+
+    const events = (bridge as any).runs.get(result.run_id).events
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'message.delta',
+        delta: 'assistant answer already streamed',
+      }),
+      expect.objectContaining({
+        event: 'run.completed',
+      }),
+    ]))
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'run.failed' }),
+    ]))
+    expect((bridge as any).runs.get(result.run_id).closed).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('still sends run.completed and closes the stream when usage persistence fails', async () => {
+    vi.useFakeTimers()
+    mockUpdateUsage.mockImplementationOnce(() => {
+      throw new Error('table session_usage has no column named created_at')
+    })
+    const client = new FakeGatewayClient()
+    client.supportsSessionStatus = true
+    client.sessionRunning = false
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+
+    ;(bridge as any).bridgeSessionsByWebSession.set('web-session', 'tui-session')
+    ;(bridge as any).persistentSessionsByWebSession.set('web-session', 'persistent-session')
+
+    const result = await bridge.startRun('current question', 'web-session', [])
+    const stream = bridge.stream(result.run_id)
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({ event: 'run.started' }),
+    })
+
+    client.emit('event', {
+      session_id: 'tui-session',
+      type: 'message.complete',
+      payload: {
+        content: 'final answer from gateway',
+        usage: {
+          input_tokens: 7,
+          output_tokens: 3,
+          total_tokens: 10,
+        },
+      },
+    })
+    await vi.advanceTimersByTimeAsync(1600)
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: expect.objectContaining({
+        event: 'run.completed',
+        usage: expect.objectContaining({
+          input_tokens: 7,
+          output_tokens: 3,
+        }),
+      }),
+    })
+    await expect(stream.next()).resolves.toMatchObject({ done: true })
     expect((bridge as any).runs.get(result.run_id).closed).toBe(true)
     vi.useRealTimers()
   })

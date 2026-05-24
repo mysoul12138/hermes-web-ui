@@ -137,6 +137,77 @@ describe('Database Schema Synchronization', () => {
   })
 
   describe('Safe additive schema changes', () => {
+    it('adds created_at to legacy session_usage tables without rebuilding', async () => {
+      const { ensureUsageTableSchema, USAGE_TABLE } = await import('../../packages/server/src/db/hermes/schemas')
+
+      const db = getTestDb()
+      db.exec(`CREATE TABLE "${USAGE_TABLE}" (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0)`)
+      db.prepare(`INSERT INTO "${USAGE_TABLE}" (session_id, input_tokens, output_tokens) VALUES (?, ?, ?)`)
+        .run('legacy-session', 10, 2)
+
+      ensureUsageTableSchema()
+
+      const cols = getTableColumns(db, USAGE_TABLE)
+      expect(cols.has('created_at')).toBe(true)
+      const row = db.prepare(`SELECT session_id, input_tokens, output_tokens, created_at FROM "${USAGE_TABLE}" WHERE session_id = ?`)
+        .get('legacy-session') as any
+      expect(row).toMatchObject({
+        session_id: 'legacy-session',
+        input_tokens: 10,
+        output_tokens: 2,
+        created_at: 0,
+      })
+    })
+
+    it('adds updated_at to legacy session_usage tables without rebuilding', async () => {
+      const { ensureUsageTableSchema, USAGE_TABLE } = await import('../../packages/server/src/db/hermes/schemas')
+
+      const db = getTestDb()
+      db.exec(`CREATE TABLE "${USAGE_TABLE}" (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)`)
+      db.prepare(`INSERT INTO "${USAGE_TABLE}" (session_id, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?)`)
+        .run('legacy-session', 10, 2, 123)
+
+      ensureUsageTableSchema()
+
+      const cols = getTableColumns(db, USAGE_TABLE)
+      expect(cols.has('updated_at')).toBe(true)
+      const row = db.prepare(`SELECT session_id, input_tokens, output_tokens, created_at, updated_at FROM "${USAGE_TABLE}" WHERE session_id = ?`)
+        .get('legacy-session') as any
+      expect(row).toMatchObject({
+        session_id: 'legacy-session',
+        input_tokens: 10,
+        output_tokens: 2,
+        created_at: 123,
+        updated_at: 0,
+      })
+    })
+
+    it('rebuilds legacy session_usage tables missing id so id-based queries work', async () => {
+      const { ensureUsageTableSchema, USAGE_TABLE } = await import('../../packages/server/src/db/hermes/schemas')
+
+      const db = getTestDb()
+      db.exec(`CREATE TABLE "${USAGE_TABLE}" (session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0)`)
+      db.prepare(`INSERT INTO "${USAGE_TABLE}" (session_id, input_tokens, output_tokens) VALUES (?, ?, ?)`)
+        .run('legacy-session', 10, 2)
+
+      ensureUsageTableSchema()
+
+      const cols = db.prepare(`PRAGMA table_info("${USAGE_TABLE}")`).all() as Array<{ name: string; pk: number }>
+      expect(cols.find(c => c.name === 'id')?.pk).toBe(1)
+      expect(cols.some(c => c.name === 'created_at')).toBe(true)
+      expect(cols.some(c => c.name === 'updated_at')).toBe(true)
+      const row = db.prepare(`SELECT id, session_id, input_tokens, output_tokens, created_at, updated_at FROM "${USAGE_TABLE}" WHERE session_id = ? ORDER BY id DESC LIMIT 1`)
+        .get('legacy-session') as any
+      expect(row).toMatchObject({
+        id: 1,
+        session_id: 'legacy-session',
+        input_tokens: 10,
+        output_tokens: 2,
+        created_at: 0,
+        updated_at: 0,
+      })
+    })
+
     it('adds missing safe columns to existing table without rebuilding', async () => {
       const { syncTable, USAGE_TABLE, USAGE_SCHEMA } = await import('../../packages/server/src/db/hermes/schemas')
 
