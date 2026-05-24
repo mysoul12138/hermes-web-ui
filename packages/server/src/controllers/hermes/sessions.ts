@@ -138,7 +138,7 @@ function hasPendingDeletedSessionDetail(session: { id: string; messages?: Array<
 function mergeConversationDetailIntoSession(
   session: HermesSessionDetailRow,
   detail: ConversationDetail,
-): HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'] } {
+): HermesSessionDetailRow & { branch_session_count?: number, branches?: ConversationDetail['branches'], represented_session_ids?: string[] } {
   return {
     ...session,
     title: detail.title ?? session.title,
@@ -159,6 +159,7 @@ function mergeConversationDetailIntoSession(
     thread_session_count: detail.thread_session_count,
     branch_session_count: detail.branch_session_count,
     branches: detail.branches,
+    represented_session_ids: detail.represented_session_ids,
   }
 }
 

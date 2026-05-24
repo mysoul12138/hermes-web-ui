@@ -153,6 +153,17 @@ interface PendingPersistentResolution {
   lineageRootSessionId?: string
 }
 
+interface LineageReconciliationState {
+  webSessionId: string
+  bridgeSessionId?: string | null
+  persistentSessionId?: string | null
+  lineageParentSessionId?: string | null
+  lineageRootSessionId?: string | null
+  logicalConversationId: string
+  rootSessionId: string
+  createdAt?: number
+}
+
 interface BridgeRunOptions {
   model?: string
   provider?: string
@@ -233,22 +244,41 @@ function isPersistentHermesSessionId(sessionId: string | null | undefined): sess
 }
 
 function recordExplicitBridgeConversationLineage(params: {
+  webSessionId?: string | null
   persistentSessionId?: string | null
   parentSessionId?: string | null
   lineage: { logicalConversationId: string, rootSessionId: string }
-}) {
+}): boolean {
   const childSessionId = params.persistentSessionId?.trim()
-  if (!isPersistentHermesSessionId(childSessionId)) return
+  if (!isPersistentHermesSessionId(childSessionId)) {
+    logger.info({
+      webSessionId: params.webSessionId || null,
+      persistentSessionId: childSessionId || null,
+      parentSessionId: params.parentSessionId || null,
+      lineage: params.lineage,
+      reason: 'missing-persistent-child',
+    }, '[tui-bridge] lineage reconciliation skipped')
+    return false
+  }
   const hintedParent = params.parentSessionId?.trim()
   const parentSessionId = isPersistentHermesSessionId(hintedParent)
     ? hintedParent
     : null
-  recordBridgeConversationLineage({
+  const edge = recordBridgeConversationLineage({
     conversation_id: params.lineage.logicalConversationId,
     root_session_id: params.lineage.rootSessionId,
     child_session_id: childSessionId,
     parent_session_id: parentSessionId && parentSessionId !== childSessionId ? parentSessionId : null,
   })
+  logger.info({
+    webSessionId: params.webSessionId || null,
+    persistentSessionId: childSessionId,
+    parentSessionId: parentSessionId || null,
+    conversationId: params.lineage.logicalConversationId,
+    rootSessionId: params.lineage.rootSessionId,
+    edgeType: edge?.edge_type || null,
+  }, '[tui-bridge] lineage reconciled')
+  return !!edge
 }
 
 function isNonFatalModelListingWarning(error: unknown): boolean {
@@ -541,6 +571,7 @@ export class TuiBridgeService {
   private persistentSessionsByWebSession = new Map<string, string>()
   private webSessionsByPersistentSession = new Map<string, string>()
   private pendingPersistentResolutions = new Map<string, PendingPersistentResolution>()
+  private lineageReconciliationByWebSession = new Map<string, LineageReconciliationState>()
   private activeRunsByBridgeSession = new Map<string, string>()
   private runs = new Map<string, RunState>()
 
@@ -625,6 +656,91 @@ export class TuiBridgeService {
       : this.webSessionsByPersistentSession.get(sessionId) || sessionId
   }
 
+  private resolveKnownPersistentSessionId(sessionId: string | null | undefined): string | null {
+    const id = sessionId?.trim()
+    if (!id) return null
+    if (isPersistentHermesSessionId(id)) return id
+    const fromWeb = this.persistentSessionsByWebSession.get(id)
+    if (isPersistentHermesSessionId(fromWeb)) return fromWeb
+    return null
+  }
+
+  private lineageForOptions(webSessionId: string, options: BridgeRunOptions, ...relatedSessionIds: Array<string | null | undefined>) {
+    const hintedLineage = hintSeedForSession(webSessionId, options)
+    if (hintedLineage) return hintedLineage
+    if (options.lineageParentSessionId || relatedSessionIds.some(Boolean)) {
+      const seed = continuationSeedForSession(webSessionId, options.lineageParentSessionId, ...relatedSessionIds)
+      if (seed.rootSessionId !== webSessionId) return seed
+    }
+    return explicitRootSeedForSession(webSessionId)
+  }
+
+  private updateLineageReconciliation(
+    webSessionId: string,
+    patch: Partial<LineageReconciliationState> & { lineage?: { logicalConversationId: string, rootSessionId: string } },
+  ): LineageReconciliationState {
+    const existing = this.lineageReconciliationByWebSession.get(webSessionId)
+    const lineage = patch.lineage || (existing
+      ? { logicalConversationId: existing.logicalConversationId, rootSessionId: existing.rootSessionId }
+      : explicitRootSeedForSession(webSessionId))
+    const next: LineageReconciliationState = {
+      webSessionId,
+      bridgeSessionId: patch.bridgeSessionId ?? existing?.bridgeSessionId ?? this.bridgeSessionsByWebSession.get(webSessionId) ?? null,
+      persistentSessionId: patch.persistentSessionId ?? existing?.persistentSessionId ?? this.persistentSessionsByWebSession.get(webSessionId) ?? null,
+      lineageParentSessionId: patch.lineageParentSessionId ?? existing?.lineageParentSessionId ?? null,
+      lineageRootSessionId: patch.lineageRootSessionId ?? existing?.lineageRootSessionId ?? null,
+      logicalConversationId: lineage.logicalConversationId,
+      rootSessionId: lineage.rootSessionId,
+      createdAt: patch.createdAt ?? existing?.createdAt,
+    }
+    this.lineageReconciliationByWebSession.set(webSessionId, next)
+    return next
+  }
+
+  private reconcileBridgeConversationLineage(webSessionId: string, reason: string): boolean {
+    const state = this.lineageReconciliationByWebSession.get(webSessionId)
+    if (!state) {
+      logger.info({ webSessionId, reason, skipReason: 'missing-reconciliation-state' }, '[tui-bridge] lineage reconciliation skipped')
+      return false
+    }
+    const rawChild = state.persistentSessionId?.trim()
+    const rawParent = state.lineageParentSessionId?.trim()
+      || (state.rootSessionId !== rawChild ? state.rootSessionId : undefined)
+    const persistentSessionId = this.resolveKnownPersistentSessionId(state.persistentSessionId || webSessionId)
+    if (!persistentSessionId) {
+      writeBridgeContinuationLinkIfValid(rawChild, rawParent)
+      logger.info({
+        webSessionId,
+        bridgeSessionId: state.bridgeSessionId || null,
+        reason,
+        skipReason: 'missing-persistent-session-id',
+      }, '[tui-bridge] lineage reconciliation skipped')
+      return false
+    }
+
+    const explicitParent = this.resolveKnownPersistentSessionId(rawParent)
+    const persistentRoot = this.resolveKnownPersistentSessionId(state.rootSessionId)
+    const parentSessionId = explicitParent
+      || (!rawParent && persistentRoot && persistentRoot !== persistentSessionId ? persistentRoot : null)
+    const lineageRootSessionId = persistentRoot || state.rootSessionId
+    const lineage = {
+      logicalConversationId: state.logicalConversationId,
+      rootSessionId: lineageRootSessionId,
+    }
+    const wrote = recordExplicitBridgeConversationLineage({
+      webSessionId,
+      persistentSessionId,
+      parentSessionId,
+      lineage,
+    })
+    if (wrote && parentSessionId) {
+      writeBridgeContinuationLinkIfValid(persistentSessionId, parentSessionId)
+    } else if (persistentSessionId && rawParent && rawParent !== persistentSessionId) {
+      writeBridgeContinuationLinkIfValid(persistentSessionId, rawParent)
+    }
+    return wrote
+  }
+
   async startRun(
     input: string,
     webSessionId: string,
@@ -656,9 +772,17 @@ export class TuiBridgeService {
       ? (options.lineageParentSessionId?.trim() || previousKnownPersistentSessionId || undefined)
       : undefined
     const hintedLineage = hintSeedForSession(webSessionId, options)
-    const initialLineage = hintedLineage || (bridgeSession.created
-      ? continuationSeedForSession(webSessionId, options.lineageParentSessionId, previousPersistentSessionId, persistentSessionId)
-      : continuationSeedForSession(webSessionId, options.lineageParentSessionId, persistentSessionId, webSessionId))
+    const initialLineage = bridgeSession.created
+      ? this.lineageForOptions(webSessionId, options, previousPersistentSessionId, persistentSessionId)
+      : this.lineageForOptions(webSessionId, options, persistentSessionId, webSessionId)
+    this.updateLineageReconciliation(webSessionId, {
+      bridgeSessionId,
+      persistentSessionId: persistentSessionId || null,
+      lineageParentSessionId: options.lineageParentSessionId || previousPersistentSessionId || null,
+      lineageRootSessionId: options.lineageRootSessionId || null,
+      lineage: initialLineage,
+    })
+    this.reconcileBridgeConversationLineage(webSessionId, 'start-run')
     logBridgeControl('lineage:start-run', {
       webSessionId,
       bridgeSessionId,
@@ -746,6 +870,14 @@ export class TuiBridgeService {
       state.bridgeSessionId = bridgeSessionId
       state.contextInputTokens = countTokens(this.buildPrompt(input, conversationHistory))
       this.activeRunsByBridgeSession.set(bridgeSessionId, runId)
+      this.updateLineageReconciliation(webSessionId, {
+        bridgeSessionId,
+        persistentSessionId: persistentSessionId || null,
+        lineageParentSessionId: options.lineageParentSessionId || previousPersistentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
+        lineage: initialLineage,
+      })
+      this.reconcileBridgeConversationLineage(webSessionId, 'recreate-after-busy')
       logBridgeControl('start-run:recreate-after-busy', {
         runId,
         webSessionId,
@@ -784,10 +916,19 @@ export class TuiBridgeService {
         persistent_session_id: persistentSessionId,
       })
       recordExplicitBridgeConversationLineage({
+        webSessionId,
         persistentSessionId,
         parentSessionId: previousPersistentSessionId,
         lineage: continuationLineage,
       })
+      this.updateLineageReconciliation(webSessionId, {
+        bridgeSessionId,
+        persistentSessionId,
+        lineageParentSessionId: previousPersistentSessionId,
+        lineageRootSessionId: options.lineageRootSessionId || null,
+        lineage: continuationLineage,
+      })
+      this.reconcileBridgeConversationLineage(webSessionId, 'context-handoff')
     }
     return {
       run_id: runId,
@@ -977,14 +1118,19 @@ export class TuiBridgeService {
   async *stream(runId: string): AsyncGenerator<BridgeRunEvent> {
     const state = this.runs.get(runId)
     if (!state) throw new Error(`Bridge run not found: ${runId}`)
+    this.reconcileBridgeConversationLineage(state.webSessionId, 'stream-attach')
     let index = 0
-    while (true) {
-      while (index < state.events.length) {
-        yield state.events[index++]
+    try {
+      while (true) {
+        while (index < state.events.length) {
+          yield state.events[index++]
+        }
+        if (state.closed) return
+        const event = await new Promise<BridgeRunEvent | null>(resolve => state.waiters.push(resolve))
+        if (event === null) return
       }
-      if (state.closed) return
-      const event = await new Promise<BridgeRunEvent | null>(resolve => state.waiters.push(resolve))
-      if (event === null) return
+    } finally {
+      this.reconcileBridgeConversationLineage(state.webSessionId, 'stream-disconnect')
     }
   }
 
@@ -1014,9 +1160,11 @@ export class TuiBridgeService {
     this.webSessionsByBridgeSession.set(bridgeSessionId, webSessionId)
     if (persistentSessionId) {
       this.rememberPersistentSessionId(webSessionId, persistentSessionId)
-      const createdLineage = hintedLineage || (options.lineageParentSessionId
-        ? continuationSeedForSession(webSessionId, options.lineageParentSessionId, persistentSessionId)
-        : explicitRootSeedForSession(webSessionId))
+      const createdLineage = this.lineageForOptions(webSessionId, options, persistentSessionId)
+      const rawCreatedParentSessionId = options.lineageParentSessionId?.trim()
+      const createdParentSessionId = rawCreatedParentSessionId
+        ? (rawCreatedParentSessionId === persistentSessionId ? null : rawCreatedParentSessionId)
+        : (createdLineage.rootSessionId !== persistentSessionId ? createdLineage.rootSessionId : null)
       logBridgeControl('lineage:create-bridge-session', {
         webSessionId,
         bridgeSessionId,
@@ -1031,21 +1179,21 @@ export class TuiBridgeService {
         logical_conversation_id: createdLineage.logicalConversationId,
         source: 'tui',
         authority: 'explicit',
-        relation_kind: persistentSessionId === createdLineage.rootSessionId ? 'root' : 'continuation',
-        parent_session_id: persistentSessionId === createdLineage.rootSessionId ? null : createdLineage.rootSessionId,
+        relation_kind: createdParentSessionId ? 'continuation' : 'root',
+        parent_session_id: createdParentSessionId,
         root_session_id: createdLineage.rootSessionId,
         web_session_id: webSessionId,
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
-      recordExplicitBridgeConversationLineage({
+      this.updateLineageReconciliation(webSessionId, {
+        bridgeSessionId,
         persistentSessionId,
-        parentSessionId: options.lineageParentSessionId,
+        lineageParentSessionId: options.lineageParentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
         lineage: createdLineage,
       })
-      if (persistentSessionId !== createdLineage.rootSessionId) {
-        writeBridgeContinuationLinkIfValid(persistentSessionId, createdLineage.rootSessionId)
-      }
+      this.reconcileBridgeConversationLineage(webSessionId, 'create-bridge-session')
     } else {
       this.schedulePersistentSessionResolution(webSessionId, before, options)
     }
@@ -1077,9 +1225,8 @@ export class TuiBridgeService {
         persistentSessionId,
         webSessionId,
       )
-      const resumedParentSessionId = persistentSessionId === resumedLineage.rootSessionId
-        ? null
-        : resumedLineage.rootSessionId
+      const resumedParentSessionId = this.resolveKnownPersistentSessionId(options.lineageParentSessionId)
+        || (resumedLineage.rootSessionId !== persistentSessionId ? resumedLineage.rootSessionId : null)
       logBridgeControl('lineage:resume-bridge-session', {
         webSessionId,
         bridgeSessionId,
@@ -1102,14 +1249,14 @@ export class TuiBridgeService {
         bridge_session_id: bridgeSessionId,
         persistent_session_id: persistentSessionId,
       })
-      recordExplicitBridgeConversationLineage({
+      this.updateLineageReconciliation(webSessionId, {
+        bridgeSessionId,
         persistentSessionId,
-        parentSessionId: resumedParentSessionId,
+        lineageParentSessionId: options.lineageParentSessionId || null,
+        lineageRootSessionId: options.lineageRootSessionId || null,
         lineage: resumedLineage,
       })
-      if (resumedParentSessionId) {
-        writeBridgeContinuationLinkIfValid(persistentSessionId, resumedParentSessionId)
-      }
+      this.reconcileBridgeConversationLineage(webSessionId, 'resume-bridge-session')
       logBridgeControl('session:resume', {
         webSessionId,
         bridgeSessionId,
@@ -1173,10 +1320,11 @@ export class TuiBridgeService {
           lineageRootSessionId: pending.lineageRootSessionId,
         }
         const hintedLineage = hintSeedForSession(webSessionId, resolvedOptions)
-        const resolvedLineage = hintedLineage || (pending.lineageParentSessionId
-          ? continuationSeedForSession(webSessionId, pending.lineageParentSessionId, found.id)
-          : explicitRootSeedForSession(webSessionId))
-        const parentSessionId = found.id === resolvedLineage.rootSessionId ? null : resolvedLineage.rootSessionId
+        const resolvedLineage = this.lineageForOptions(webSessionId, resolvedOptions, found.id)
+        const rawResolvedParentSessionId = pending.lineageParentSessionId?.trim()
+        const parentSessionId = rawResolvedParentSessionId
+          ? (rawResolvedParentSessionId === found.id ? null : rawResolvedParentSessionId)
+          : (resolvedLineage.rootSessionId !== found.id ? resolvedLineage.rootSessionId : null)
         upsertSessionLineage({
           session_id: found.id,
           logical_conversation_id: resolvedLineage.logicalConversationId,
@@ -1189,14 +1337,14 @@ export class TuiBridgeService {
           bridge_session_id: this.bridgeSessionsByWebSession.get(webSessionId) || null,
           persistent_session_id: found.id,
         })
-        recordExplicitBridgeConversationLineage({
+        this.updateLineageReconciliation(webSessionId, {
+          bridgeSessionId: this.bridgeSessionsByWebSession.get(webSessionId) || null,
           persistentSessionId: found.id,
-          parentSessionId,
+          lineageParentSessionId: pending.lineageParentSessionId || null,
+          lineageRootSessionId: pending.lineageRootSessionId || null,
           lineage: resolvedLineage,
         })
-        if (parentSessionId) {
-          writeBridgeContinuationLinkIfValid(found.id, parentSessionId)
-        }
+        this.reconcileBridgeConversationLineage(webSessionId, 'persistent-resolved')
         this.publishPersistentSessionResolution(webSessionId, found.id)
         logBridgeControl('session:resolved', {
           webSessionId,
@@ -1538,6 +1686,7 @@ export class TuiBridgeService {
       }
       const completedEvent = this.completedEventWithUsage(current, event)
       this.persistCompletedUsage(current, completedEvent)
+      this.reconcileBridgeConversationLineage(current.webSessionId, 'run-completion')
       this.push(runId, completedEvent)
       this.closeRun(runId)
     }, COMPLETE_GRACE_MS)
@@ -1574,6 +1723,7 @@ export class TuiBridgeService {
   private closeRun(runId: string) {
     const state = this.runs.get(runId)
     if (!state || state.closed) return
+    this.reconcileBridgeConversationLineage(state.webSessionId, 'run-close')
     state.closed = true
     this.clearIdleTimer(state)
     this.clearCompleteTimer(state)

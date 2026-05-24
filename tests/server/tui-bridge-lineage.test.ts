@@ -154,6 +154,84 @@ describe('TuiBridgeService explicit conversation lineage', () => {
     vi.useRealTimers()
   })
 
+  it('reconciles delayed persistent lineage on stream attach and disconnect without duplicate edges', async () => {
+    vi.useFakeTimers()
+    const client = new LineageGatewayClient()
+    client.createPersistentIds = [null]
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+    vi.spyOn(bridge as any, 'waitForNewPersistentSessionId').mockResolvedValueOnce(undefined)
+
+    const result = await bridge.startRun('follow up', 'web-root', [], {
+      lineageRootSessionId: '20260522_110000_bbbbbb',
+      lineageParentSessionId: '20260522_110000_bbbbbb',
+    })
+    const stream = bridge.stream(result.run_id)
+    await stream.next()
+
+    client.persistentSessions.push({
+      id: '20260522_120000_aaaaaa',
+      source: 'tui',
+      started_at: Date.now() / 1000,
+    })
+    await vi.advanceTimersByTimeAsync(600)
+    await stream.return?.(undefined)
+    ;(bridge as any).reconcileBridgeConversationLineage('web-root', 'duplicate-attach')
+
+    expect(edges('20260522_110000_bbbbbb')).toEqual([
+      expect.objectContaining({
+        child_session_id: '20260522_120000_aaaaaa',
+        parent_session_id: '20260522_110000_bbbbbb',
+        edge_type: 'continues',
+      }),
+    ])
+
+    ;(bridge as any).closeRun(result.run_id)
+    vi.useRealTimers()
+  })
+
+  it('reconciles persistent explicit lineage at completion when the first write only had a temp web id', async () => {
+    vi.useFakeTimers()
+    const client = new LineageGatewayClient()
+    client.createPersistentIds = [null]
+    const bridge = new TuiBridgeService(client as any)
+    vi.spyOn(bridge, 'isEnabled').mockReturnValue(true)
+    vi.spyOn(bridge as any, 'waitForNewPersistentSessionId').mockResolvedValueOnce(undefined)
+
+    const result = await bridge.startRun('follow up', 'web-root', [], {
+      lineageRootSessionId: '20260522_110000_bbbbbb',
+      lineageParentSessionId: '20260522_110000_bbbbbb',
+    })
+    expect(edges('20260522_110000_bbbbbb')).toEqual([])
+
+    ;(bridge as any).rememberPersistentSessionId('web-root', '20260522_120000_aaaaaa')
+    ;(bridge as any).updateLineageReconciliation('web-root', {
+      bridgeSessionId: result.bridge_session_id,
+      persistentSessionId: '20260522_120000_aaaaaa',
+      lineageParentSessionId: '20260522_110000_bbbbbb',
+      lineageRootSessionId: '20260522_110000_bbbbbb',
+      lineage: {
+        logicalConversationId: '20260522_110000_bbbbbb',
+        rootSessionId: '20260522_110000_bbbbbb',
+      },
+    })
+    client.emit('event', {
+      session_id: result.bridge_session_id,
+      type: 'message.complete',
+      payload: { content: 'done' },
+    })
+    await vi.advanceTimersByTimeAsync(1600)
+
+    expect(edges('20260522_110000_bbbbbb')).toEqual([
+      expect.objectContaining({
+        child_session_id: '20260522_120000_aaaaaa',
+        parent_session_id: '20260522_110000_bbbbbb',
+        edge_type: 'continues',
+      }),
+    ])
+    vi.useRealTimers()
+  })
+
   it('skips bad parents and records only a root edge for the persistent child', async () => {
     const client = new LineageGatewayClient()
     client.createPersistentIds = ['20260522_120000_aaaaaa']

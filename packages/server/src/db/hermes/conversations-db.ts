@@ -1,3 +1,5 @@
+import { existsSync, statSync } from 'fs'
+import { join } from 'path'
 import { getActiveProfileDir, getActiveProfileName } from '../../services/hermes/hermes-profile'
 import { readBridgeContinuationLinks } from '../../services/hermes/bridge-continuation-links'
 import {
@@ -20,7 +22,7 @@ import type {
 } from '../../services/hermes/conversations'
 import { logger } from '../../services/logger'
 import { listLiveTuiSessionKeys } from '../../services/hermes/tui-live'
-import { getDb } from '../index'
+import { getDb, getStoragePath } from '../index'
 import { normalizeSessionTitleCandidate, selectSessionTitle } from './title-helpers'
 
 const SQLITE_AVAILABLE = (() => {
@@ -146,6 +148,7 @@ type CanonicalFactsCacheKey = {
   profile: string
   source?: string
   includeTool: boolean
+  lineageFingerprint: string
 }
 
 type CanonicalFactsCacheEntry = {
@@ -199,7 +202,57 @@ function canonicalFactsCacheKeyValue(key: CanonicalFactsCacheKey): string {
     profile: key.profile,
     source: normalizeCanonicalSource(key.source),
     includeTool: key.includeTool,
+    lineageFingerprint: key.lineageFingerprint,
   })
+}
+
+function fileMtimeFingerprint(path: string): string {
+  try {
+    if (!existsSync(path)) return 'missing'
+    const stat = statSync(path)
+    return `${stat.mtimeMs}:${stat.size}`
+  } catch {
+    return 'unavailable'
+  }
+}
+
+function sqliteTableRowFingerprint(path: string, tableName: string): string {
+  try {
+    if (!existsSync(path)) return 'none'
+    const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
+    const db = new DatabaseSync(path, { open: true, readOnly: true })
+    try {
+      const table = db.prepare(`
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = ?
+        LIMIT 1
+      `).get(tableName)
+      if (!table) return 'none'
+      const countRow = db.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get() as { count?: number } | undefined
+      if (!Number(countRow?.count || 0)) return 'none'
+      return fileMtimeFingerprint(path)
+    } finally {
+      db.close()
+    }
+  } catch {
+    return existsSync(path) ? fileMtimeFingerprint(path) : 'none'
+  }
+}
+
+function currentLineageFactsFingerprint(): string {
+  const profileDir = getActiveProfileDir()
+  const webuiDbPath = getStoragePath()
+  const webuiFingerprint = [
+    sqliteTableRowFingerprint(webuiDbPath, 'conversation_threads'),
+    sqliteTableRowFingerprint(webuiDbPath, 'conversation_session_edges'),
+    sqliteTableRowFingerprint(webuiDbPath, 'conversation_ui_events'),
+    sqliteTableRowFingerprint(webuiDbPath, 'session_lineage'),
+  ].join(',')
+  const bridgeDbPath = join(profileDir, 'webui-bridge-links.db')
+  const bridgeFingerprint = sqliteTableRowFingerprint(bridgeDbPath, 'bridge_continuation_links')
+  return `webui:${webuiFingerprint}|bridge:${bridgeFingerprint}`
 }
 
 function currentCanonicalFactsCacheKey(source: string | undefined, includeTool: boolean): CanonicalFactsCacheKey {
@@ -208,6 +261,7 @@ function currentCanonicalFactsCacheKey(source: string | undefined, includeTool: 
     profile: getActiveProfileName(),
     source,
     includeTool,
+    lineageFingerprint: currentLineageFactsFingerprint(),
   }
 }
 
@@ -219,6 +273,7 @@ function equivalentCanonicalFactsKey(
     && candidate.profile === requested.profile
     && normalizeCanonicalSource(candidate.source) === normalizeCanonicalSource(requested.source)
     && (candidate.includeTool === requested.includeTool || (candidate.includeTool && !requested.includeTool))
+    && candidate.lineageFingerprint === requested.lineageFingerprint
 }
 
 function findReusableCanonicalFactsCacheEntry(
@@ -1519,7 +1574,18 @@ function buildParentEvidenceMap(sessions: ConversationSessionRow[], protectedFal
       }
       windowCandidates.push(candidate)
     }
-    const parent = findInferredBridgeContextParent(session, windowCandidates)
+    let parent = findInferredBridgeContextParent(session, windowCandidates)
+    if (!parent) {
+      const windowCandidateIds = new Set(windowCandidates.map(candidate => candidate.id))
+      const anchoredCandidates = sortedCandidates
+        .filter(candidate => candidate.id !== session.id)
+        .filter(candidate => !windowCandidateIds.has(candidate.id))
+        .filter(candidate => candidate.source === session.source)
+        .filter(candidate => candidate.source !== 'tool')
+        .filter(candidate => Number(candidate.started_at || 0) <= sessionStarted)
+        .filter(candidate => contextReferencesParent(candidate, session))
+      parent = findInferredBridgeContextParent(session, anchoredCandidates)
+    }
     if (parent && !protectedFallbackParentIds.has(parent.id)) map.set(session.id, { parentId: parent.id, kind: 'fallback_inference' })
   }
   applySessionLineageParentEvidence(map, sessions, sessionLineage)
@@ -2901,7 +2967,8 @@ function mergeExplicitLineageFacts(...factsList: ExplicitLineageFacts[]): Explic
 function loadExplicitLineageFacts(
   hermesDb: { prepare: (sql: string) => { all: (...params: any[]) => Array<Record<string, unknown>> } },
 ): ExplicitLineageFacts {
-  const webuiDb = getDb()
+  const webuiStoreExists = existsSync(getStoragePath())
+  const webuiDb = webuiStoreExists ? getDb() : null
   const webuiFacts = webuiDb && webuiDb !== hermesDb
     ? listExplicitLineageFactsFromDb(webuiDb)
     : { threads: [], edges: [], sessionLineage: [] }
@@ -2909,7 +2976,7 @@ function loadExplicitLineageFacts(
     listExplicitLineageFactsFromDb(hermesDb),
     {
       ...webuiFacts,
-      sessionLineage: listSessionLineage(),
+      sessionLineage: webuiStoreExists ? listSessionLineage() : [],
     },
   )
 }
@@ -3212,6 +3279,7 @@ function explicitDetailForGraph(
     thread_session_count: graph.mainline.length,
     branch_session_count: countBranches(branches),
     branches,
+    represented_session_ids: representedSessionIds(graph.mainline),
     continuation_edges: graph.continuationEdges,
   }
 }
@@ -3746,6 +3814,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
         messages: [],
         visible_count: 0,
         thread_session_count: chain.length,
+        represented_session_ids: representedSessionIds(chain),
       }
       if (humanOnly) {
         detail.branch_session_count = countBranches(branches)
@@ -3760,6 +3829,7 @@ export async function getConversationDetailFromDb(sessionId: string, options: Co
       messages,
       visible_count: messages.length,
       thread_session_count: chain.length,
+      represented_session_ids: representedSessionIds(chain),
     }
     if (humanOnly) {
       detail.branch_session_count = countBranches(branches)

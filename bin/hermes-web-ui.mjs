@@ -15,6 +15,9 @@ const VERSION = pkg.version
 const WEB_UI_HOME = process.env.HERMES_WEB_UI_HOME?.trim()
   ? resolve(process.env.HERMES_WEB_UI_HOME.trim())
   : resolve(homedir(), '.hermes-web-ui')
+const SERVER_CWD = process.env.HERMES_WEB_UI_WORKING_DIR?.trim()
+  ? resolve(process.env.HERMES_WEB_UI_WORKING_DIR.trim())
+  : homedir()
 const PID_DIR = WEB_UI_HOME
 const PID_FILE = join(PID_DIR, 'server.pid')
 const LOG_FILE = join(PID_DIR, 'server.log')
@@ -113,6 +116,16 @@ function spawnCli(command, args, options) {
   }
 
   return spawn(command, args, options)
+}
+
+function getServerEnv(port, overrides = {}) {
+  return {
+    ...process.env,
+    NODE_ENV: 'production',
+    HERMES_WEB_UI_HOME: WEB_UI_HOME,
+    PORT: String(port),
+    ...overrides,
+  }
 }
 
 function getPortFromArgs() {
@@ -344,7 +357,7 @@ function startDaemon(port) {
 
   const logStream = openSync(LOG_FILE, 'a')
   const windowsShell = process.platform === 'win32' ? getWindowsShell() : null
-  const serverEnv = { ...process.env, NODE_ENV: 'production', PORT: String(port), AUTH_TOKEN: token }
+  const serverEnv = getServerEnv(port, { AUTH_TOKEN: token })
   if (windowsShell) {
     serverEnv.SHELL = serverEnv.SHELL?.trim() || windowsShell
     serverEnv.ComSpec = serverEnv.ComSpec?.trim() || windowsShell
@@ -352,6 +365,7 @@ function startDaemon(port) {
   const child = spawn(process.execPath, [serverEntry], {
     detached: true,
     stdio: ['ignore', logStream, logStream],
+    cwd: SERVER_CWD,
     env: serverEnv,
     windowsHide: true,
   })
@@ -519,17 +533,14 @@ Options:
       ensureNativeModules()
       const port = !isNaN(command) ? parseInt(command) : DEFAULT_PORT
       const windowsShell = process.platform === 'win32' ? getWindowsShell() : null
-      const serverEnv = {
-        ...process.env,
-        NODE_ENV: 'production',
-        PORT: String(port),
-      }
+      const serverEnv = getServerEnv(port)
       if (windowsShell) {
         serverEnv.SHELL = serverEnv.SHELL?.trim() || windowsShell
         serverEnv.ComSpec = serverEnv.ComSpec?.trim() || windowsShell
       }
       const child = spawn(process.execPath, [serverEntry], {
         stdio: 'inherit',
+        cwd: SERVER_CWD,
         env: serverEnv,
         windowsHide: true,
       })

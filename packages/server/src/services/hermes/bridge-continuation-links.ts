@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getActiveProfileDir } from './hermes-profile'
 import { invalidateCanonicalConversationFactsCache } from '../../db/hermes/canonical-facts-cache-invalidation'
@@ -24,6 +24,7 @@ function openDb(): DatabaseSync {
 }
 
 export function readBridgeContinuationLinks(): Record<string, string> {
+  if (!existsSync(dbPath())) return {}
   const db = openDb()
   try {
     const rows = db.prepare(`SELECT child_session_id, parent_session_id FROM ${TABLE}`).all() as Array<Record<string, unknown>>
@@ -43,6 +44,7 @@ export function readBridgeContinuationLinks(): Record<string, string> {
 export function readBridgeContinuationParent(sessionId: string): string | null {
   const child = sessionId.trim()
   if (!child) return null
+  if (!existsSync(dbPath())) return null
   const db = openDb()
   try {
     const row = db.prepare(`SELECT parent_session_id FROM ${TABLE} WHERE child_session_id = ?`).get(child) as { parent_session_id?: string } | undefined

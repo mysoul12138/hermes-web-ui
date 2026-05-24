@@ -583,6 +583,44 @@ describe('conversation DB service', () => {
     })
   })
 
+  it('rebuilds canonical facts when the bridge links DB changes even if no invalidator ran', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+    seedSimpleConversation(db, 'tui', 'bridge-root')
+    seedSimpleConversation(db, 'cli', 'bridge-child')
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    mod.clearCanonicalConversationFactsCache()
+    mod.resetCanonicalConversationFactsCacheStats()
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+
+    const linksDb = new DatabaseSync(join(profileDirState.value, 'webui-bridge-links.db'))
+    try {
+      linksDb.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_continuation_links (
+        child_session_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL
+      )
+    `)
+      linksDb.prepare(`
+      INSERT INTO bridge_continuation_links (child_session_id, parent_session_id)
+      VALUES (?, ?)
+    `).run('bridge-child', 'bridge-root')
+    } finally {
+      linksDb.close()
+    }
+
+    await mod.listConversationSummariesFromDb({ source: 'tui', humanOnly: true })
+    expect(mod.getCanonicalConversationFactsCacheStats()).toMatchObject({
+      builds: 2,
+      hits: 0,
+      misses: 2,
+    })
+  })
+
   it('folds parentless bridge context continuations back into the root conversation', async () => {
     ensureSqliteAvailable()
     const { DatabaseSync } = await import('node:sqlite')
@@ -2134,6 +2172,7 @@ describe('conversation DB service', () => {
       messages: [],
       visible_count: 0,
       thread_session_count: 1,
+      represented_session_ids: ['assistant-empty'],
     })
   })
 
@@ -2350,6 +2389,82 @@ describe('conversation DB service', () => {
       '浏览器引用号刷新了，我先重新抓页面状态，再继续自己登录。',
       '继续',
       '继续后续排查。',
+    ])
+  })
+
+  it('folds delayed root-level continuation prompts when previous-context anchors identify the parent', async () => {
+    ensureSqliteAvailable()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(profileDirState.value, 'state.db'))
+    createSchema(db)
+
+    insertSession(db, {
+      id: 'delayed-anchor-root',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 100,
+      ended_at: 160,
+      end_reason: 'tui_shutdown',
+      message_count: 4,
+      tool_call_count: 2,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+    insertSession(db, {
+      id: 'delayed-anchor-continuation',
+      parent_session_id: null,
+      source: 'tui',
+      model: 'openai/gpt-5.4',
+      title: null,
+      started_at: 1800,
+      ended_at: null,
+      end_reason: null,
+      message_count: 3,
+      tool_call_count: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      billing_provider: 'openai',
+      estimated_cost_usd: 0,
+      actual_cost_usd: 0,
+      cost_status: 'estimated',
+    })
+
+    insertMessage(db, { id: 1, session_id: 'delayed-anchor-root', role: 'user', content: 'humanizer  我想把安装这个skill', timestamp: 101 })
+    insertMessage(db, { id: 2, session_id: 'delayed-anchor-root', role: 'assistant', content: 'humanizer 这个 skill 已经安装好了。', timestamp: 150 })
+    insertMessage(db, {
+      id: 3,
+      session_id: 'delayed-anchor-continuation',
+      role: 'user',
+      content: 'Previous conversation context:\nuser: humanizer  我想把安装这个skill\n\nassistant: humanizer 这个 skill 已经安装好了。\n\nCurrent user message:\n先汇报进度',
+      timestamp: 1801,
+    })
+    insertMessage(db, { id: 4, session_id: 'delayed-anchor-continuation', role: 'assistant', content: '当前进度如下。', timestamp: 1802 })
+    db.close()
+
+    const mod = await import('../../packages/server/src/db/hermes/conversations-db')
+    const summaries = await mod.listConversationSummariesFromDb({ humanOnly: true })
+    expect(summaries.map((summary: any) => summary.id)).toEqual(['delayed-anchor-root'])
+    expect(summaries[0].represented_session_ids).toEqual(['delayed-anchor-root', 'delayed-anchor-continuation'])
+
+    const detail = await mod.getConversationDetailFromDb('delayed-anchor-root', { humanOnly: true })
+    expect(detail?.represented_session_ids).toEqual(['delayed-anchor-root', 'delayed-anchor-continuation'])
+    expect(detail?.messages.map((message: any) => `${message.session_id}:${message.content}`)).toEqual([
+      'delayed-anchor-root:humanizer  我想把安装这个skill',
+      'delayed-anchor-root:humanizer 这个 skill 已经安装好了。',
+      'delayed-anchor-continuation:先汇报进度',
+      'delayed-anchor-continuation:当前进度如下。',
     ])
   })
 
